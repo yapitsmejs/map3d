@@ -74,8 +74,8 @@ example files and setup guide deleted.
 **Done:** the gate is green on the skeleton (5 tests, 94.7% branch coverage).
 **Done when** the gate is green on the empty skeleton.
 
-### M1 — Request, frames and grid geometry (pure math, no data)
-`request.py`, `frames.py`, `gridGeometry.py`.
+### M1 — Request, frames and grid geometry (pure math, no data) ✅ (2026-11-20)
+`request.py`, `frames.py`, `gridGeometry.py`, `geoid.py`.
 **Done when:**
 - every §4.1 rejection is tested;
 - property tests (hypothesis) show the transforms round-trip;
@@ -83,6 +83,21 @@ example files and setup guide deleted.
   computation to ≤ 1 mm over a 5 km swath (acceptance criterion 2);
 - the ortho-CRS-plus-affine description reproduces node ENU coordinates
   exactly.
+
+**Done:** 73 tests, 99.7% branch coverage. The transforms match pyproj
+`cart`/`topocentric` to 1 µm over ±4.5 km. PROJ's ellipsoidal `ortho` equals
+ENU E/N to 4e-10 m for points on the ellipsoid. The geoid is a bilinear
+`GeoidGrid` loaded from GeoTIFF (the real EGM2008 grid arrives with packs in
+M2/M4).
+
+**Notes for M3/M6:**
+- `columnPointAtHeight` runs at about 74 s per 10⁸ nodes in pure NumPy. Solve
+  the column once (footprint), then convert every height layer with the
+  per-column linear relation `u = u0 + k·h`; it is exact to < 0.1 mm over
+  500 m, so the solver isn't needed per layer. Port the hot paths to numba in M6.
+- A raised point's geodetic position drifts from its column footprint by about
+  h·d/R (e.g. 5.5 cm at h = 100 m, d = 3.5 km). Sample sources at the column
+  point for the relevant height, not only at the footprint.
 
 ### M2 — Pack format and ingest
 `pack/manifest.py`, `pack/reader.py`, `pack/ingest.py`, plus a **synthetic

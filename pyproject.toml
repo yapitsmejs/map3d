@@ -70,6 +70,11 @@ warn_return_any = true
 no_implicit_optional = true
 show_error_codes = true
 
+# rasterio ships no type information (no stubs / py.typed).
+[[tool.mypy.overrides]]
+module = ["rasterio", "rasterio.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Strict, cheap, always on. Coverage is NOT measured here so the dev loop
