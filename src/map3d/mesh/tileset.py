@@ -85,7 +85,6 @@ class _Params:
     textureSize: int
     terrainGridSize: int
     leafTerrainError_m: float
-    withCanopy: bool
     lit: bool
     trees: TreeSet | None
 
@@ -98,7 +97,6 @@ def write3dTiles(
     textureSize: int | None = None,
     terrainGridSize: int = 129,
     leafTerrainError_m: float = 0.25,
-    withCanopy: bool = False,
     style: Style | None = None,
     withTrees: bool = True,
 ) -> Path:
@@ -114,8 +112,6 @@ def write3dTiles(
             256 satellite).
         terrainGridSize: RTIN lattice side per tile (``2^k + 1``).
         leafTerrainError_m: RTIN tolerance at the leaves.
-        withCanopy: Raise the terrain surface by the canopy (>= 2 m), the old
-            look of green mounds. Off by default: the terrain is the true ground.
         style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
             (imagery, unlit). Default: satellite when ``imageryPath`` is given,
             else conceptual.
@@ -149,7 +145,6 @@ def write3dTiles(
         textureSize=textureSize if textureSize is not None else _TEXTURE_SIZE[chosen],
         terrainGridSize=terrainGridSize,
         leafTerrainError_m=leafTerrainError_m,
-        withCanopy=withCanopy,
         lit=chosen == "conceptual",
         trees=TreeSet.fromScene(scene) if withTrees else None,
     )
@@ -228,7 +223,6 @@ def _writeTile(
         extent,
         params.terrainGridSize,
         terrainError if level < depth else params.leafTerrainError_m,
-        withCanopy=params.withCanopy,
     )
     roofs, walls = buildingParts(scene, selB, extent)
     tops, sides = deckParts(scene, selD, extent)

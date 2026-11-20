@@ -237,8 +237,8 @@ building > deck > road/rail > land cover.
     `REPLACE` refinement.
   - **Terrain:** RTIN (Martini) on a 129² lattice per tile. The tolerance is
     0.25 m at the leaves and doubles per level.
-  - **Terrain is the true ground.** Draping the canopy as a surface made
-    trees look like green mounds; that is now opt-in (`withCanopy=True`).
+  - **Terrain is the true ground.** Vegetation is never draped as a surface
+    (that made trees look like green mounds); it is drawn as trees.
   - **Trees** (`withTrees=True`, the default; `map3d.mesh.trees`): one rounded
     crown (icosphere, 80 triangles, three shades of green) on a trunk per tree,
     standing on the ground model:

@@ -102,26 +102,3 @@ def testCanopy_treesOnlyGivesZeroElsewhere(plane: SyntheticScene, tmp_path: Path
     canopy = _canopy(plane, geom, pack)
     assert _at(geom, canopy, 0.0, -250.0) == pytest.approx(8.0)
     assert _at(geom, canopy, -350.0, -350.0) == 0.0
-
-
-def testHeightAt_rasterTreesAndOpenGround(plane: SyntheticScene):
-    geom = _geometry(plane)
-    model = CanopyModel.load(Pack.open(plane.packDir), geom)
-    e = np.array([-350.0, 0.0, 0.0, 100.0])
-    n = np.array([-350.0, -250.0, -240.0, 100.0])
-    lat, lon, _ = geom.frame.columnPointAtHeight(e, n, 0.0)
-    s = geom.gridSpacing_m
-    col = (e + 0.5 * geom.nCols * s) / s  # identity axes: grid x = east, y = north
-    row = (n + 0.5 * geom.nRows * s) / s
-    np.testing.assert_allclose(model.heightAt(lat, lon, col, row), [15.0, 8.0, 0.0, 0.0], atol=1e-6)
-
-
-def testHeightAt_noSourcesIsZero(plane: SyntheticScene, tmp_path: Path):
-    pack = tmp_path / "x.pack"
-    shutil.copytree(plane.packDir, pack)
-    manifest = Manifest.load(pack)
-    del manifest.sources["syntheticCanopy"], manifest.sources["syntheticTrees"]
-    manifest.save(pack)
-    model = CanopyModel.load(Pack.open(pack), _geometry(plane))
-    out = model.heightAt(np.array([1.3]), np.array([103.8]), np.array([5.0]), np.array([5.0]))
-    np.testing.assert_array_equal(out, [0.0])

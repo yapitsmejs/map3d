@@ -92,25 +92,6 @@ def _uris(tile: dict) -> list[str]:
     return out
 
 
-def testTileset_canopySurfaceIsOptIn(scene: Scene, tmp_path: Path):
-    def maxUp(path: Path) -> float:
-        tileset = json.loads(path.read_text(encoding="utf-8"))
-        top = -np.inf
-        for uri in _uris(tileset["root"]):
-            gltf = pygltflib.GLTF2().load_binary(str(path.parent / uri))
-            for prim in gltf.meshes[0].primitives:
-                top = max(top, gltf.accessors[prim.attributes.POSITION].max[1])
-        return top
-
-    # The canopy-raised surface ("green mounds") is opt-in; the default is the bare ground.
-    mounds = ts.write3dTiles(
-        scene, tmp_path / "a", leafSize_m=512.0, terrainGridSize=33, withCanopy=True
-    )
-    bare = ts.write3dTiles(scene, tmp_path / "b", leafSize_m=512.0, terrainGridSize=33)
-    assert validateTileset(mounds) == [] and validateTileset(bare) == []
-    assert maxUp(mounds) >= maxUp(bare)
-
-
 def _firstGlb(path: Path) -> pygltflib.GLTF2:
     tileset = json.loads(path.read_text(encoding="utf-8"))
     return pygltflib.GLTF2().load_binary(str(path.parent / _uris(tileset["root"])[0]))

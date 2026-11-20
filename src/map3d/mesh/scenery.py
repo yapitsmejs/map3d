@@ -40,6 +40,7 @@ from map3d.layers.landCover import (
 )
 from map3d.mesh.gltf import MeshPart
 from map3d.mesh.martini import checkGridSize, rtinErrors, rtinMesh
+from map3d.mesh.trees import MIN_TREE_HEIGHT_m
 from map3d.pack.reader import Pack, RasterWindow, readRasterWindow
 
 if TYPE_CHECKING:
@@ -48,7 +49,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CONCEPT_COLORS",
     "DECK_COLOR",
-    "MIN_MESH_CANOPY_m",
     "WALL_COLOR",
     "ImagerySource",
     "TileExtent",
@@ -63,7 +63,6 @@ __all__ = [
 FloatArray = npt.NDArray[np.float64]
 
 WALL_COLOR = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
-MIN_MESH_CANOPY_m = 2.0  # lower vegetation (grass, shrubs) stays flat in the mesh
 DECK_COLOR = (172, 174, 180)
 
 # Conceptual (map-like) style: flat pastel colours, shaded by the renderer.
@@ -170,20 +169,17 @@ def terrainPart(
     extent: TileExtent,
     gridSize: int = 129,
     maxError_m: float = 0.25,
-    withCanopy: bool = True,
 ) -> MeshPart:
-    """RTIN mesh of the ground (optionally plus vegetation) over a tile (textured).
+    """RTIN mesh of the ground over a tile (textured).
 
-    With ``withCanopy``, the surface is ground + canopy wherever the canopy is at
-    least :data:`MIN_MESH_CANOPY_m` tall, so tree crowns become part of the draped
-    terrain. The grid layers keep bare ground and canopy separate regardless.
+    The surface is the true ground; vegetation is drawn as individual trees
+    (:mod:`map3d.mesh.trees`).
 
     Args:
-        scene: Built scene (uses its ground and canopy models).
+        scene: Built scene (uses its ground model).
         extent: Tile extent in grid metres.
         gridSize: RTIN lattice side (``2^k + 1``).
         maxError_m: RTIN tolerance.
-        withCanopy: Raise the surface by the canopy (trees) where present.
 
     Returns:
         Upward-facing textured mesh part.
@@ -196,12 +192,6 @@ def terrainPart(
     lat, lon, _ = scene.geometry.frame.columnPointAtHeight(e, n, 0.0)
     ground = scene.models.ground
     height = np.nan_to_num(ground.orthometricAt(lat, lon), nan=0.0) + ground.undulation_m(lat, lon)
-    if withCanopy:
-        s = scene.geometry.gridSpacing_m
-        col = (gxm + 0.5 * scene.geometry.nCols * s) / s
-        row = (gym + 0.5 * scene.geometry.nRows * s) / s
-        canopy = scene.models.canopy.heightAt(lat, lon, col, row)
-        height = height + np.where(canopy >= MIN_MESH_CANOPY_m, canopy, 0.0)
     verts, tris = rtinMesh(rtinErrors(np.ascontiguousarray(height)), maxError_m)
     vx, vy = verts[:, 0], verts[:, 1]
     ve, vn = e[vy, vx], n[vy, vx]
@@ -355,7 +345,7 @@ def renderTexture(
     - **Crisp overlays** from the grid's ``landClass`` layer: roads, rail, decks
       and building roofs.
     - **Under trees:** a soft green wherever the canopy is at least
-      :data:`MIN_MESH_CANOPY_m` (except roads, rail, decks and roofs), so gaps
+      :data:`~map3d.mesh.trees.MIN_TREE_HEIGHT_m` (except roads, rail, decks and roofs), so gaps
       between crowns and distant views (no tree instances) still read as wooded.
 
     Args:
@@ -429,7 +419,7 @@ def _conceptTexture(
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
-    underTrees = (canopy >= MIN_MESH_CANOPY_m) & ~overlay  # roads under trees stay roads
+    underTrees = (canopy >= MIN_TREE_HEIGHT_m) & ~overlay  # roads under trees stay roads
     rgb[underTrees] = CONCEPT_COLORS["underTrees"]
     averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
     out: npt.NDArray[np.uint8] = np.clip(np.round(averaged), 0, 255).astype(np.uint8)

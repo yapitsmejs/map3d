@@ -195,7 +195,6 @@ class Scene:
         outDir: str | os.PathLike[str],
         imageryPath: str | os.PathLike[str] | None = None,
         withViewer: bool = True,
-        withCanopy: bool = False,
         style: Style | None = None,
     ) -> Path:
         """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
@@ -205,8 +204,6 @@ class Scene:
             imageryPath: BYO RGB GeoTIFF to drape (default: the request's
                 ``imageryPath``, else the pack's imagery in the satellite style).
             withViewer: Also install the offline viewer (``map3d view``).
-            withCanopy: Raise the terrain by the canopy (the old green-mound look).
-                Off by default: trees are drawn individually on the true ground.
             style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
                 (imagery). Default: satellite when imagery is given (here or in
                 the request), else conceptual.
@@ -218,7 +215,7 @@ class Scene:
         from map3d.viewer import installViewer
 
         drape = imageryPath if imageryPath is not None else self.request.imageryPath
-        path = write3dTiles(self, outDir, imageryPath=drape, withCanopy=withCanopy, style=style)
+        path = write3dTiles(self, outDir, imageryPath=drape, style=style)
         if withViewer:
             installViewer(outDir)
         return path
