@@ -26,7 +26,7 @@ import numpy as np
 import numpy.typing as npt
 import pygltflib
 
-__all__ = ["MeshPart", "enuToGltf", "vertexNormals", "writeGlb"]
+__all__ = ["InstancedPart", "MeshPart", "enuToGltf", "vertexNormals", "writeGlb"]
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -80,6 +80,28 @@ class MeshPart:
         )
 
 
+@dataclass(frozen=True, eq=False)
+class InstancedPart:
+    """One mesh drawn many times (``EXT_mesh_gpu_instancing``), e.g. tree crowns.
+
+    Attributes:
+        mesh: The shape in local ENU units (positions and triangles only).
+        color: sRGB colour of its lit material.
+        translations_ENU_m: Instance positions, ``(n, 3)``, scene ENU metres.
+        scales: Per-instance scale along E, N, U, ``(n, 3)``.
+    """
+
+    mesh: MeshPart
+    color: tuple[int, int, int]
+    translations_ENU_m: FloatArray
+    scales: FloatArray
+
+    @property
+    def count(self) -> int:
+        """Number of instances."""
+        return int(self.translations_ENU_m.shape[0])
+
+
 def enuToGltf(positions_ENU_m: FloatArray) -> FloatArray:
     """ENU (z-up) -> glTF (y-up): ``(E, N, U) -> (E, U, -N)``."""
     p = np.asarray(positions_ENU_m, dtype=np.float64)
@@ -119,8 +141,9 @@ def writeGlb(
     texture: bytes | None,
     colored: MeshPart | None,
     lit: bool = False,
+    instanced: Sequence[InstancedPart] = (),
 ) -> Path:
-    """Write a GLB with a textured and/or a vertex-coloured primitive.
+    """Write a GLB with a textured and/or a vertex-coloured primitive, plus instances.
 
     Args:
         path: Output path.
@@ -128,24 +151,25 @@ def writeGlb(
         texture: JPEG or PNG bytes for the textured part.
         colored: Part with vertex colours, or ``None``.
         lit: Shade the textured part (vertex normals, no ``KHR_materials_unlit``).
+        instanced: Meshes drawn once per instance, each as its own node with
+            ``EXT_mesh_gpu_instancing`` (required by the file when present).
 
     Returns:
         The written path.
 
     Raises:
-        ValueError: If both parts are empty, or the textured part lacks UVs/texture.
+        ValueError: If everything is empty, or the textured part lacks UVs/texture.
     """
     hasTextured = textured is not None and not textured.isEmpty
     hasColored = colored is not None and not colored.isEmpty
-    if not hasTextured and not hasColored:
+    instances = [p for p in instanced if p.count and not p.mesh.isEmpty]
+    if not hasTextured and not hasColored and not instances:
         raise ValueError("cannot write an empty GLB")
     if hasTextured and (textured is None or textured.uv is None or texture is None):
         raise ValueError("the textured part needs uv coordinates and a texture")
 
     blob = bytearray()
-    gltf = pygltflib.GLTF2(
-        scene=0, scenes=[pygltflib.Scene(nodes=[0])], nodes=[pygltflib.Node(mesh=0)]
-    )
+    gltf = pygltflib.GLTF2(scene=0, scenes=[pygltflib.Scene(nodes=[])])
     primitives: list[pygltflib.Primitive] = []
 
     def addView(data: bytes, target: int | None) -> int:
@@ -181,7 +205,7 @@ def writeGlb(
         gltf.accessors.append(accessor)
         return len(gltf.accessors) - 1
 
-    def addPrimitive(part: MeshPart, material: int, uv: bool, normals: bool) -> None:
+    def addPrimitive(part: MeshPart, material: int, uv: bool, normals: bool) -> pygltflib.Primitive:
         attributes = pygltflib.Attributes(
             POSITION=addAccessor(
                 enuToGltf(part.positions_ENU_m).astype(np.float32),
@@ -217,9 +241,7 @@ def writeGlb(
             pygltflib.SCALAR,
             _ELEMENT_ARRAY_BUFFER,
         )
-        primitives.append(
-            pygltflib.Primitive(attributes=attributes, indices=indices, material=material)
-        )
+        return pygltflib.Primitive(attributes=attributes, indices=indices, material=material)
 
     if hasTextured and textured is not None and texture is not None:
         image = addView(texture, None)
@@ -241,7 +263,7 @@ def writeGlb(
         )
         if not lit:
             gltf.extensionsUsed.append("KHR_materials_unlit")
-        addPrimitive(textured, len(gltf.materials) - 1, uv=True, normals=lit)
+        primitives.append(addPrimitive(textured, len(gltf.materials) - 1, uv=True, normals=lit))
     if hasColored and colored is not None:
         gltf.materials.append(
             pygltflib.Material(
@@ -251,9 +273,50 @@ def writeGlb(
                 doubleSided=True,
             )
         )
-        addPrimitive(colored, len(gltf.materials) - 1, uv=False, normals=True)
+        primitives.append(addPrimitive(colored, len(gltf.materials) - 1, uv=False, normals=True))
 
-    gltf.meshes.append(pygltflib.Mesh(primitives=primitives))
+    if primitives:
+        gltf.meshes.append(pygltflib.Mesh(primitives=primitives))
+        gltf.nodes.append(pygltflib.Node(mesh=len(gltf.meshes) - 1))
+        gltf.scenes[0].nodes.append(len(gltf.nodes) - 1)
+    for part in instances:
+        linear = (np.asarray(part.color, dtype=np.float64) / 255.0) ** 2.2  # factors are linear
+        gltf.materials.append(
+            pygltflib.Material(
+                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+                    baseColorFactor=[*(float(c) for c in linear), 1.0],
+                    metallicFactor=0.0,
+                    roughnessFactor=1.0,
+                )
+            )
+        )
+        prim = addPrimitive(part.mesh, len(gltf.materials) - 1, uv=False, normals=True)
+        gltf.meshes.append(pygltflib.Mesh(primitives=[prim]))
+        s = np.asarray(part.scales, dtype=np.float64)
+        attributes = {
+            "TRANSLATION": addAccessor(
+                enuToGltf(part.translations_ENU_m).astype(np.float32),
+                pygltflib.FLOAT,
+                pygltflib.VEC3,
+                None,
+            ),
+            "SCALE": addAccessor(
+                np.column_stack([s[:, 0], s[:, 2], s[:, 1]]).astype(np.float32),
+                pygltflib.FLOAT,
+                pygltflib.VEC3,
+                None,
+            ),
+        }
+        gltf.nodes.append(
+            pygltflib.Node(
+                mesh=len(gltf.meshes) - 1,
+                extensions={"EXT_mesh_gpu_instancing": {"attributes": attributes}},
+            )
+        )
+        gltf.scenes[0].nodes.append(len(gltf.nodes) - 1)
+    if instances:
+        gltf.extensionsUsed.append("EXT_mesh_gpu_instancing")
+        gltf.extensionsRequired.append("EXT_mesh_gpu_instancing")
     while len(blob) % 4:
         blob.append(0)
     gltf.buffers.append(pygltflib.Buffer(byteLength=len(blob)))

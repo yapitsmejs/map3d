@@ -41,11 +41,19 @@ from map3d.mesh.scenery import (
     renderTexture,
     terrainPart,
 )
+from map3d.mesh.trees import TreeSet
 
 if TYPE_CHECKING:
     from map3d.scene import Scene
 
-__all__ = ["STYLES", "Style", "minBuildingHeight_m", "quadtreeDepth", "write3dTiles"]
+__all__ = [
+    "PARENT_TREE_MIN_m",
+    "STYLES",
+    "Style",
+    "minBuildingHeight_m",
+    "quadtreeDepth",
+    "write3dTiles",
+]
 
 FloatArray = npt.NDArray[np.float64]
 Style = Literal["conceptual", "satellite"]
@@ -56,6 +64,7 @@ _TEXTURE_SIZE = {
 }  # flat colours need ~0.5 m pixels at the leaves
 
 _BASE_SKYLINE_m = 10.0
+PARENT_TREE_MIN_m = 8.0  # trees kept one level above the leaves; none higher up
 _BOX_PAD_m = 0.5
 
 
@@ -78,6 +87,7 @@ class _Params:
     leafTerrainError_m: float
     withCanopy: bool
     lit: bool
+    trees: TreeSet | None
 
 
 def write3dTiles(
@@ -88,8 +98,9 @@ def write3dTiles(
     textureSize: int | None = None,
     terrainGridSize: int = 129,
     leafTerrainError_m: float = 0.25,
-    withCanopy: bool = True,
+    withCanopy: bool = False,
     style: Style | None = None,
+    withTrees: bool = True,
 ) -> Path:
     """Write the scene as a 3D Tiles 1.1 tileset.
 
@@ -103,10 +114,14 @@ def write3dTiles(
             256 satellite).
         terrainGridSize: RTIN lattice side per tile (``2^k + 1``).
         leafTerrainError_m: RTIN tolerance at the leaves.
-        withCanopy: Include vegetation (canopy >= 2 m) in the terrain surface.
+        withCanopy: Raise the terrain surface by the canopy (>= 2 m), the old
+            look of green mounds. Off by default: the terrain is the true ground.
         style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
             (imagery, unlit). Default: satellite when ``imageryPath`` is given,
             else conceptual.
+        withTrees: Draw individual trees (crowns on trunks, instanced) from
+            the canopy sources: all in the leaves, those at least
+            :data:`PARENT_TREE_MIN_m` tall one level up. See :mod:`map3d.mesh.trees`.
 
     Returns:
         Path of ``tileset.json``.
@@ -136,6 +151,7 @@ def write3dTiles(
         leafTerrainError_m=leafTerrainError_m,
         withCanopy=withCanopy,
         lit=chosen == "conceptual",
+        trees=TreeSet.fromScene(scene) if withTrees else None,
     )
     bounds = g.footprintBounds_deg(margin_m=g.gridSpacing_m)
     imagery: ImagerySource | None = None
@@ -218,6 +234,7 @@ def _writeTile(
     tops, sides = deckParts(scene, selD, extent)
     textured = MeshPart.concatenate([terrain, roofs, tops])
     colored = MeshPart.concatenate([walls, sides])
+    selT = _treesInTile(params.trees, r, sx, sy, ix, iy, n, level, depth)
     uri = f"tiles/{level}/{ix}_{iy}.glb"
     writeGlb(
         root / uri,
@@ -225,9 +242,13 @@ def _writeTile(
         renderTexture(scene, imagery, extent, params.textureSize),
         colored,
         lit=params.lit,
+        instanced=params.trees.select(selT) if params.trees is not None else (),
     )
 
-    positions = np.concatenate([p.positions_ENU_m for p in (textured, colored) if not p.isEmpty])
+    corners = [p.positions_ENU_m for p in (textured, colored) if not p.isEmpty]
+    if params.trees is not None and selT.size:
+        corners += list(params.trees.extents(selT))
+    positions = np.concatenate(corners)
     lo, hi = positions.min(axis=0) - _BOX_PAD_m, positions.max(axis=0) + _BOX_PAD_m
     tile: dict[str, Any] = {
         "boundingVolume": {"box": _box(lo, hi)},
@@ -258,6 +279,25 @@ def _writeTile(
         tile["boundingVolume"]["box"] = _box(lo, hi)
         tile["children"] = children
     return tile
+
+
+def _treesInTile(
+    trees: TreeSet | None,
+    r: TileExtent,
+    sx: float,
+    sy: float,
+    ix: int,
+    iy: int,
+    n: int,
+    level: int,
+    depth: int,
+) -> npt.NDArray[np.int64]:
+    if trees is None or len(trees) == 0 or level < depth - 1:
+        return np.array([], dtype=np.int64)
+    inTile = _inTile(np.column_stack([trees.gx_m, trees.gy_m]), r, sx, sy, ix, iy, n)
+    if level < depth:
+        inTile &= trees.height_m >= PARENT_TREE_MIN_m
+    return np.flatnonzero(inTile)
 
 
 def _inTile(

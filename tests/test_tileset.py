@@ -92,7 +92,7 @@ def _uris(tile: dict) -> list[str]:
     return out
 
 
-def testTileset_canopyCanBeLeftOut(scene: Scene, tmp_path: Path):
+def testTileset_canopySurfaceIsOptIn(scene: Scene, tmp_path: Path):
     def maxUp(path: Path) -> float:
         tileset = json.loads(path.read_text(encoding="utf-8"))
         top = -np.inf
@@ -102,12 +102,13 @@ def testTileset_canopyCanBeLeftOut(scene: Scene, tmp_path: Path):
                 top = max(top, gltf.accessors[prim.attributes.POSITION].max[1])
         return top
 
-    withTrees = ts.write3dTiles(scene, tmp_path / "a", leafSize_m=512.0, terrainGridSize=33)
-    bare = ts.write3dTiles(
-        scene, tmp_path / "b", leafSize_m=512.0, terrainGridSize=33, withCanopy=False
+    # The canopy-raised surface ("green mounds") is opt-in; the default is the bare ground.
+    mounds = ts.write3dTiles(
+        scene, tmp_path / "a", leafSize_m=512.0, terrainGridSize=33, withCanopy=True
     )
-    assert validateTileset(withTrees) == [] and validateTileset(bare) == []
-    assert maxUp(withTrees) >= maxUp(bare)
+    bare = ts.write3dTiles(scene, tmp_path / "b", leafSize_m=512.0, terrainGridSize=33)
+    assert validateTileset(mounds) == [] and validateTileset(bare) == []
+    assert maxUp(mounds) >= maxUp(bare)
 
 
 def _firstGlb(path: Path) -> pygltflib.GLTF2:
@@ -164,3 +165,52 @@ def testTileset_styleValidation(scene: Scene, tmp_path: Path):
         ts.write3dTiles(scene, tmp_path / "b", style="satellite")  # pack has no imagery
     with pytest.raises(ValueError, match="style"):
         ts.write3dTiles(scene, tmp_path / "c", style="cartoon")  # type: ignore[arg-type]
+
+
+def _instanceCounts(path: Path) -> dict[str, int]:
+    """Crown instances per tile URI (all instanced nodes except the trunks)."""
+    from map3d.mesh.trees import TRUNK_COLOR
+
+    trunk = (np.array(TRUNK_COLOR) / 255.0) ** 2.2
+    tileset = json.loads(path.read_text(encoding="utf-8"))
+    counts: dict[str, int] = {}
+    for uri in _uris(tileset["root"]):
+        gltf = pygltflib.GLTF2().load_binary(str(path.parent / uri))
+        n = 0
+        for node in gltf.nodes:
+            ext = (node.extensions or {}).get("EXT_mesh_gpu_instancing")
+            if ext is None:
+                continue
+            mat = gltf.materials[gltf.meshes[node.mesh].primitives[0].material]
+            if np.allclose(mat.pbrMetallicRoughness.baseColorFactor[:3], trunk):
+                continue
+            n += gltf.accessors[ext["attributes"]["TRANSLATION"]].count
+        counts[uri] = n
+    return counts
+
+
+def testTileset_treesAreInstancedOnTheBareGround(written: Path, scene: Scene):
+    from map3d.mesh.trees import TreeSet
+
+    trees = TreeSet.fromScene(scene)
+    assert len(trees) >= 1  # this swath holds the mapped tree (the canopy patch is outside)
+    counts = _instanceCounts(written)
+    tileset = json.loads(written.read_text(encoding="utf-8"))
+    depth = max(int(uri.split("/")[1]) for uri in counts)
+    leaves = sum(n for uri, n in counts.items() if int(uri.split("/")[1]) == depth)
+    assert leaves == len(trees)  # every tree once in the leaves
+    parents = sum(n for uri, n in counts.items() if int(uri.split("/")[1]) == depth - 1)
+    assert parents == int((trees.height_m >= ts.PARENT_TREE_MIN_m).sum())
+    assert all(n == 0 for uri, n in counts.items() if int(uri.split("/")[1]) < depth - 1)
+    gltf = _firstGlb(written)
+    assert tileset["asset"]["extras"]["style"] == "conceptual"
+    assert validateTileset(written) == []
+    del gltf
+
+
+def testTileset_treesCanBeLeftOut(scene: Scene, tmp_path: Path):
+    bare = ts.write3dTiles(
+        scene, tmp_path / "t", leafSize_m=512.0, terrainGridSize=33, withTrees=False
+    )
+    assert sum(_instanceCounts(bare).values()) == 0
+    assert validateTileset(bare) == []

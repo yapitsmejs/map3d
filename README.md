@@ -14,7 +14,8 @@ whose rows are the grid x, y, z axes in ENU) and swath size, `map3d` produces:
   - building and canopy heights;
   - up to K stacked elevated-deck levels;
   - land class, feature IDs and per-node provenance.
-- **A 3D Tiles 1.1 mesh** for visualization: terrain with trees, LOD1
+- **A 3D Tiles 1.1 mesh** for visualization: the true ground with individual
+  trees (from canopy data), LOD1
   buildings and true 3D bridge decks, in a clean map-like style (or draped
   with satellite imagery), with a bundled offline viewer.
 

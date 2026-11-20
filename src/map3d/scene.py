@@ -195,7 +195,7 @@ class Scene:
         outDir: str | os.PathLike[str],
         imageryPath: str | os.PathLike[str] | None = None,
         withViewer: bool = True,
-        withCanopy: bool = True,
+        withCanopy: bool = False,
         style: Style | None = None,
     ) -> Path:
         """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
@@ -205,7 +205,8 @@ class Scene:
             imageryPath: BYO RGB GeoTIFF to drape (default: the request's
                 ``imageryPath``, else the pack's imagery in the satellite style).
             withViewer: Also install the offline viewer (``map3d view``).
-            withCanopy: Include vegetation (canopy >= 2 m) in the terrain surface.
+            withCanopy: Raise the terrain by the canopy (the old green-mound look).
+                Off by default: trees are drawn individually on the true ground.
             style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
                 (imagery). Default: satellite when imagery is given (here or in
                 the request), else conceptual.

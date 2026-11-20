@@ -98,3 +98,69 @@ def testCellMaxPool_ignoresNanAndAllNanGivesNan(compiled: bool):
         expected = np.nanmax(windows, axis=(-2, -1))
     np.testing.assert_array_equal(out, expected)
     assert np.isnan(out[0, 0])
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def testPackCrowns_greedyNonOverlappingAndCovering(compiled: bool):
+    fn = k.packCrowns if compiled else k.packCrowns.py_func
+    rows, cols = np.mgrid[0:12, 0:12]
+    rows, cols = rows.ravel().astype(np.int64), cols.ravel().astype(np.int64)
+    radius = np.full(rows.size, 2.5)
+    accepted = np.zeros(rows.size, dtype=np.bool_)
+    fn(rows, cols, radius, radius * 2.0, 12, 12, accepted)  # crowns twice as wide in columns
+    assert accepted[0]  # the first (highest-priority) candidate always wins
+    ar, ac = rows[accepted].astype(float), cols[accepted].astype(float)
+    # No accepted crown centre lies inside an earlier crown's ellipse ...
+    for i in range(ar.size):
+        for j in range(i):
+            assert ((ar[i] - ar[j]) / 2.5) ** 2 + ((ac[i] - ac[j]) / 5.0) ** 2 > 1.0
+    # ... and every candidate lies inside some accepted crown (the canopy is covered).
+    d = ((rows[:, None] - ar[None]) / 2.5) ** 2 + ((cols[:, None] - ac[None]) / 5.0) ** 2
+    assert (d.min(axis=1) <= 1.0).all()
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def testPackCrowns_priorityOrderDecides(compiled: bool):
+    fn = k.packCrowns if compiled else k.packCrowns.py_func
+    rows = np.array([5, 5, 5], dtype=np.int64)
+    cols = np.array([6, 5, 9], dtype=np.int64)  # the second is within the first's crown
+    accepted = np.zeros(3, dtype=np.bool_)
+    fn(rows, cols, np.full(3, 2.0), np.full(3, 2.0), 10, 12, accepted)
+    assert accepted.tolist() == [True, False, True]
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def testGrowRegions_nearestSeedThroughCanopy(compiled: bool):
+    fn = k.growRegions if compiled else k.growRegions.py_func
+    mask = np.zeros((9, 22), dtype=np.bool_)
+    mask[1:8, 1:9] = True  # canopy block A
+    mask[1:8, 11:19] = True  # canopy block B, separated by a gap
+    mask[4, 9] = True  # a one-pixel bridge from A into the gap (not reaching B)
+    labels = np.full(mask.shape, -1, dtype=np.int32)
+    seedRows = np.array([4, 4, 0], dtype=np.int64)
+    seedCols = np.array([2, 12, 21], dtype=np.int64)  # third seed is away from any canopy
+    fn(seedRows, seedCols, mask, 1.0, 1.0, 7.5, labels)
+    assert labels[4, 2] == 0 and labels[4, 12] == 1 and labels[0, 21] == 2  # seeds own their pixel
+    assert labels[4, 9] == 0  # the bridge belongs to A's seed (B is not reachable through it)
+    assert (labels[1:8, 1:9] == 0).all() and (labels[1:8, 11:19] == 1).all()
+    assert labels[0, 0] == -1 and labels[4, 10] == -1  # no canopy, no label
+    counts = np.bincount(labels[labels >= 0], minlength=3)
+    assert counts.tolist() == [57, 56, 1]
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def testGrowRegions_stopsAtReach(compiled: bool):
+    fn = k.growRegions if compiled else k.growRegions.py_func
+    mask = np.ones((1, 20), dtype=np.bool_)
+    labels = np.full(mask.shape, -1, dtype=np.int32)
+    fn(np.array([0], np.int64), np.array([0], np.int64), mask, 1.0, 1.0, 5.0, labels)
+    assert labels[0].tolist() == [0] * 6 + [-1] * 14
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def testGrowRegions_splitsBetweenSeedsByDistance(compiled: bool):
+    fn = k.growRegions if compiled else k.growRegions.py_func
+    mask = np.ones((1, 11), dtype=np.bool_)
+    labels = np.full(mask.shape, -1, dtype=np.int32)
+    fn(np.array([0, 0], np.int64), np.array([0, 10], np.int64), mask, 1.0, 2.0, 100.0, labels)
+    assert labels[0].tolist() == [0] * 5 + [labels[0, 5]] + [1] * 5

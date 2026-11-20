@@ -70,7 +70,7 @@ DECK_COLOR = (172, 174, 180)
 CONCEPT_COLORS: dict[str, tuple[int, int, int]] = {
     "grass": (205, 229, 172),
     "treeCover": (186, 219, 154),  # WorldCover trees where the canopy is under 2 m
-    "tree": (96, 164, 76),  # canopy >= MIN_MESH_CANOPY_m (raised in the mesh)
+    "underTrees": (160, 202, 128),  # ground under canopy >= 2 m (trees stand on it)
     "builtUp": (233, 230, 223),
     "bare": (232, 223, 198),
     "snow": (246, 246, 246),
@@ -354,8 +354,9 @@ def renderTexture(
       bilinearly, so its coarse pixels blend softly (grid classes if absent).
     - **Crisp overlays** from the grid's ``landClass`` layer: roads, rail, decks
       and building roofs.
-    - **Trees:** wherever the canopy is at least :data:`MIN_MESH_CANOPY_m`,
-      matching where the mesh raises the surface (not on roofs or decks).
+    - **Under trees:** a soft green wherever the canopy is at least
+      :data:`MIN_MESH_CANOPY_m` (except roads, rail, decks and roofs), so gaps
+      between crowns and distant views (no tree instances) still read as wooded.
 
     Args:
         scene: Built scene.
@@ -428,8 +429,8 @@ def _conceptTexture(
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
-    trees = (canopy >= MIN_MESH_CANOPY_m) & ~np.isin(classes, [CLASS_BUILDING, CLASS_DECK])
-    rgb[trees] = CONCEPT_COLORS["tree"]
+    underTrees = (canopy >= MIN_MESH_CANOPY_m) & ~overlay  # roads under trees stay roads
+    rgb[underTrees] = CONCEPT_COLORS["underTrees"]
     averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
     out: npt.NDArray[np.uint8] = np.clip(np.round(averaged), 0, 255).astype(np.uint8)
     return out

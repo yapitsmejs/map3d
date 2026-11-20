@@ -129,3 +129,53 @@ def testWriteGlb_unlitTexturedPartHasNoNormals(tmp_path: Path):
     assert gltf.meshes[0].primitives[0].attributes.NORMAL is None
     assert "KHR_materials_unlit" in gltf.extensionsUsed
     assert gltf.images[0].mimeType == "image/png"
+
+
+def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
+    from map3d.mesh.gltf import InstancedPart
+
+    unit = MeshPart(
+        positions_ENU_m=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
+        triangles=np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.uint32),
+    )
+    part = InstancedPart(
+        unit,
+        color=(90, 160, 70),
+        translations_ENU_m=np.array([[10.0, 20.0, 5.0], [-3.0, 4.0, 1.0]]),
+        scales=np.array([[2.0, 2.0, 3.0], [1.0, 1.0, 1.5]]),
+    )
+    path = writeGlb(tmp_path / "i.glb", _square(1.0), _PNG, None, lit=True, instanced=[part, part])
+    gltf = pygltflib.GLTF2().load_binary(str(path))
+    assert "EXT_mesh_gpu_instancing" in gltf.extensionsUsed
+    assert "EXT_mesh_gpu_instancing" in gltf.extensionsRequired
+    assert len(gltf.scenes[0].nodes) == 3 and len(gltf.meshes) == 3
+    node = gltf.nodes[1]
+    ext = node.extensions["EXT_mesh_gpu_instancing"]["attributes"]
+    blob = gltf.binary_blob()
+
+    def read(index: int) -> np.ndarray:
+        acc = gltf.accessors[index]
+        view = gltf.bufferViews[acc.bufferView]
+        raw = blob[view.byteOffset : view.byteOffset + view.byteLength]
+        return np.frombuffer(raw, np.float32).reshape(acc.count, -1)
+
+    np.testing.assert_allclose(read(ext["TRANSLATION"]), [[10, 5, -20], [-3, 1, -4]])  # y-up
+    np.testing.assert_allclose(read(ext["SCALE"]), [[2, 3, 2], [1, 1.5, 1]])
+    prim = gltf.meshes[node.mesh].primitives[0]
+    assert prim.attributes.NORMAL is not None
+    mat = gltf.materials[prim.material]
+    linear = (np.array([90, 160, 70]) / 255) ** 2.2  # glTF colour factors are linear
+    np.testing.assert_allclose(mat.pbrMetallicRoughness.baseColorFactor[:3], linear, rtol=0.05)
+
+
+def testWriteGlb_onlyInstancedIsAllowed(tmp_path: Path):
+    from map3d.mesh.gltf import InstancedPart
+
+    part = InstancedPart(_square(0.0, uv=False), (1, 2, 3), np.zeros((1, 3)), np.ones((1, 3)))
+    gltf = pygltflib.GLTF2().load_binary(
+        str(writeGlb(tmp_path / "o.glb", None, None, None, instanced=[part]))
+    )
+    assert len(gltf.meshes) == 1 and gltf.nodes[0].extensions
+    empty = InstancedPart(part.mesh, part.color, np.zeros((0, 3)), np.zeros((0, 3)))
+    with pytest.raises(ValueError, match="empty"):
+        writeGlb(tmp_path / "e.glb", None, None, None, instanced=[empty])

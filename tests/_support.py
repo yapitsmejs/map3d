@@ -84,13 +84,31 @@ def validateTileset(tilesetPath) -> list[str]:
                 if raw[:4] != b"glTF" or int.from_bytes(raw[4:8], "little") != 2:
                     problems.append(f"{where}: not a GLB 2.0 file")
                 gltf = pygltflib.GLTF2().load_binary(str(glbPath))
-                for prim in gltf.meshes[0].primitives:
-                    acc = gltf.accessors[prim.attributes.POSITION]
-                    # glTF y-up (E, U, -N) -> z-up ENU (E, N, U)
-                    mn = np.array([acc.min[0], -acc.max[2], acc.min[1]])
-                    mx = np.array([acc.max[0], -acc.min[2], acc.max[1]])
-                    if (mn < lo - 1e-3).any() or (mx > hi + 1e-3).any():
-                        problems.append(f"{where}: content outside its bounding box")
+                blob = gltf.binary_blob()
+
+                def floats(index):
+                    acc = gltf.accessors[index]
+                    view = gltf.bufferViews[acc.bufferView]
+                    data = blob[view.byteOffset : view.byteOffset + view.byteLength]
+                    return np.frombuffer(data, np.float32).reshape(acc.count, -1)
+
+                for node in gltf.nodes:
+                    inst = (node.extensions or {}).get("EXT_mesh_gpu_instancing")
+                    for prim in gltf.meshes[node.mesh].primitives:
+                        acc = gltf.accessors[prim.attributes.POSITION]
+                        amin, amax = np.array(acc.min), np.array(acc.max)
+                        if inst is None:
+                            gmin, gmax = amin, amax
+                        else:  # every instance: translation + scale * local bounds
+                            t = floats(inst["attributes"]["TRANSLATION"])
+                            sc = floats(inst["attributes"]["SCALE"])
+                            corners = np.stack([t + sc * amin, t + sc * amax])
+                            gmin, gmax = corners.min(axis=(0, 1)), corners.max(axis=(0, 1))
+                        # glTF y-up (E, U, -N) -> z-up ENU (E, N, U)
+                        mn = np.array([gmin[0], -gmax[2], gmin[1]])
+                        mx = np.array([gmax[0], -gmin[2], gmax[1]])
+                        if (mn < lo - 1e-3).any() or (mx > hi + 1e-3).any():
+                            problems.append(f"{where}: content outside its bounding box")
         for k, child in enumerate(tile.get("children", [])):
             visit(child, err, (lo, hi), f"{where}/{k}")
 

@@ -212,10 +212,11 @@ building > deck > road/rail > land cover.
     - **Land cover:** WorldCover, sampled bilinearly so its 10 m cells blend
       softly. Grass is pale green, built-up land warm light grey, water blue.
     - **Crisp overlays from the grid:** grey roads, rail and decks, grey roofs,
-      and tree green wherever the canopy is ≥ 2 m (the crowns the mesh raises).
-    - **Shading:** materials are lit, with vertex normals (smooth on terrain,
-      so canopy reads as rounded crowns; flat on roofs and walls). The renderer
-      shades the shapes; walls are white.
+      and a soft green on the ground under canopy ≥ 2 m (not on roads), so gaps
+      between crowns and distant views read as wooded.
+    - **Shading:** materials are lit, with vertex normals (smooth on terrain
+      and tree crowns, flat on roofs and walls). The renderer shades the
+      shapes; walls are white.
     - **Not drawn:** road labels, lane markings, windows and roof colours (no
       open data for the last two).
   - **`satellite`:** the Sentinel-2 cloud-free composite (~10 m), or the BYO
@@ -236,11 +237,29 @@ building > deck > road/rail > land cover.
     `REPLACE` refinement.
   - **Terrain:** RTIN (Martini) on a 129² lattice per tile. The tolerance is
     0.25 m at the leaves and doubles per level.
-  - **Vegetation:** the terrain surface is ground + canopy wherever the canopy
-    is ≥ 2 m (`withCanopy=True`, the default), so tree crowns are part of the
-    draped surface. The grid layers keep bare ground and canopy separate. On the
-    Loyang 4.5 km scene this takes the mesh from 1.05M to 2.9M triangles
-    (53 → 94 MB).
+  - **Terrain is the true ground.** Draping the canopy as a surface made
+    trees look like green mounds; that is now opt-in (`withCanopy=True`).
+  - **Trees** (`withTrees=True`, the default; `map3d.mesh.trees`): one rounded
+    crown (icosphere, 80 triangles, three shades of green) on a trunk per tree,
+    standing on the ground model:
+    - **Mapped tree points** (`trees` role) first, with crown radius
+      0.3 h + 1 m (2–8 m).
+    - **Canopy raster:** lightly smoothed (2 m FWHM); treetops are pixels
+      ≥ 2 m tall that are the highest within 1.5 m. Treetops within half a
+      crown of a taller one are merged. Every canopy pixel then joins the
+      nearest treetop it is connected to through canopy (≤ 6 m away), and a
+      crown's radius is that of a disc with its region's area (1.5–6 m, at most
+      0.6 h + 1.5 m). Canopy no treetop reaches (smooth woods) is seeded again
+      at its tallest points, a crown apart (up to 4 rounds, until < 1% is
+      left). Crowns thus add up to the canopy without sprouting mini-trees on
+      crown edges.
+    - **Not on roofs or decks**, and only inside the swath.
+    - **Tiles:** written with `EXT_mesh_gpu_instancing` (one shape plus a
+      position and size per tree). All trees in the leaves; trees ≥ 8 m one
+      level up; none higher (the ground green carries distant views).
+    - **Loyang 4.5 km:** 69,000 trees (median 6.7 m tall, 3.3 m crown radius;
+      2.5 km² of crowns over 3.9 km² of canopy ≥ 2 m), found in ~4 s.
+    - The grid layers are unchanged: they keep bare ground and canopy height.
   - **Buildings:** parent tiles keep buildings ≥ 10 m × 2^(levels above the
     leaves − 1), so distant views keep the skyline.
   - **Decks:** in leaves and their parents.
@@ -249,8 +268,8 @@ building > deck > road/rail > land cover.
     tops. Conceptual: 512² PNG, overlays sampled 2× per axis and averaged
     (anti-aliased edges, ~0.55 m pixels at the leaves). Satellite: 256² JPEG.
     Walls and deck sides use RGBA vertex colours.
-  - **Loyang 4.5 km, conceptual:** 141 MB of tiles, written in ~75 s
-    (satellite: ~94 MB in ~18 s).
+  - **Loyang 4.5 km, conceptual with trees:** 95 MB of tiles, written in
+    ~80 s.
   - **Viewer camera in the URL:** `#cam=E,N,U,targetE,targetN,targetU` (scene
     ENU metres). The hash follows the camera, so views can be bookmarked or
     shared.

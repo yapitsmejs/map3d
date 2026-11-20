@@ -178,7 +178,7 @@ def _decodePng(data: bytes) -> np.ndarray:
         (0.0, 380.0, "water"),
         (100.0, -390.0, "grass"),
         (-160.0, -100.0, "roof"),
-        (-350.0, -350.0, "tree"),  # canopy patch: tall trees, drawn as trees
+        (-350.0, -350.0, "underTrees"),  # canopy patch: the ground under the crowns
         (0.0, -450.0, "road"),  # ground-level road (centre line)
         (0.0, 200.0, "deck"),  # bridge deck
     ],

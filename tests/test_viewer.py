@@ -77,3 +77,16 @@ def testVendoredViewerFiles_areNotGitIgnored():
     files = [str(p.relative_to(repo)) for p in viewer.STATIC_DIR.rglob("*") if p.is_file()]
     result = subprocess.run([git, "check-ignore", *files], cwd=repo, capture_output=True, text=True)
     assert result.stdout.strip() == "", f"git-ignored viewer files: {result.stdout}"
+
+
+def testServe_refusesAPortAlreadyInUse(tmp_path: Path):
+    # On Windows, SO_REUSEADDR would let a second server share the port and
+    # silently split requests between them (stale viewers answering).
+    (tmp_path / "tileset.json").write_text(json.dumps({"asset": {"version": "1.1"}}), "utf-8")
+    first = viewer.serve(tmp_path, port=0, openBrowser=False)
+    try:
+        with pytest.raises(OSError):
+            viewer.serve(tmp_path, port=first.server_address[1], openBrowser=False)
+    finally:
+        first.shutdown()
+        first.server_close()

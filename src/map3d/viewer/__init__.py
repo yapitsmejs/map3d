@@ -54,6 +54,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+class _Server(http.server.ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second server bind a port that is in use,
+    # and requests are then split between the two; elsewhere it only skips
+    # TIME_WAIT, which is safe.
+    allow_reuse_address = os.name != "nt"
+
+
 def serve(
     directory: str | os.PathLike[str], port: int = 8000, openBrowser: bool = True
 ) -> http.server.ThreadingHTTPServer:
@@ -69,6 +76,7 @@ def serve(
 
     Raises:
         FileNotFoundError: If the directory has no ``tileset.json``.
+        OSError: If the port is already in use.
     """
     root = Path(directory)
     if not (root / "tileset.json").is_file():
@@ -76,7 +84,7 @@ def serve(
     if not (root / "index.html").is_file():
         installViewer(root)
     handler = functools.partial(_Handler, directory=str(root))
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = _Server(("127.0.0.1", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     if openBrowser:
         webbrowser.open(f"http://127.0.0.1:{server.server_address[1]}/")

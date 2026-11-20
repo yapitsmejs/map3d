@@ -20,7 +20,7 @@ from map3d.pack.reader import Pack, RasterWindow
 if TYPE_CHECKING:
     from map3d.layers.groundFix import GroundCorrection
 
-__all__ = ["DEFAULT_GROUND_SMOOTHING_m", "GroundModel", "smoothWindow"]
+__all__ = ["DEFAULT_GROUND_SMOOTHING_m", "GroundModel", "pixelSize_m", "smoothWindow"]
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -28,6 +28,17 @@ DEFAULT_GROUND_SMOOTHING_m = 90.0  # FWHM of the ground low-pass in buildScene (
 _FWHM_PER_SIGMA = 2.0 * float(np.sqrt(2.0 * np.log(2.0)))
 _TRUNCATE_SIGMAS = 4.0
 _METERS_PER_DEG = 111_320.0
+
+
+def pixelSize_m(window: RasterWindow) -> tuple[float, float]:
+    """Approximate pixel width and height in metres (geographic: at the window centre)."""
+    t = window.transform
+    pxX, pxY = abs(t.a), abs(t.e)
+    if window.crs is not None and window.crs.is_geographic:
+        lat = t.f + t.e * window.values.shape[0] / 2.0
+        pxX *= _METERS_PER_DEG * float(np.cos(np.radians(lat)))
+        pxY *= _METERS_PER_DEG
+    return float(pxX), float(pxY)
 
 
 def smoothWindow(window: RasterWindow, fwhm_m: float) -> RasterWindow:
@@ -52,12 +63,7 @@ def smoothWindow(window: RasterWindow, fwhm_m: float) -> RasterWindow:
         raise ValueError(f"ground smoothing must be >= 0 m, got {fwhm_m}")
     if fwhm_m == 0:
         return window
-    t = window.transform
-    pxX, pxY = abs(t.a), abs(t.e)
-    if window.crs is not None and window.crs.is_geographic:
-        lat = t.f + t.e * window.values.shape[0] / 2.0
-        pxX *= _METERS_PER_DEG * np.cos(np.radians(lat))
-        pxY *= _METERS_PER_DEG
+    pxX, pxY = pixelSize_m(window)
     sigma_m = fwhm_m / _FWHM_PER_SIGMA
     valid = np.isfinite(window.values)
     num = np.where(valid, window.values, 0.0)

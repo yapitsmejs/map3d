@@ -13,7 +13,14 @@ import numpy as np
 import numpy.typing as npt
 from numba import njit
 
-__all__ = ["bilinearSample", "cellMaxPool", "interpSeparable", "nearestSample"]
+__all__ = [
+    "bilinearSample",
+    "cellMaxPool",
+    "growRegions",
+    "interpSeparable",
+    "nearestSample",
+    "packCrowns",
+]
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -101,3 +108,97 @@ def cellMaxPool(lattice: FloatArray, ss: int, out: FloatArray) -> None:
                         if v > best:
                             best = v
             out[i, j] = best if found else np.nan
+
+
+@njit(cache=True, nogil=True)
+def packCrowns(
+    rows: npt.NDArray[np.int64],
+    cols: npt.NDArray[np.int64],
+    radiusRows: FloatArray,
+    radiusCols: FloatArray,
+    nRows: int,
+    nCols: int,
+    accepted: npt.NDArray[np.bool_],
+) -> None:
+    """Greedy crown packing on a pixel lattice.
+
+    Candidates are visited in the given (priority) order. A candidate becomes
+    a tree unless its pixel is already inside an accepted crown; an accepted
+    crown then claims every pixel within its elliptical radius (in pixels per
+    axis). Accepted centres never fall inside earlier crowns, and every
+    candidate ends up inside some crown.
+    """
+    occupied = np.zeros((nRows, nCols), dtype=np.bool_)
+    for p in range(rows.size):
+        r0 = rows[p]
+        c0 = cols[p]
+        if occupied[r0, c0]:
+            accepted[p] = False
+            continue
+        accepted[p] = True
+        rr = radiusRows[p]
+        rc = radiusCols[p]
+        lo = max(0, int(math.floor(r0 - rr)))
+        hi = min(nRows - 1, int(math.ceil(r0 + rr)))
+        left = max(0, int(math.floor(c0 - rc)))
+        right = min(nCols - 1, int(math.ceil(c0 + rc)))
+        for i in range(lo, hi + 1):
+            di = (i - r0) / rr
+            for j in range(left, right + 1):
+                dj = (j - c0) / rc
+                if di * di + dj * dj <= 1.0:
+                    occupied[i, j] = True
+
+
+@njit(cache=True, nogil=True)
+def growRegions(
+    seedRows: npt.NDArray[np.int64],
+    seedCols: npt.NDArray[np.int64],
+    mask: npt.NDArray[np.bool_],
+    pixelRows_m: float,
+    pixelCols_m: float,
+    maxDist_m: float,
+    labels: npt.NDArray[np.int32],
+) -> None:
+    """Grow one region per seed through ``mask`` pixels (multi-source BFS, 8-connected).
+
+    ``labels`` (pre-filled with -1) receives each pixel's seed index. Seeds own
+    their own pixel even off the mask; a pixel joins the region that reaches it
+    first, if it lies within ``maxDist_m`` (Euclidean) of that region's seed.
+    Earlier seeds win ties.
+    """
+    nR, nC = mask.shape
+    queue = np.empty(nR * nC, dtype=np.int32)
+    head = 0
+    tail = 0
+    for s in range(seedRows.size):
+        r = seedRows[s]
+        c = seedCols[s]
+        if labels[r, c] < 0:
+            labels[r, c] = s
+            queue[tail] = r * nC + c
+            tail += 1
+    limit = maxDist_m * maxDist_m
+    while head < tail:
+        p = queue[head]
+        head += 1
+        r = p // nC
+        c = p % nC
+        s = labels[r, c]
+        sr = seedRows[s]
+        sc = seedCols[s]
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
+                rr = r + dr
+                cc = c + dc
+                if rr < 0 or cc < 0 or rr >= nR or cc >= nC:
+                    continue
+                if labels[rr, cc] >= 0 or not mask[rr, cc]:
+                    continue
+                y = (rr - sr) * pixelRows_m
+                x = (cc - sc) * pixelCols_m
+                if y * y + x * x > limit:
+                    continue
+                labels[rr, cc] = s
+                queue[tail] = rr * nC + cc
+                tail += 1
