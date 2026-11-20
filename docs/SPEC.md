@@ -211,11 +211,12 @@ building > deck > road/rail > land cover.
 | Role | Global source | SG / regional boost |
 |---|---|---|
 | Ground (bare earth) | FABDEM 30 m (Copernicus GLO-30 with buildings and forest removed; CC BY-NC-SA). Fallback: Copernicus GLO-30. | — |
-| Building footprints | Overture Maps buildings (ODbL) | data.gov.sg HDB/URA footprints where available |
-| Building heights | Google Open Buildings 2.5D (CC BY 4.0); OSM `height` / `building:levels` via Overture | data.gov.sg (e.g. HDB max floor level) |
-| Canopy height | Meta/WRI global 1 m canopy height (CC BY 4.0) | NParks tree inventory (data.gov.sg) |
+| Building footprints | Overture Maps buildings (ODbL) | HDB Existing Building footprints; URA Master Plan building outlines (lowest priority, indicative) |
+| Building heights | Google Open Buildings 2.5D (CC BY 4.0, ~4 m effective); OSM `height` / `building:levels` via Overture | HDB Property Information `max_floor_lvl` (storeys) |
+| Canopy height | Meta/WRI global 1 m canopy height (CC BY 4.0) | — (NParks TreesSG is not downloadable) |
 | Land cover | ESA WorldCover 2021 10 m; Impact Observatory 10 m annual LULC | — |
-| Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | LTA datasets (data.gov.sg) |
+| Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | URA Master Plan rail lines (`GRND_LEVEL` marks viaducts) |
+| Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
 | Imagery | Sentinel-2 cloud-free composite (~10 m) | BYO orthophoto |
 | Geoid | EGM2008 grid (PROJ-data `us_nga_egm08_25.tif`) | — |
 
@@ -227,7 +228,9 @@ source is recorded per feature and per node.
 **Deck heights:** open data rarely carries deck elevations. v1 estimates them
 heuristically (OSM `layer`/`level` × a nominal clearance, smoothed along the
 centerline and tied to ground at the approaches) unless an authoritative source
-provides them. Provenance marks these values as estimated.
+provides them. Provenance marks these values as estimated. No open source
+has deck elevations or clearances, Singapore included (see `docs/research.md`).
+LTA flyover polygons and URA aboveground rail locate decks but give no height.
 
 ## 9. Offline data packs
 
@@ -235,20 +238,27 @@ A pack is a self-contained directory, portable to air-gapped machines:
 
 ```
 sg.pack/
-  manifest.json      # bbox, sources, versions, licences, checksums, pack format version
-  raster/<source>/   # Cloud-Optimized GeoTIFFs clipped to the bbox
-  vector/<source>/   # GeoParquet clipped to the bbox
-  imagery/           # imagery COG / pyramid
-  geoid/             # EGM2008 grid
-  ATTRIBUTION.md
+  manifest.json      # bbox, sources (role, licence, attribution, access date, CRS),
+                     # per-file sha256 / size / extent, pack format version
+  raster/<sourceId>/ # GeoTIFFs (COGs from `prepare`): ground, geoid, canopy, imagery, ...
+  vector/<sourceId>/ # GeoParquet (WKB, lon/lat) in the role's canonical schema
+  ATTRIBUTION.md     # generated from the manifest
 ```
 
 - `map3d prepare --bbox <minLon> <minLat> <maxLon> <maxLat> --out sg.pack`
   runs on an internet-connected machine. It downloads, clips, reprojects as
   needed and writes the pack.
-- `map3d ingest --pack sg.pack --source <sourceId> <files…>` indexes datasets
-  obtained through a vetted transfer process into a pack, with the same layout
-  and the same validation.
+- `map3d ingest --pack sg.pack --source <sourceId> [--bbox …] [--accessed DATE] <files…>`
+  validates **pack-ready** files and copies them into a pack:
+  - GeoTIFF with a CRS for raster sources (one CRS per source);
+  - GeoParquet in the role's canonical schema for vector sources (columns
+    listed in `map3d.pack.registry.ROLES`).
+
+  Converting raw downloads into that form is done by per-source adapters,
+  shared with `prepare`. All files are validated before any is copied, and
+  `map3d info <pack> --verify` re-checks the checksums.
+- Coverage: raster sources are checked against file extents. Vector sources
+  are only checked for presence, because `prepare` clips them to the pack.
 - Scene builds never touch the network. If a source is missing from a pack,
   the build degrades with a warning; a missing ground source is an error.
 - First target packs: Singapore plus the surrounding region (Johor, Riau).

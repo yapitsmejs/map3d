@@ -118,6 +118,44 @@ class GridGeometry:
         """Ellipsoidal orthographic CRS centered on the scene center."""
         return self.frame.orthoCrs()
 
+    def footprintBounds_deg(
+        self, margin_m: float = 0.0, samplesPerEdge: int = 33
+    ) -> tuple[float, float, float, float]:
+        """Lon/lat bounding box of the swath rectangle's footprint on the ellipsoid.
+
+        The rectangle covers all cells (not just node centers), optionally grown
+        by ``margin_m`` on every side; its perimeter is sampled densely because
+        straight grid edges are slightly curved in lon/lat.
+
+        Args:
+            margin_m: Extra distance added on every side, in meters.
+            samplesPerEdge: Perimeter samples per edge.
+
+        Returns:
+            ``(minLon, minLat, maxLon, maxLat)`` in degrees.
+
+        Raises:
+            ValueError: If ``margin_m`` is negative.
+        """
+        if margin_m < 0:
+            raise ValueError(f"margin_m must be non-negative, got {margin_m}")
+        halfX_m = 0.5 * self.nCols * self.gridSpacing_m + margin_m
+        halfY_m = 0.5 * self.nRows * self.gridSpacing_m + margin_m
+        t = np.linspace(-1.0, 1.0, samplesPerEdge)
+        ones = np.ones_like(t)
+        gx_m = np.concatenate([t * halfX_m, ones * halfX_m, -t * halfX_m, -ones * halfX_m])
+        gy_m = np.concatenate([-ones * halfY_m, t * halfY_m, ones * halfY_m, -t * halfY_m])
+        axes = self.gridAxes_ENU
+        e_m = gx_m * axes[0, 0] + gy_m * axes[1, 0]
+        n_m = gx_m * axes[0, 1] + gy_m * axes[1, 1]
+        lat_deg, lon_deg, _ = self.frame.columnPointAtHeight(e_m, n_m, 0.0)
+        return (
+            float(lon_deg.min()),
+            float(lat_deg.min()),
+            float(lon_deg.max()),
+            float(lat_deg.max()),
+        )
+
     def iterChunks(self, chunkRows: int, chunkCols: int) -> Iterator[tuple[slice, slice]]:
         """Tile the grid into row-major chunks.
 

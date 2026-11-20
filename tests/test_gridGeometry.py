@@ -123,3 +123,40 @@ def testFromRequest_carriesFrameAtCenter():
     assert geom.frame.lat0_deg == 1.2834
     assert geom.frame.lon0_deg == 103.8607
     assert geom.gridSpacing_m == 0.5
+
+
+def testFootprintBounds_containAllNodeFootprints():
+    geom = _geom(axes=_heading(37.0), lx=4000.0, ly=3000.0, s=100.0)
+    minLon, minLat, maxLon, maxLat = geom.footprintBounds_deg()
+    e_m, n_m = geom.nodesEnu()
+    lat_deg, lon_deg, _ = geom.frame.columnPointAtHeight(e_m, n_m, 0.0)
+    assert minLon < lon_deg.min() and lon_deg.max() < maxLon
+    assert minLat < lat_deg.min() and lat_deg.max() < maxLat
+
+
+def testFootprintBounds_matchRotatedCornersViaOrtho():
+    geom = _geom(axes=_heading(45.0), lx=2000.0, ly=2000.0, s=100.0)
+    bounds = geom.footprintBounds_deg()
+    # 45 deg rotation: extreme E/N extents are at +-sqrt(2) * 1000 m.
+    reach_m = 1000.0 * math.sqrt(2.0)
+    toGeo = pyproj.Transformer.from_crs(geom.orthoCrs(), "EPSG:4326", always_xy=True)
+    lonW, _ = toGeo.transform(-reach_m, 0.0)
+    lonE, _ = toGeo.transform(reach_m, 0.0)
+    _, latS = toGeo.transform(0.0, -reach_m)
+    _, latN = toGeo.transform(0.0, reach_m)
+    assert bounds == pytest.approx((lonW, latS, lonE, latN), abs=1e-9)
+
+
+def testFootprintBounds_marginExpands():
+    geom = _geom(lx=1000.0, ly=1000.0, s=100.0)
+    inner = geom.footprintBounds_deg()
+    outer = geom.footprintBounds_deg(margin_m=500.0)
+    assert outer[0] < inner[0] and outer[1] < inner[1]
+    assert outer[2] > inner[2] and outer[3] > inner[3]
+    # 500 m of latitude is ~0.0045 deg.
+    assert inner[1] - outer[1] == pytest.approx(500.0 / 110_574.0, rel=0.01)
+
+
+def testFootprintBounds_rejectsNegativeMargin():
+    with pytest.raises(ValueError, match="margin"):
+        _geom().footprintBounds_deg(margin_m=-1.0)

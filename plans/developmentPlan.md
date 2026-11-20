@@ -60,8 +60,8 @@ src/map3d/
 
 | ID | Question | Feeds |
 |---|---|---|
-| S1 | How do we bulk-download **Google Open Buildings 2.5D** for a bbox without Earth Engine, and does it cover Singapore/Johor/Riau? | M4, building heights |
-| S2 | **data.gov.sg inventory**: which datasets give footprints, heights/storeys, trees, and viaduct/deck geometry or elevation, and under what licences? | M4, M5 |
+| S1 ✅ | How do we bulk-download **Google Open Buildings 2.5D** for a bbox without Earth Engine, and does it cover Singapore/Johor/Riau? → Public GCS bucket, COG-like tiles, covers all three; window-read and resample to ~4 m. See `docs/research.md`. | M4, building heights |
+| S2 ✅ | **data.gov.sg inventory**: which datasets give footprints, heights/storeys, trees, and viaduct/deck geometry or elevation, and under what licences? → HDB footprints + storeys (join gap), URA outlines, LTA flyover polygons, MP rail viaducts; no deck heights, LiDAR or tree inventory. See `docs/research.md`. | M4, M5 |
 | S3 | **Ground source**: sanity-check FABDEM (the confirmed default) over Singapore against GLO-30, which is a DSM with buildings and trees baked in. | M3 |
 | S4 | **3D Tiles writer**: py3dtiles vs a custom writer on pygltflib. Check implicit tiling, texture handling, validator compliance and speed. | M7 |
 | S5 | **Deck-height heuristic**: is OSM `layer` plus nominal clearance plausible against a few known SG flyovers? | M5 |
@@ -99,7 +99,7 @@ M2/M4).
   h·d/R (e.g. 5.5 cm at h = 100 m, d = 3.5 km). Sample sources at the column
   point for the relevant height, not only at the footprint.
 
-### M2 — Pack format and ingest
+### M2 — Pack format and ingest ✅ (2026-11-20)
 `pack/manifest.py`, `pack/reader.py`, `pack/ingest.py`, plus a **synthetic
 pack generator** for tests (analytic terrain: plane, slope, Gaussian hill;
 box buildings; a single bridge).
@@ -107,6 +107,24 @@ box buildings; a single bridge).
 - `map3d ingest` and `map3d info` work;
 - windowed reads are verified;
 - coverage checks reject scenes outside the pack.
+
+**Done:** 172 tests, 99.7% branch coverage.
+- **Modules:**
+  - `pack/registry.py`: roles, canonical vector schemas, and sources in
+    priority order, including the Singapore sources from S2.
+  - `pack/geoparquet.py`
+  - `pack/manifest.py`: per-file sha256 and extent, plus `accessedDate` for
+    Singapore Open Data Licence notices.
+  - `pack/ingest.py`: validates every file before copying any.
+  - `pack/reader.py`: grid-snapped raster mosaics, bilinear/nearest sampling
+    in any CRS, vector selection by box, coverage checks, `verify`.
+  - `pack/synthetic.py`: plane/hill terrain, 3 buildings, a bridge with a deck
+    footprint and a ground road, canopy patch, land cover, trees, constant
+    geoid.
+- **Also added:** `GridGeometry.footprintBounds_deg`, and the
+  `map3d ingest` / `map3d info [--verify]` commands.
+- **Design note:** vector coverage is checked by presence only. Feature
+  extents are not clip extents.
 
 ### M3 — Grid v0: terrain + buildings + surface, all writers
 `layers/terrain.py`, `layers/buildings.py` (with height precedence),
@@ -127,6 +145,22 @@ data.gov.sg datasets from S2.
 - a Singapore + Johor + Riau pack builds end to end;
 - the manifest records version, licence and checksum per source;
 - downloader tests use recorded fixtures (no live network in CI).
+
+**Inputs from S1/S2** (`docs/research.md`):
+- **Open Buildings 2.5D:** read from `storage.googleapis.com/open-buildings-temporal-data/v1/`
+  using the manifest `31_EPSG_32648_{year}.json`, with windowed `/vsicurl/`
+  reads resampled to ~4 m. Never download whole tiles (~6.5 GB/year for
+  Singapore alone). Use the latest year (2023).
+- **data.gov.sg:** use `poll-download` (CSV needs `initiate-download`) and
+  throttle to 2 requests per 10 s without a key; optionally accept an API key.
+- **HDB adapter:** join footprints (BLK_NO, ST_COD, postal code) to Property
+  Information (`blk_no`, street name, `max_floor_lvl`). There's no shared key,
+  so match block number plus nearest geocoded address (OneMap search). Check
+  the result against HDB3D heights.
+- **Adapters write the canonical schemas**, so `ingest` and `prepare` share
+  them:
+  - URA rail: `GRND_LEVEL == ABOVEGROUND` maps to `isBridge`.
+  - LTA flyovers map to `elevatedStructures`.
 
 ### M5 — Full layer set
 `layers/canopy.py`, `layers/landCover.py`, `layers/decks.py` (K levels, the S5
