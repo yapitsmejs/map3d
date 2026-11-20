@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,7 @@ import shapely
 from rasterio.features import rasterize
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers.groundFix import GroundCorrection
 from map3d.layers.pixels import rasterizePixels, toPixelGeometries
 from map3d.layers.provenance import HeightSource
 from map3d.layers.terrain import GroundModel
@@ -63,6 +65,7 @@ class BuildingSet:
         baseOrthometric_m: Lowest ground under the footprint (MSL).
         roofOrthometric_m: Roof height (MSL).
         pixelGeometries: Footprints in grid pixel coordinates ``(col, row)`` at roof height.
+        groundCorrection: Ground cap applied under buildings, if any.
     """
 
     geometries: npt.NDArray[np.object_]
@@ -74,6 +77,7 @@ class BuildingSet:
     baseOrthometric_m: FloatArray
     roofOrthometric_m: FloatArray
     pixelGeometries: npt.NDArray[np.object_]
+    groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
         return int(self.height_m.size)
@@ -98,13 +102,17 @@ class BuildingSet:
         }
 
 
-def loadBuildings(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> BuildingSet:
+def loadBuildings(
+    pack: Pack, geometry: GridGeometry, ground: GroundModel, correctGround: bool = True
+) -> BuildingSet:
     """Fuse, resolve and place every building that touches the scene.
 
     Args:
         pack: Opened data pack.
         geometry: Scene grid geometry.
         ground: Ground model (for base heights and the geoid).
+        correctGround: Remove building residue from the ground under footprints
+            (:mod:`map3d.layers.groundFix`) before placing bases.
 
     Returns:
         The placed buildings (possibly empty).
@@ -115,6 +123,9 @@ def loadBuildings(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> Bu
     height, code, nativeRes = _resolveHeights(
         heights, floors, authoritative, rasterHeight, rasterRes
     )
+    correction = GroundCorrection.build(geometry, ground, geoms) if correctGround else None
+    if correction is not None:
+        ground = dataclasses.replace(ground, correction=correction)
     base = _baseHeights(geoms, ground)
     roof = base + height
     centroids = shapely.centroid(geoms)
@@ -132,6 +143,7 @@ def loadBuildings(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> Bu
         baseOrthometric_m=base[keep],
         roofOrthometric_m=roof[keep],
         pixelGeometries=pixel[keep],
+        groundCorrection=correction,
     )
 
 

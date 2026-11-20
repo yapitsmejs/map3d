@@ -9,6 +9,7 @@ the end of each chunk:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import shutil
@@ -231,6 +232,7 @@ def buildScene(
     workers: int | None = None,
     workDir: str | os.PathLike[str] | None = None,
     memoryBudget_GB: float = 2.0,
+    correctGround: bool = True,
 ) -> Scene:
     """Build the scene grid for a request from an offline pack.
 
@@ -246,6 +248,9 @@ def buildScene(
         memoryBudget_GB: If the layers would exceed this and no ``workDir`` is
             given, they are memory-mapped in a temporary directory that
             :meth:`Scene.close` deletes.
+        correctGround: Remove building residue (failed building removal in
+            FABDEM) from the ground under footprints; see
+            :mod:`map3d.layers.groundFix`.
 
     Returns:
         The scene.
@@ -258,9 +263,12 @@ def buildScene(
     geometry = GridGeometry.fromRequest(request)
     warnings = opened.checkCoverage(geometry.footprintBounds_deg())
     ground = GroundModel.load(opened, geometry)
+    buildings = loadBuildings(opened, geometry, ground, correctGround=correctGround)
+    if buildings.groundCorrection is not None:
+        ground = dataclasses.replace(ground, correction=buildings.groundCorrection)
     models = _Models(
         ground=ground,
-        buildings=loadBuildings(opened, geometry, ground),
+        buildings=buildings,
         canopy=CanopyModel.load(opened, geometry),
         landCover=LandCoverModel.load(opened, geometry),
         decks=loadDecks(opened, geometry, ground),
@@ -298,6 +306,11 @@ def buildScene(
     )
     metadata = _metadata(request, geometry, ground, opened, warnings, layers)
     metadata["storage"] = "memory" if storageDir is None else "memmap"
+    metadata["groundCorrection"] = (
+        buildings.groundCorrection.summary()
+        if buildings.groundCorrection is not None
+        else {"buildingsCorrected": 0, "maxLowering_m": 0.0, "method": "disabled"}
+    )
     return Scene(
         request,
         geometry,

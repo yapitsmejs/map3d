@@ -256,6 +256,22 @@ OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` �
 storey height (default 3.0 m) → default height. The winning
 source is recorded per feature and per node.
 
+**Ground under buildings (FABDEM residue):** FABDEM's machine-learned
+building removal sometimes fails for large buildings (depots, warehouses),
+leaving a building-shaped mound in the "ground". It peaks mid-footprint and can
+be taller than the roof, which buried e.g. Loyang Bus Depot. map3d corrects
+this (`buildScene(correctGround=True)`, the default):
+
+1. Fit a robust plane to the ground on rings 20–45 m outside each footprint.
+2. If the ground inside stands clearly above that plane (90th-percentile
+   excess > 1 m), cap the ground at the plane within the footprint + 10 m.
+
+Ground is only ever lowered. The correction applies to the grid ground layer,
+building bases, deck ends and the 3D Tiles terrain. `scene.json`
+`groundCorrection` reports how many buildings were corrected and the largest
+lowering. On the Loyang 4.5 km scene that's 833 buildings (median 1.9 m, max
+21.3 m), at a build-time cost of about 7 s.
+
 **Deck heights:** no open source has deck elevations or clearances,
 Singapore included (see `docs/research.md`). LTA flyover polygons and URA
 aboveground rail locate decks but give no height, so v1 estimates them
