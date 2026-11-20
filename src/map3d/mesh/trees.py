@@ -11,14 +11,15 @@ on a short trunk per tree:
    within :data:`TREETOP_WINDOW_m` (so crown edges do not start trees of their
    own). Treetops closer than :data:`TREETOP_SPACING` of a crown are merged
    (tallest wins). Every canopy pixel then joins the nearest treetop it is
-   connected to through canopy, and each crown's radius is that of a disc with
-   its region's area (1.5-6 m, and at most 0.6 h + 1.5 m). Canopy no treetop
-   reaches within 6 m (smooth woods) is seeded again at its tallest points, a
-   crown apart. Crowns therefore add up to the canopy: a wood becomes a clump
-   of rounded crowns, a street tree a single one.
+   connected to through canopy, and each crown's radius is the geometric mean of
+   the disc with its region's area and the allometric radius for its height, so
+   crowns stay close to the canopy while scaling consistently with the tree (a
+   35 m crown-spread cap keeps them sane). Canopy no treetop reaches within
+   6 m (smooth woods) is seeded again at its tallest points, a crown radius
+   apart, scaled by each seed's height.
 3. **Placement:** trees stand on the scene's ground model (smoothed and
    residue-corrected, like everything else), inside the swath, and not on
-   buildings or decks.
+   buildings, decks, roads or rail.
 
 Crowns and trunks are written with ``EXT_mesh_gpu_instancing``: one shape per
 tile plus a position, size and yaw per tree (the yaw varies which side of the
@@ -39,7 +40,12 @@ import pyproj
 import shapely
 
 from map3d.layers import _kernels
-from map3d.layers.landCover import CLASS_BUILDING, CLASS_DECK
+from map3d.layers.landCover import (
+    CLASS_BUILDING,
+    CLASS_DECK,
+    CLASS_RAIL,
+    CLASS_ROAD,
+)
 from map3d.layers.terrain import pixelSize_m, smoothWindow
 from map3d.mesh.gltf import InstancedPart, MeshPart
 from map3d.pack.reader import RasterWindow
@@ -66,7 +72,7 @@ CROWN_COLORS: tuple[tuple[int, int, int], ...] = ((84, 150, 64), (100, 166, 76),
 TRUNK_COLOR = (122, 100, 80)
 _SMOOTH_FWHM_m = 2.0  # removes single-pixel noise in 1 m canopy rasters
 TREETOP_WINDOW_m = 1.5  # a treetop is the highest pixel within this distance
-TREETOP_SPACING = 0.5  # treetops closer than this x allometric radius are one tree
+TREETOP_SPACING = 1.0  # treetops closer than this x allometric radius are one tree
 MIN_CROWN_RADIUS_m = 1.5
 MAX_CROWN_RADIUS_m = 6.0  # also the reach of a crown region
 _FILL_ROUNDS = 4  # gap-filling rounds for canopy no treetop reaches
@@ -75,14 +81,14 @@ _RADIUS_PER_HEIGHT_MAX = 0.6  # crowns are never wider than 0.6 h + 1.5 m
 _RADIUS_AT_ZERO_HEIGHT_m = 1.5
 _CROWN_RADIUS_BASE_m = 1.0
 _CROWN_RADIUS_PER_HEIGHT = 0.3
-_CROWN_RADIUS_RANGE_m = (2.0, 8.0)
+_CROWN_RADIUS_RANGE_m = (2.0, 17.5)  # tall trees keep scaling; capped at a 35 m spread
 _MAX_VALID_m = 150.0  # uint8 canopy rasters may use 255 as a fill value
 _CROWN_DEPTH_PER_HEIGHT = 0.4  # crown half-height at most this fraction of the tree
-_CROWN_DEPTH_PER_RADIUS = 0.85  # ... and slightly flattened
-_TRUNK_RADIUS_PER_CROWN = 0.08
-_TRUNK_RADIUS_PER_HEIGHT = 0.02  # trunks grow with the tree, not just the crown
-_TRUNK_RADIUS_MAX_m = 0.7
-_CROWN_LUMPINESS = 0.12  # radial noise amplitude of the crown surface
+_CROWN_DEPTH_PER_RADIUS = 0.6  # ... and clearly wider than tall (foliage spread)
+_TRUNK_RADIUS_PER_CROWN = 0.10
+_TRUNK_RADIUS_PER_HEIGHT = 0.035  # trunks grow with the tree, not just the crown
+_TRUNK_RADIUS_MAX_m = 0.9
+_CROWN_LUMPINESS = 0.25  # radial noise amplitude of the crown surface
 _GOLDEN_ANGLE = np.pi * (3.0 - 5.0**0.5)  # per-instance yaw spread
 
 
@@ -139,7 +145,7 @@ class TreeSet:
         col = np.clip(((gx + halfW) / s).astype(np.int64), 0, g.nCols - 1)
         row = np.clip(((gy + halfH) / s).astype(np.int64), 0, g.nRows - 1)
         classes = np.asarray(scene.layers["landClass"])[row, col]
-        keep &= ~np.isin(classes, [CLASS_BUILDING, CLASS_DECK])
+        keep &= ~np.isin(classes, [CLASS_BUILDING, CLASS_DECK, CLASS_ROAD, CLASS_RAIL])
         return cls(
             lat[keep],
             lon[keep],
@@ -233,12 +239,13 @@ def _treesFromSources(scene: Scene) -> tuple[FloatArray, FloatArray, FloatArray,
 def _segmentRaster(
     window: RasterWindow, pLat: FloatArray, pLon: FloatArray, pH: FloatArray
 ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
-    """Mapped points plus raster treetops, with crowns sized from the canopy they cover.
+    """Mapped points plus raster treetops, crowns sized from canopy area and height.
 
     Treetops are deduplicated (:func:`packCrowns` with :data:`TREETOP_SPACING` of
     the allometric radius), then every canopy pixel joins the nearest seed it is
     connected to (:func:`growRegions`, within :data:`MAX_CROWN_RADIUS_m`); a
-    raster tree's crown radius is that of a disc with its region's area. Mapped
+    raster tree's crown radius blends a disc of its region's area with the
+    allometric radius for its height (geometric mean). Mapped
     points keep the allometric radius (the raster may not show them).
     """
     raw = window.values
@@ -280,7 +287,9 @@ def _segmentRaster(
             break
         free = free[np.argsort(-flat[free], kind="stable")]
         fr, fc = free // nC, free % nC
-        claim = np.full(free.size, MAX_CROWN_RADIUS_m)
+        # Seeds a crown radius apart, scaled by each seed's height: big trees
+        # are spaced further apart than small ones, so woods do not lump.
+        claim = crownRadius_m(flat[free])
         take = np.zeros(free.size, dtype=np.bool_)
         _kernels.packCrowns(fr, fc, claim / pxY, claim / pxX, nR, nC, take)
         seedRows = np.concatenate([seedRows, fr[take]])
@@ -290,8 +299,19 @@ def _segmentRaster(
         _kernels.growRegions(seedRows, seedCols, canopyMask, pxY, pxX, MAX_CROWN_RADIUS_m, labels)
     area = np.bincount(labels[labels >= 0], minlength=seedRows.size) * pxX * pxY
     widest = _RADIUS_AT_ZERO_HEIGHT_m + _RADIUS_PER_HEIGHT_MAX * seedH
-    radius = np.clip(
+    areaRadius = np.clip(
         np.minimum(np.sqrt(area / np.pi), widest), MIN_CROWN_RADIUS_m, MAX_CROWN_RADIUS_m
+    )
+    # Blend the canopy-area radius with the allometric one (geometric mean), so
+    # crowns scale consistently with tree height while still following the
+    # canopy: a tall tree never wears a tiny crown, a short one a huge one.
+    # Tall trees may exceed MAX_CROWN_RADIUS_m (which is the region-growing
+    # reach, not a draw limit); their crowns stay within 0.6 h + 1.5 m and the
+    # 35 m spread cap.
+    radius = np.clip(
+        np.sqrt(areaRadius * crownRadius_m(seedH)),
+        MIN_CROWN_RADIUS_m,
+        np.minimum(np.maximum(MAX_CROWN_RADIUS_m, widest), _CROWN_RADIUS_RANGE_m[1]),
     )
     radius[~isRaster] = crownRadius_m(seedH[~isRaster])
 
@@ -315,7 +335,8 @@ def _segmentRaster(
 
 
 def crownRadius_m(height_m: npt.ArrayLike) -> FloatArray:
-    """Drawn crown radius for a tree of a given height: ``0.3 h + 1``, within 2-8 m."""
+    """Drawn crown radius for a tree of a given height: ``0.3 h + 1``, within
+    2-17.5 m (a 35 m crown spread)."""
     h = np.asarray(height_m, dtype=np.float64)
     lo, hi = _CROWN_RADIUS_RANGE_m
     return np.clip(_CROWN_RADIUS_BASE_m + _CROWN_RADIUS_PER_HEIGHT * h, lo, hi)
@@ -419,6 +440,9 @@ def _lumpyCrown() -> MeshPart:
     for axis, freq, phase in waves:
         bump += np.sin(freq * (pos @ np.asarray(axis)) + phase)
     bump /= len(waves)
+    # Normalise so the lumps actually reach the configured amplitude (a plain
+    # average of the waves comes out three to four times shallower).
+    bump /= max(np.abs(bump).max(), 1e-9)
     lumped = pos * (1.0 + _CROWN_LUMPINESS * bump)[:, None]
     # Keep the top and bottom poles (where the trunk meets the crown) round.
     polar = np.abs(pos[:, 2]) > 0.92
