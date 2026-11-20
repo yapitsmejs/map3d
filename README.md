@@ -22,8 +22,15 @@ internet-connected machine and copied over.
 - Specification: [`docs/SPEC.md`](docs/SPEC.md)
 - Roadmap: [`plans/developmentPlan.md`](plans/developmentPlan.md)
 
-> **Status:** M0 (project bootstrap). Only `map3d --version` works so far.
-> The API below is the target interface from the spec.
+> **Status:** M3 of 8. `map3d build` produces terrain + buildings grids
+> (`.npz` + JSON, GeoTIFF) from offline packs; `map3d ingest` / `map3d info`
+> manage packs. Canopy, land cover, decks (M5), `prepare` (M4) and 3D Tiles
+> (M7) are still to come. Try it on a synthetic pack:
+>
+> ```bash
+> uv run python -c "from map3d.pack import makeSyntheticPack; makeSyntheticPack('demo.pack', terrain='hill')"
+> uv run map3d build --lat 1.3 --lon 103.8 --spacing 1 --swath 1000 1000 --pack demo.pack --out out --format npz,geotiff
+> ```
 
 ## Install
 
@@ -36,11 +43,8 @@ uv sync --extra prepare      # (online machine only) extras for `map3d prepare`
 
 ## Usage
 
-```bash
-uv run map3d --version
-```
-
-Target interface (see the spec, §10):
+Target interface (see the spec, §10); `write3dTiles` and `prepare` are not
+implemented yet:
 
 ```python
 from map3d import SceneRequest, buildScene

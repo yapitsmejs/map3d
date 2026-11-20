@@ -126,7 +126,7 @@ box buildings; a single bridge).
 - **Design note:** vector coverage is checked by presence only. Feature
   extents are not clip extents.
 
-### M3 — Grid v0: terrain + buildings + surface, all writers
+### M3 — Grid v0: terrain + buildings + surface, all writers ✅ (2026-11-20)
 `layers/terrain.py`, `layers/buildings.py` (with height precedence),
 `layers/compose.py`, `scene.py`, `io/*`, and the `map3d build` command.
 **Done when:**
@@ -135,6 +135,29 @@ box buildings; a single bridge).
 - `.npz` + JSON and GeoTIFF round-trip;
 - the GeoTIFF overlays correctly in QGIS on a manual check;
 - the upsampling warning fires.
+
+**Done:** 234 tests, 99.7% branch coverage.
+- **Modules:**
+  - `layers/columns.py`: one exact footprint solve per node, then
+    `u = u0 + k*h` with `k = 1/(Up0 . n_local)`; matches the exact solver to
+    1 µm at 5 km.
+  - `layers/terrain.py`: cell-max over a sub-lattice that includes the cell
+    corners, subdivided up to 8x when the source is finer than the grid.
+  - `layers/buildings.py`: priority fusion with >50% overlap dedupe, the full
+    height precedence, raster-height median inside footprints, base at the
+    lowest ground on the outline, roof-height pixel footprints, `all_touched`
+    with the tallest roof winning.
+  - `layers/provenance.py`, `scene.py`, `io/npzWriter.py`,
+    `io/geotiffWriter.py`.
+- **CLI:** `map3d build` (npz, geotiff; `--axes` takes inline JSON or a file,
+  identity by default).
+- **Checked:** a 1000×1000 render of a rotated synthetic scene puts every
+  building exactly where predicted.
+- **Timing (unoptimised):** 1M nodes in ~4 s of compute, so the 10⁸-node
+  design point is ~400+ s for the grid alone. M6 must bring that down
+  (coarse-grid footprint interpolation, numba, parallel chunks).
+- **Defaults:** default building height 9.0 m; duplicate threshold 50%
+  overlap.
 
 ### M4 — `prepare`: real data acquisition
 `pack/prepare.py` and `pack/sources/*` for FABDEM/GLO-30, Overture

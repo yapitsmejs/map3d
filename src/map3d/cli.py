@@ -1,19 +1,23 @@
 """``map3d`` command-line entry point.
 
-Implemented: ``ingest``, ``info``. Still to come (see ``plans/developmentPlan.md``):
-``build``, ``prepare``, ``view``.
+Implemented: ``build`` (npz, geotiff), ``ingest``, ``info``. Still to come (see
+``plans/developmentPlan.md``): ``build --format 3dtiles``, ``prepare``, ``view``.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, NoReturn
 
+import numpy as np
 import typer
 
 from map3d import __version__
 from map3d.pack.ingest import ingestFiles
 from map3d.pack.reader import Pack
+from map3d.request import SceneRequest
+from map3d.scene import buildScene
 
 __all__ = ["app", "main"]
 
@@ -103,6 +107,83 @@ def info(
             raise typer.Exit(code=1)
         nFiles = sum(len(e.files) for e in manifest.sources.values())
         typer.echo(f"OK: all {nFiles} files verified")
+
+
+_FORMATS = ("npz", "geotiff", "3dtiles")
+_NOT_YET = {"3dtiles": "M7"}
+
+
+def _parseAxes(text: str | None) -> list[list[float]]:
+    if text is None:
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    path = Path(text)
+    raw = path.read_text(encoding="utf-8") if path.is_file() else text
+    try:
+        axes: list[list[float]] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--axes is neither a JSON file nor inline JSON: {exc}") from None
+    return axes
+
+
+@app.command()
+def build(
+    lat: Annotated[float, typer.Option("--lat", help="Scene center latitude (deg).")],
+    lon: Annotated[float, typer.Option("--lon", help="Scene center longitude (deg).")],
+    spacing: Annotated[float, typer.Option("--spacing", help="Grid spacing (m).")],
+    swath: Annotated[
+        tuple[float, float],
+        typer.Option(
+            "--swath", metavar="HORIZONTAL VERTICAL", help="Swath along grid x and y (m)."
+        ),
+    ],
+    pack: Annotated[Path, typer.Option("--pack", help="Offline data pack.")],
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")],
+    axes: Annotated[
+        str | None,
+        typer.Option(
+            "--axes",
+            help="3x3 grid axes in ENU, rows = x, y, z (JSON file or inline JSON). Default: identity.",
+        ),
+    ] = None,
+    datum: Annotated[str, typer.Option("--datum", help="msl or ellipsoid.")] = "msl",
+    decks: Annotated[int, typer.Option("--decks", help="Max elevated-deck levels.")] = 5,
+    formats: Annotated[
+        str, typer.Option("--format", help="Comma list: npz, geotiff, 3dtiles.")
+    ] = "npz",
+    imagery: Annotated[Path | None, typer.Option("--imagery", help="BYO orthophoto.")] = None,
+) -> None:
+    """Build a scene grid from an offline pack."""
+    try:
+        wanted = [f.strip() for f in formats.split(",") if f.strip()]
+        for fmt in wanted:
+            if fmt not in _FORMATS:
+                raise ValueError(f"unknown format {fmt!r}; choose from {', '.join(_FORMATS)}")
+            if fmt in _NOT_YET:
+                raise ValueError(
+                    f"format {fmt!r} is not implemented yet (milestone {_NOT_YET[fmt]})"
+                )
+        request = SceneRequest(
+            sceneCenter_deg=(lat, lon),
+            gridSpacing_m=spacing,
+            gridAxes_ENU=np.asarray(_parseAxes(axes), dtype=np.float64),
+            swathHorizontal_m=swath[0],
+            swathVertical_m=swath[1],
+            verticalDatum=datum,  # type: ignore[arg-type]
+            maxDeckLevels=decks,
+            imageryPath=imagery,
+        )
+        scene = buildScene(request, pack)
+    except ValueError as exc:
+        _fail(exc)
+    for message in scene.warnings:
+        typer.echo(f"warning: {message}", err=True)
+    typer.echo(f"Built {scene.geometry.nRows} x {scene.geometry.nCols} nodes (rows x cols)")
+    if "npz" in wanted:
+        npzPath, jsonPath = scene.writeNpz(out / "scene")
+        typer.echo(f"  wrote {npzPath} and {jsonPath.name}")
+    if "geotiff" in wanted:
+        paths = scene.writeGeoTiff(out / "geotiff")
+        typer.echo(f"  wrote {len(paths)} GeoTIFFs to {out / 'geotiff'}")
 
 
 def main() -> None:

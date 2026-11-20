@@ -209,7 +209,7 @@ class Pack:
             if entry is None:
                 if spec.required:
                     raise ValueError(f"pack has no source for required role {role!r}")
-                warnings.append(f"no source for role {role!r}; its layers will be empty")
+                warnings.append(f"no source for role {role!r}; outputs that use it will be empty")
                 continue
             if entry.kind == "raster" and not _fileUnion(entry.files).contains(box):
                 if spec.required:

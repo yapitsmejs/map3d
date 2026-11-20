@@ -66,6 +66,7 @@ class SourceSpec:
         attribution: Required attribution text.
         nativeResolution_m: Nominal resolution (0 for vector data).
         verticalReference: Vertical reference of height values, if any.
+        authoritative: Official (government) data; wins the height precedence.
     """
 
     sourceId: str
@@ -76,6 +77,7 @@ class SourceSpec:
     attribution: str
     nativeResolution_m: float
     verticalReference: VerticalReference | None = None
+    authoritative: bool = False
 
 
 ROLES: dict[str, RoleSpec] = {
@@ -189,6 +191,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "made available under the terms of the Singapore Open Data Licence version 1.0 "
         "(https://data.gov.sg/open-data-licence)",
         0.0,
+        authoritative=True,
     ),
     SourceSpec(
         "overtureBuildings",
@@ -209,6 +212,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "made available under the terms of the Singapore Open Data Licence version 1.0 "
         "(https://data.gov.sg/open-data-licence)",
         0.0,
+        authoritative=True,
     ),
     SourceSpec(
         "syntheticBuildings",
@@ -301,6 +305,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "made available under the terms of the Singapore Open Data Licence version 1.0 "
         "(https://data.gov.sg/open-data-licence)",
         0.0,
+        authoritative=True,
     ),
     SourceSpec(
         "syntheticTransport",
@@ -332,6 +337,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "made available under the terms of the Singapore Open Data Licence version 1.0 "
         "(https://data.gov.sg/open-data-licence)",
         0.0,
+        authoritative=True,
     ),
     SourceSpec(
         "syntheticElevatedStructures",

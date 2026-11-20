@@ -79,3 +79,13 @@ def testElevatedStructuresRole_isOptionalVector():
     spec = registry.ROLES["elevatedStructures"]
     assert spec.kind == "vector" and not spec.required
     assert spec.requiredColumns == ("sourceFeatureId", "structureType")
+
+
+def testAuthoritativeFlag_onlyGovernmentSources():
+    authoritative = {s for s, spec in registry.SOURCES.items() if spec.authoritative}
+    assert authoritative == {
+        "sgHdbBuildings",
+        "sgUraBuildings",
+        "sgMasterPlanRail",
+        "sgLtaElevatedStructures",
+    }
