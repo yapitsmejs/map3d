@@ -221,7 +221,7 @@ data.gov.sg datasets from S2.
     cover could mask water).
   - There's no Singapore trees source, so `trees` is always missing there.
 
-### M5 — Full layer set
+### M5 — Full layer set ✅ (2026-11-20)
 `layers/canopy.py`, `layers/landCover.py`, `layers/decks.py` (K levels, the S5
 heuristic), `featureId` + `features` table, `heightSource` /
 `nativeResolution_m` provenance, and class precedence.
@@ -230,6 +230,35 @@ heuristic), `featureId` + `features` table, `heightSource` /
 - the synthetic bridge yields the correct deck top, bottom and clearance;
 - a small SG golden scene (e.g. 200 m around a known flyover) is stored as a
   regression fixture.
+
+**Done:** 337 tests, 99.1% branch coverage.
+- **Modules:**
+  - `layers/canopy.py`: raster cell-max plus tree crown discs.
+  - `layers/landCover.py`: WorldCover / Impact Observatory remap, plus ground
+    roads/rails with their width; footways excluded.
+  - `layers/decks.py`: bridge buffers plus uncovered outlines; tops
+    interpolated between bridge ends + level height; per-node level stacking
+    with a 3 m merge tolerance; K storage plus overflow count.
+  - `layers/pixels.py`: shared lon/lat → grid-pixel conversion at height.
+- **Scene changes:**
+  - Surface = max(roof, highest deck, ground + canopy, ground). On ties,
+    provenance prefers building > deck > canopy > ground.
+  - New `heightSource` codes `CANOPY` and `DECK_ESTIMATED`.
+  - `featureId` covers decks too: their ids follow the buildings in the
+    features table.
+  - `scene.json` gains `landClassCodes` and `deckModel`.
+- **New transport kind `footway`** (from Overture `class`), found on real data:
+  park paths had been drawn as 7 m roads, and footbridges as 7 m-high decks.
+- **Marina Bay check** (4 km × 4 km at 2 m):
+  - Built in ~25 s (about 2× M3; M6 target).
+  - 186 decks; 1,427 nodes have two levels.
+  - Classes: water 30%, building 18%, built-up 14%, tree 14%, grass 12%,
+    road 7%, deck 2%.
+  - Decks render on the East Coast Parkway viaduct, Helix and Esplanade
+    bridges, and the expressway viaducts.
+- **Known limitation:** deck heights are nominal (7 m per level). The
+  Benjamin Sheares Bridge (~25–30 m clearance) is underestimated, and there's
+  no open data to do better.
 
 ### M6 — Scale and performance
 Chunked out-of-core build (`_chunking.py`), numba kernels, parallel chunks,

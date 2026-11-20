@@ -20,8 +20,12 @@ import numpy.typing as npt
 
 from map3d import __version__
 from map3d.gridGeometry import GridGeometry
+from map3d.layers import decks as deckModel
 from map3d.layers.buildings import BuildingSet, loadBuildings, rasterizeBuildings
+from map3d.layers.canopy import CanopyModel
 from map3d.layers.columns import ChunkColumns
+from map3d.layers.decks import DeckSet, loadDecks, rasterizeDecks
+from map3d.layers.landCover import CLASS_BUILDING, CLASS_DECK, LandCoverModel, classTable
 from map3d.layers.provenance import HeightSource, heightSourceTable
 from map3d.layers.terrain import GroundModel
 from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
@@ -46,7 +50,7 @@ LAYER_INFO: dict[str, dict[str, str]] = {
     },
     "surfaceHeight_datum_m": {
         "units": "m",
-        "description": "Top surface (terrain + buildings) above the vertical datum (cell-max DSM).",
+        "description": "Top surface (terrain, canopy, decks, buildings) above the vertical datum (cell-max DSM).",
     },
     "surfaceHeight_ENU_m": {
         "units": "m",
@@ -67,6 +71,30 @@ LAYER_INFO: dict[str, dict[str, str]] = {
     "nativeResolution_m": {
         "units": "m",
         "description": "Native resolution of that source; 0 for vector-derived heights.",
+    },
+    "canopyHeight_m": {
+        "units": "m",
+        "description": "Vegetation canopy height above ground (cell-max); 0 = none, NaN = no canopy source.",
+    },
+    "landClass": {
+        "units": "1",
+        "description": "Class of the top-most surface: building > deck > road/rail > land cover (see landClassCodes).",
+    },
+    "deckTopHeight_datum_m": {
+        "units": "m",
+        "description": "Top of elevated-structure level k (k = 0 lowest) above the vertical datum; shape (K, rows, cols).",
+    },
+    "deckTopHeight_ENU_m": {
+        "units": "m",
+        "description": "Top of elevated-structure level k: Up coordinate in the scene-center ENU frame.",
+    },
+    "deckBottomHeight_datum_m": {
+        "units": "m",
+        "description": "Underside of elevated-structure level k above the vertical datum.",
+    },
+    "deckBottomHeight_ENU_m": {
+        "units": "m",
+        "description": "Underside of elevated-structure level k: Up coordinate in the scene-center ENU frame.",
     },
 }
 
@@ -125,6 +153,15 @@ class Scene:
         return writeGeoTiff(self, outDir)
 
 
+@dataclass(frozen=True, eq=False)
+class _Models:
+    ground: GroundModel
+    buildings: BuildingSet
+    canopy: CanopyModel
+    landCover: LandCoverModel
+    decks: DeckSet
+
+
 def buildScene(
     request: SceneRequest, pack: str | os.PathLike[str] | Pack, chunkSize: int = 1024
 ) -> Scene:
@@ -146,26 +183,56 @@ def buildScene(
     geometry = GridGeometry.fromRequest(request)
     warnings = opened.checkCoverage(geometry.footprintBounds_deg())
     ground = GroundModel.load(opened, geometry)
-    buildings = loadBuildings(opened, geometry, ground)
+    models = _Models(
+        ground=ground,
+        buildings=loadBuildings(opened, geometry, ground),
+        canopy=CanopyModel.load(opened, geometry),
+        landCover=LandCoverModel.load(opened, geometry),
+        decks=loadDecks(opened, geometry, ground),
+    )
     warnings += _resolutionWarnings(opened, request.gridSpacing_m)
+
+    layers = _allocate(geometry.shape, request.maxDeckLevels)
+    overflow = 0
+    for rows, cols in geometry.iterChunks(chunkSize, chunkSize):
+        overflow += _buildChunk(layers, request, geometry, models, rows, cols)
+    if overflow:
+        warnings.append(
+            f"{overflow} nodes have more than maxDeckLevels={request.maxDeckLevels} deck levels; "
+            "the lowest are stored and the highest still sets surfaceHeight"
+        )
     for message in warnings:
         _log.warning(message)
 
-    layers = _allocate(geometry.shape)
-    for rows, cols in geometry.iterChunks(chunkSize, chunkSize):
-        _buildChunk(layers, request, geometry, ground, buildings, rows, cols)
-
+    features = _concatFeatures(
+        models.buildings.featureTable(),
+        models.decks.featureTable(firstFeatureId=len(models.buildings) + 1),
+    )
     metadata = _metadata(request, geometry, ground, opened, warnings, layers)
-    return Scene(request, geometry, layers, buildings.featureTable(), metadata)
+    return Scene(request, geometry, layers, features, metadata)
 
 
-def _allocate(shape: tuple[int, int]) -> dict[str, npt.NDArray[Any]]:
+def _concatFeatures(*tables: dict[str, npt.NDArray[Any]]) -> dict[str, npt.NDArray[Any]]:
+    return {key: np.concatenate([t[key] for t in tables]) for key in tables[0]}
+
+
+_DECK_LAYERS = (
+    "deckTopHeight_datum_m",
+    "deckTopHeight_ENU_m",
+    "deckBottomHeight_datum_m",
+    "deckBottomHeight_ENU_m",
+)
+
+
+def _allocate(shape: tuple[int, int], maxDeckLevels: int) -> dict[str, npt.NDArray[Any]]:
     layers: dict[str, npt.NDArray[Any]] = {}
     for name in LAYER_INFO:
         if name == "featureId":
             layers[name] = np.zeros(shape, dtype=np.int64)
-        elif name == "heightSource":
+        elif name in ("heightSource", "landClass"):
             layers[name] = np.zeros(shape, dtype=np.uint8)
+        elif name in _DECK_LAYERS:
+            layers[name] = np.full((maxDeckLevels, *shape), np.nan, dtype=np.float32)
         else:
             layers[name] = np.full(shape, np.nan, dtype=np.float32)
     return layers
@@ -175,37 +242,61 @@ def _buildChunk(
     layers: dict[str, npt.NDArray[Any]],
     request: SceneRequest,
     geometry: GridGeometry,
-    ground: GroundModel,
-    buildings: BuildingSet,
+    models: _Models,
     rows: slice,
     cols: slice,
-) -> None:
+) -> int:
     columns = ChunkColumns(geometry, rows, cols)
+    ground, buildings = models.ground, models.buildings
     groundH = ground.cellMaxOrthometric(columns, geometry.gridSpacing_m)
+    canopy = models.canopy.cellMax(columns)
     ids = rasterizeBuildings(buildings, geometry, rows, cols)
+    decks = rasterizeDecks(models.decks, geometry, columns, request.maxDeckLevels)
+
     hasBuilding = ids > 0
     index = np.maximum(ids - 1, 0)
-    roofH = np.where(
-        hasBuilding, buildings.roofOrthometric_m[index] if len(buildings) else np.nan, np.nan
-    )
-    surfaceH = np.fmax(groundH, roofH)
-    groundKnown = np.isfinite(groundH)
-    buildingOnTop = hasBuilding & (~groundKnown | (roofH >= groundH))
-
     if len(buildings):
+        roofH = np.where(hasBuilding, buildings.roofOrthometric_m[index], np.nan)
         bldgSource = buildings.heightSource[index]
         bldgRes = buildings.nativeResolution_m[index]
     else:
+        roofH = np.full(ids.shape, np.nan)
         bldgSource = np.zeros(ids.shape, dtype=np.uint8)
         bldgRes = np.zeros(ids.shape)
-    heightSource = np.where(
-        buildingOnTop,
-        bldgSource,
-        np.where(groundKnown, np.uint8(HeightSource.GROUND), np.uint8(HeightSource.NONE)),
+    canopyTop = np.where(canopy > 0, groundH + canopy, np.nan)
+    hasDeck = decks.maxDeck > 0
+
+    # Candidates in tie-break order: building > deck > canopy > ground.
+    stack = np.stack([roofH, decks.maxTop, canopyTop, groundH])
+    known = np.isfinite(stack)
+    anyKnown = known.any(axis=0)
+    winner = np.argmax(np.where(known, stack, -np.inf), axis=0)
+    surfaceH = np.where(anyKnown, np.nanmax(np.where(known, stack, -np.inf), axis=0), np.nan)
+    sourceByWinner = np.stack(
+        [
+            bldgSource,
+            np.full(ids.shape, HeightSource.DECK_ESTIMATED, dtype=np.uint8),
+            np.full(ids.shape, HeightSource.CANOPY, dtype=np.uint8),
+            np.full(ids.shape, HeightSource.GROUND, dtype=np.uint8),
+        ]
     )
-    nativeRes = np.where(
-        buildingOnTop, bldgRes, np.where(groundKnown, ground.nativeResolution_m, np.nan)
+    heightSource = np.take_along_axis(sourceByWinner, winner[None], axis=0)[0]
+    heightSource = np.where(anyKnown, heightSource, np.uint8(HeightSource.NONE)).astype(np.uint8)
+    resByWinner = np.stack(
+        [
+            bldgRes,
+            np.zeros(ids.shape),
+            np.full(ids.shape, models.canopy.nativeResolution_m),
+            np.full(ids.shape, ground.nativeResolution_m),
+        ]
     )
+    nativeRes = np.where(anyKnown, np.take_along_axis(resByWinner, winner[None], axis=0)[0], np.nan)
+
+    deckOnTop = hasDeck & (~hasBuilding | (decks.maxTop > roofH))
+    featureId = np.where(deckOnTop, len(buildings) + decks.maxDeck, ids)
+    landClass = models.landCover.classes(columns)
+    landClass = np.where(hasDeck, np.uint8(CLASS_DECK), landClass)
+    landClass = np.where(hasBuilding, np.uint8(CLASS_BUILDING), landClass).astype(np.uint8)
 
     lat, lon = columns.nodeLatLon()
     undulation = ground.undulation_m(lat, lon)
@@ -217,32 +308,41 @@ def _buildChunk(
     layers["buildingHeight_m"][rows, cols] = np.where(
         hasBuilding, np.maximum(roofH - groundH, 0.0), np.nan
     )
-    layers["featureId"][rows, cols] = ids
+    layers["canopyHeight_m"][rows, cols] = canopy
+    layers["featureId"][rows, cols] = featureId
     layers["heightSource"][rows, cols] = heightSource
     layers["nativeResolution_m"][rows, cols] = nativeRes
+    layers["landClass"][rows, cols] = landClass
+    layers["deckTopHeight_datum_m"][:, rows, cols] = decks.tops + offset
+    layers["deckTopHeight_ENU_m"][:, rows, cols] = columns.toEnuUp(decks.tops + undulation)
+    layers["deckBottomHeight_datum_m"][:, rows, cols] = decks.bottoms + offset
+    layers["deckBottomHeight_ENU_m"][:, rows, cols] = columns.toEnuUp(decks.bottoms + undulation)
+    return decks.overflowNodes
 
 
 def _resolutionWarnings(pack: Pack, gridSpacing_m: float) -> list[str]:
     warnings = []
-    for role in ("ground", "buildingHeightRaster"):
+    for role in ("ground", "buildingHeightRaster", "canopyHeight", "landCover"):
         entry = pack.primarySource(role)
         if entry is not None and gridSpacing_m < entry.nativeResolution_m:
+            how = "sampled nearest" if role == "landCover" else "interpolated"
             warnings.append(
                 f"grid spacing {gridSpacing_m} m is finer than {entry.sourceId!r} "
-                f"({entry.nativeResolution_m} m); values are interpolated"
+                f"({entry.nativeResolution_m} m); values are {how}"
             )
     return warnings
 
 
 def _usedSources(pack: Pack) -> list[SourceEntry]:
     used: list[SourceEntry] = []
-    for role in ("ground", "geoid", "buildingHeightRaster"):
+    for role in ("ground", "geoid", "buildingHeightRaster", "canopyHeight", "trees", "landCover"):
         entry = pack.primarySource(role)
         if entry is not None:
             used.append(entry)
-    used += [
-        pack.manifest.sources[s] for s in sourcesForRole("buildings") if s in pack.manifest.sources
-    ]
+    for role in ("buildings", "transport", "elevatedStructures"):
+        used += [
+            pack.manifest.sources[s] for s in sourcesForRole(role) if s in pack.manifest.sources
+        ]
     return used
 
 
@@ -292,6 +392,15 @@ def _metadata(
             for name, arr in layers.items()
         },
         "heightSourceCodes": heightSourceTable(),
+        "landClassCodes": classTable(),
+        "deckModel": {
+            "roadLevelHeight_m": deckModel.ROAD_LEVEL_HEIGHT_m,
+            "railLevelHeight_m": deckModel.RAIL_LEVEL_HEIGHT_m,
+            "footbridgeLevelHeight_m": deckModel.FOOTBRIDGE_LEVEL_HEIGHT_m,
+            "deckThickness_m": deckModel.DECK_THICKNESS_m,
+            "mergeTolerance_m": deckModel.MERGE_TOLERANCE_m,
+            "note": "Deck heights are estimated: ground interpolated between bridge ends + level x height.",
+        },
         "sources": [
             {
                 "sourceId": e.sourceId,

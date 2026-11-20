@@ -27,6 +27,7 @@ from rasterio.features import rasterize
 from rasterio.transform import Affine
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers.pixels import toPixelGeometries
 from map3d.layers.provenance import HeightSource
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack, RasterWindow
@@ -117,7 +118,9 @@ def loadBuildings(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> Bu
     )
     base = _baseHeights(geoms, ground)
     roof = base + height
-    pixel = _toPixelGeometries(geoms, roof, ground, geometry)
+    centroids = shapely.centroid(geoms)
+    roofEll = roof + ground.undulation_m(shapely.get_y(centroids), shapely.get_x(centroids))
+    pixel = toPixelGeometries(geoms, roofEll, geometry)
     gridBox = shapely.box(0.0, 0.0, geometry.nCols, geometry.nRows)
     keep = np.isfinite(base) & shapely.intersects(pixel, gridBox)
     return BuildingSet(
@@ -323,23 +326,3 @@ def _baseHeights(geoms: npt.NDArray[np.object_], ground: GroundModel) -> FloatAr
     values = ground.orthometricAt(coords[:, 1], coords[:, 0])
     np.fmin.at(base, owner, np.where(np.isfinite(values), values, np.inf))
     return np.where(np.isfinite(base), base, np.nan)
-
-
-def _toPixelGeometries(
-    geoms: npt.NDArray[np.object_], roof: FloatArray, ground: GroundModel, geometry: GridGeometry
-) -> npt.NDArray[np.object_]:
-    if geoms.size == 0:
-        return geoms
-    centroids = shapely.centroid(geoms)
-    roofEll = roof + ground.undulation_m(shapely.get_y(centroids), shapely.get_x(centroids))
-    coords, owner = shapely.get_coordinates(geoms, return_index=True)
-    heightEll = np.nan_to_num(roofEll[owner])
-    e_m, n_m, u_m = geometry.frame.geodeticToEnu(coords[:, 1], coords[:, 0], heightEll)
-    axes = geometry.gridAxes_ENU
-    gx_m = axes[0, 0] * e_m + axes[0, 1] * n_m + axes[0, 2] * u_m
-    gy_m = axes[1, 0] * e_m + axes[1, 1] * n_m + axes[1, 2] * u_m
-    s = geometry.gridSpacing_m
-    col = (gx_m + 0.5 * geometry.nCols * s) / s
-    row = (gy_m + 0.5 * geometry.nRows * s) / s
-    pixel = geoms.copy()
-    return np.asarray(shapely.set_coordinates(pixel, np.column_stack([col, row])), dtype=object)

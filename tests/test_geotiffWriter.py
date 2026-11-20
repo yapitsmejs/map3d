@@ -30,9 +30,9 @@ def testWriteGeoTiff_oneFilePerLayerWithSameValues(tmp_path: Path, scene: Scene)
     assert {p.stem for p in paths} == set(scene.layers)
     for path in paths:
         with rasterio.open(path) as src:
-            assert src.count == 1
-            data = src.read(1)
             expected = scene.layers[path.stem]
+            data = src.read() if expected.ndim == 3 else src.read(1)
+            assert src.count == (expected.shape[0] if expected.ndim == 3 else 1)
             assert data.dtype == expected.dtype
             np.testing.assert_array_equal(data, expected)
 
@@ -73,3 +73,12 @@ def testWriteGeoTiff_stacksThreeDimensionalLayersAsBands(tmp_path: Path, scene: 
             np.testing.assert_array_equal(src.read(), stacked)
     finally:
         del scene.layers["testStack_m"]
+
+
+def testWriteGeoTiff_skipsZeroBandLayers(tmp_path: Path):
+    syn = makeSyntheticPack(tmp_path / "p.pack")
+    req = SceneRequest(
+        (syn.frame.lat0_deg, syn.frame.lon0_deg), 20.0, np.eye(3), 400.0, 400.0, maxDeckLevels=0
+    )
+    paths = writeGeoTiff(buildScene(req, syn.packDir), tmp_path / "tif")
+    assert not any(p.stem.startswith("deck") for p in paths)

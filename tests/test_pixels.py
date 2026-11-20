@@ -1,0 +1,47 @@
+"""Tests for ``map3d.layers.pixels``."""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import shapely
+
+from map3d.gridGeometry import GridGeometry
+from map3d.layers.pixels import toPixelGeometries
+from map3d.request import SceneRequest
+
+
+def _geom(heading: float = 0.0) -> GridGeometry:
+    h = math.radians(heading)
+    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    return GridGeometry.fromRequest(SceneRequest((1.3, 103.8), 2.0, axes, 1000.0, 600.0))
+
+
+def testToPixel_centerAndCorners():
+    geom = _geom()
+    lat, lon, _ = geom.frame.columnPointAtHeight(
+        np.array([0.0, -500.0]), np.array([0.0, -300.0]), 0.0
+    )
+    pts = shapely.points(lon, lat)
+    px = toPixelGeometries(pts, 0.0, geom)
+    np.testing.assert_allclose(shapely.get_coordinates(px), [[250.0, 150.0], [0.0, 0.0]], atol=1e-6)
+
+
+def testToPixel_rotatedGridAndHeightLean():
+    geom = _geom(90.0)  # grid y points east
+    lat, lon, _ = geom.frame.columnPointAtHeight(np.array([100.0]), np.array([0.0]), 200.0)
+    px = toPixelGeometries(shapely.points(lon, lat), np.array([200.0]), geom)
+    # E = +100 m along grid y -> row offset +50 px; column unchanged at the center.
+    np.testing.assert_allclose(shapely.get_coordinates(px), [[250.0, 200.0]], atol=1e-6)
+
+
+def testToPixel_emptyAndNanHeight():
+    geom = _geom()
+    empty = np.array([], dtype=object)
+    assert toPixelGeometries(empty, 0.0, geom).size == 0
+    pt = shapely.points([103.8], [1.3])
+    np.testing.assert_allclose(
+        shapely.get_coordinates(toPixelGeometries(pt, np.array([np.nan]), geom)),
+        shapely.get_coordinates(toPixelGeometries(pt, 0.0, geom)),
+    )

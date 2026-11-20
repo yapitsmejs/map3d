@@ -22,13 +22,13 @@ internet-connected machine and copied over.
 - Specification: [`docs/SPEC.md`](docs/SPEC.md)
 - Roadmap: [`plans/developmentPlan.md`](plans/developmentPlan.md)
 
-> **Status:** M4 of 8.
+> **Status:** M5 of 8.
 > - **Working now:**
 >   - `map3d prepare` downloads real open data into an offline pack.
->   - `map3d build` produces terrain + buildings grids (`.npz` + JSON,
+>   - `map3d build` produces the full grid: terrain, buildings, canopy, land class, stacked decks (`.npz` + JSON,
 >     GeoTIFF).
 >   - `map3d ingest` / `map3d info` manage packs.
-> - **Still to come:** canopy, land cover and decks (M5), performance (M6),
+> - **Still to come:** performance (M6),
 >   3D Tiles (M7).
 >
 > ```bash

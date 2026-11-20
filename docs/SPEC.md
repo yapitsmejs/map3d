@@ -185,6 +185,14 @@ extended with vector-derived classes: 200 building, 210 road, 220
 bridge/elevated deck, 230 rail. Precedence for the top surface is
 building > deck > road/rail > land cover.
 
+- **Land cover:** sampled nearest-pixel at the node footprint. Impact
+  Observatory codes are remapped to WorldCover codes.
+- **Ground roads/rails:** drawn with their width (defaults: road 7 m, rail
+  4 m), cell centres only.
+- **Canopy:** a raster (metres above ground) is cell-max pooled; tree points
+  become crown discs of radius max(2 m, 0.25 × height). `surfaceHeight` takes
+  ground + canopy where that is the highest candidate (provenance `CANOPY`).
+
 ## 7. Mesh output — 3D Tiles
 
 - OGC **3D Tiles 1.1** with glTF 2.0 (GLB) content and a quadtree LOD
@@ -225,12 +233,31 @@ OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` �
 storey height (default 3.0 m) → default height. The winning
 source is recorded per feature and per node.
 
-**Deck heights:** open data rarely carries deck elevations. v1 estimates them
-heuristically (OSM `layer`/`level` × a nominal clearance, smoothed along the
-centerline and tied to ground at the approaches) unless an authoritative source
-provides them. Provenance marks these values as estimated. No open source
-has deck elevations or clearances, Singapore included (see `docs/research.md`).
-LTA flyover polygons and URA aboveground rail locate decks but give no height.
+**Deck heights:** no open source has deck elevations or clearances,
+Singapore included (see `docs/research.md`). LTA flyover polygons and URA
+aboveground rail locate decks but give no height, so v1 estimates them
+(provenance `DECK_ESTIMATED`; parameters are recorded in `scene.json`
+`deckModel`):
+
+- **Footprints:**
+  - Bridge pieces (transport `isBridge`) are buffered by their width, or a
+    default (road 8 m, rail 8 m, footway 3 m).
+  - Elevated-structure outlines are added unless more than half their area is
+    already covered.
+- **Top height:** ground interpolated linearly between the bridge's two ends
+  (along the centerline) + level × per-level height (road 7 m, rail viaduct
+  10 m, footbridge 6 m). Levels ≤ 0 or missing count as 1. Outline-only decks
+  use the median ground on their outline.
+- **Underside:** top − 1.5 m.
+- **Per node:** tops within 3 m merge into one level (parallel carriageways,
+  piece joints). The lowest K levels are stored, and the highest deck always
+  sets `surfaceHeight`. Overflow is reported as a warning.
+- **Known limitation:** high-clearance bridges (e.g. Benjamin Sheares, ~25–30 m)
+  are underestimated.
+
+**Transport kinds:** `road`, `rail` and `footway`. Overture road classes
+footway/pedestrian/path/cycleway/steps/bridleway/sidewalk/crosswalk map to
+`footway`. Footways never set the ground land class.
 
 ## 9. Offline data packs
 

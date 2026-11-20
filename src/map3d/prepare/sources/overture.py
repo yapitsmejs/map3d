@@ -6,7 +6,7 @@ row-group statistics, and writes the canonical pack schemas:
 
 - **buildings:** ``sourceFeatureId``, ``height_m``, ``numFloors``. Underground
   buildings are excluded.
-- **transport:** ``sourceFeatureId``, ``kind`` (road/rail), ``isBridge``,
+- **transport:** ``sourceFeatureId``, ``kind`` (road/rail/footway), ``isBridge``,
   ``level``, ``width_m``. Overture's linear-referenced rules (``between``
   fractions along the segment) are honoured by splitting segments at rule
   boundaries. Each piece takes the flags, level and width at its midpoint, and
@@ -40,6 +40,10 @@ Bounds = tuple[float, float, float, float]
 
 BUCKET = "overturemaps-us-west-2"
 _EPS = 1e-9
+# Overture road classes that are paths for people, not vehicles.
+FOOTWAY_CLASSES = frozenset(
+    {"footway", "pedestrian", "path", "cycleway", "steps", "bridleway", "sidewalk", "crosswalk"}
+)
 
 
 def s3FileSystem(caBundle: str | os.PathLike[str] | None) -> pafs.S3FileSystem:
@@ -121,6 +125,7 @@ def fetchOvertureTransport(
         columns=[
             "id",
             "subtype",
+            "class",
             "road_flags",
             "rail_flags",
             "level_rules",
@@ -141,12 +146,18 @@ def fetchOvertureTransport(
         for pieceId, piece, isBridge, level, width in _splitSegment(row, line):
             geoms.append(piece)
             cols["sourceFeatureId"].append(pieceId)
-            cols["kind"].append(row["subtype"])
+            cols["kind"].append(_kind(row))
             cols["isBridge"].append(isBridge)
             cols["level"].append(level)
             cols["width_m"].append(width)
     writeGeoParquet(outPath, np.array(geoms, dtype=object), cols)
     return outPath
+
+
+def _kind(row: dict[str, Any]) -> str:
+    if row["subtype"] == "road" and row.get("class") in FOOTWAY_CLASSES:
+        return "footway"
+    return str(row["subtype"])
 
 
 def _bboxFilter(bounds: Bounds) -> pc.Expression:

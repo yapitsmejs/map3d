@@ -106,7 +106,7 @@ ROLES: dict[str, RoleSpec] = {
             "vector",
             False,
             ("sourceFeatureId", "kind", "isBridge", "level", "width_m"),
-            "Road/rail centerlines with bridge flag, level and width.",
+            "Road/rail/footway centerlines with bridge flag, level and width.",
         ),
         RoleSpec(
             "trees",

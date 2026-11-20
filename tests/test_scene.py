@@ -43,23 +43,21 @@ def _rc(scene: Scene, e_m: float, n_m: float) -> tuple[int, int]:
     return int(np.unravel_index(flat, e.shape)[0]), int(np.unravel_index(flat, e.shape)[1])
 
 
-def testBuildScene_producesAllM3Layers(built: Scene):
-    assert set(built.layers) == {
-        "groundHeight_datum_m",
-        "groundHeight_ENU_m",
-        "surfaceHeight_datum_m",
-        "surfaceHeight_ENU_m",
-        "buildingHeight_m",
-        "featureId",
-        "heightSource",
-        "nativeResolution_m",
+def testBuildScene_producesAllLayers(built: Scene):
+    deckLayers = {
+        "deckTopHeight_datum_m",
+        "deckTopHeight_ENU_m",
+        "deckBottomHeight_datum_m",
+        "deckBottomHeight_ENU_m",
     }
+    assert set(built.layers) == set(LAYER_INFO)
+    assert deckLayers <= set(built.layers)
     for name, arr in built.layers.items():
-        assert arr.shape == (200, 200)
-        assert name in LAYER_INFO
+        assert arr.shape == ((5, 200, 200) if name in deckLayers else (200, 200)), name
     assert built.layers["groundHeight_datum_m"].dtype == np.float32
     assert built.layers["featureId"].dtype == np.int64
     assert built.layers["heightSource"].dtype == np.uint8
+    assert built.layers["landClass"].dtype == np.uint8
 
 
 def testGroundDatum_msl_matchesTerrain(built: Scene, plane: SyntheticScene):
@@ -109,9 +107,64 @@ def testOpenGround_surfaceEqualsGround(built: Scene):
 
 
 def testFeatures_tableMatchesIds(built: Scene):
-    assert list(built.features["sourceFeatureId"]) == ["synB0", "synB1", "synB2"]
+    assert list(built.features["sourceFeatureId"]) == ["synB0", "synB1", "synB2", "synR0"]
+    assert list(built.features["kind"]) == ["building"] * 3 + ["deck"]
+    np.testing.assert_array_equal(built.features["featureId"], [1, 2, 3, 4])
     present = set(np.unique(built.layers["featureId"])) - {0}
-    assert present == {1, 2, 3}
+    assert present == {1, 2, 3, 4}
+
+
+def testCanopy_raisesSurfaceWithCanopyProvenance(built: Scene):
+    r, c = _rc(built, -350.0, -350.0)
+    ground = built.layers["groundHeight_datum_m"][r, c]
+    assert built.layers["canopyHeight_m"][r, c] == pytest.approx(15.0)
+    assert built.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(ground + 15.0, abs=1e-4)
+    assert built.layers["heightSource"][r, c] == HeightSource.CANOPY
+    assert built.layers["landClass"][r, c] == 10
+
+
+def testDeck_setsSurfaceClassFeatureAndLevels(built: Scene, plane: SyntheticScene):
+    r, c = _rc(built, 0.0, 200.0)
+    top = built.layers["deckTopHeight_datum_m"][0, r, c]
+    e, _ = built.geometry.nodesEnu()
+    assert top == pytest.approx(float(plane.terrainHeight_m(e[r, c], 200.0)) + 7.0, abs=0.05)
+    assert built.layers["deckBottomHeight_datum_m"][0, r, c] == pytest.approx(top - 1.5, abs=1e-4)
+    assert np.isnan(built.layers["deckTopHeight_datum_m"][1, r, c])
+    assert built.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(top, abs=1e-4)
+    assert built.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED
+    assert built.layers["featureId"][r, c] == 4
+    assert built.layers["landClass"][r, c] == 220
+    assert built.layers["nativeResolution_m"][r, c] == 0.0
+    _, _, uRef = built.geometry.frame.columnPointAtHeight(
+        built.geometry.nodesEnu()[0][r, c], built.geometry.nodesEnu()[1][r, c], float(top) + 8.0
+    )
+    assert built.layers["deckTopHeight_ENU_m"][0, r, c] == pytest.approx(float(uRef), abs=1e-3)
+
+
+def testLandClass_waterRoadAndBuildingPrecedence(built: Scene):
+    assert built.layers["landClass"][_rc(built, 0.0, 380.0)] == 80
+    assert built.layers["landClass"][_rc(built, 100.0, -390.0)] == 30
+    assert built.layers["landClass"][_rc(built, -160.0, -100.0)] == 200
+
+
+def testZeroDeckLevels_keepsDeckInSurfaceAndWarns(plane: SyntheticScene):
+    scene = buildScene(_request(plane, maxDeckLevels=0), plane.packDir)
+    assert scene.layers["deckTopHeight_datum_m"].shape == (0, 200, 200)
+    r, c = _rc(scene, 0.0, 200.0)
+    assert scene.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED
+    assert any("maxDeckLevels=0" in w for w in scene.warnings)
+
+
+def testMetadata_hasClassTableAndDeckModel(built: Scene):
+    assert built.metadata["landClassCodes"]["220"] == "deck"
+    assert built.metadata["deckModel"]["roadLevelHeight_m"] == 7.0
+    sources = {s["sourceId"] for s in built.metadata["sources"]}
+    assert {
+        "syntheticCanopy",
+        "syntheticTrees",
+        "syntheticLandCover",
+        "syntheticTransport",
+    } <= sources
 
 
 def testChunkSize_doesNotChangeResult(plane: SyntheticScene, built: Scene):

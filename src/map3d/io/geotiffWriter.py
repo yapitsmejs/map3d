@@ -44,6 +44,8 @@ def writeGeoTiff(scene: Scene, outDir: str | os.PathLike[str]) -> list[Path]:
     for name, array in scene.layers.items():
         bands = array if array.ndim == 3 else array[np.newaxis, ...]
         count, rows, cols = bands.shape
+        if count == 0:
+            continue  # e.g. deck layers with maxDeckLevels=0
         isFloat = np.issubdtype(bands.dtype, np.floating)
         profile: dict[str, Any] = {
             "driver": "GTiff",

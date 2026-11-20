@@ -74,6 +74,7 @@ def release(tmp_path: Path) -> str:
         [
             {
                 "id": "s-bridge",
+                "class": "primary",
                 "subtype": "road",
                 "road_flags": flags(["is_bridge"]),
                 "rail_flags": None,
@@ -83,6 +84,7 @@ def release(tmp_path: Path) -> str:
             },
             {
                 "id": "s-partial",
+                "class": "secondary",
                 "subtype": "road",
                 "road_flags": flags(["is_bridge"], [0.25, 0.75]),
                 "rail_flags": None,
@@ -92,6 +94,7 @@ def release(tmp_path: Path) -> str:
             },
             {
                 "id": "s-tunnel",
+                "class": "motorway",
                 "subtype": "road",
                 "road_flags": flags(["is_tunnel"]),
                 "rail_flags": None,
@@ -101,6 +104,7 @@ def release(tmp_path: Path) -> str:
             },
             {
                 "id": "s-rail",
+                "class": "standard_gauge",
                 "subtype": "rail",
                 "road_flags": None,
                 "rail_flags": flags(["is_bridge"]),
@@ -109,7 +113,18 @@ def release(tmp_path: Path) -> str:
                 "geometry": line,
             },
             {
+                "id": "s-foot",
+                "subtype": "road",
+                "class": "footway",
+                "road_flags": flags(["is_bridge"]),
+                "rail_flags": None,
+                "level_rules": None,
+                "width_rules": None,
+                "geometry": line,
+            },
+            {
                 "id": "s-water",
+                "class": None,
                 "subtype": "water",
                 "road_flags": None,
                 "rail_flags": None,
@@ -145,7 +160,7 @@ def testTransport_splitsFlagsDropsTunnelsAndWater(tmp_path: Path, release: str):
     table, geoms = readGeoParquet(out)
     rows = table.to_pylist()
     ids = [r["sourceFeatureId"] for r in rows]
-    assert ids == ["s-bridge", "s-partial#0", "s-partial#1", "s-partial#2", "s-rail"]
+    assert ids == ["s-bridge", "s-partial#0", "s-partial#1", "s-partial#2", "s-rail", "s-foot"]
     byId = {r["sourceFeatureId"]: r for r in rows}
     assert byId["s-bridge"] == {
         "sourceFeatureId": "s-bridge",
@@ -157,6 +172,7 @@ def testTransport_splitsFlagsDropsTunnelsAndWater(tmp_path: Path, release: str):
     assert [byId[f"s-partial#{k}"]["isBridge"] for k in range(3)] == [False, True, False]
     assert [byId[f"s-partial#{k}"]["level"] for k in range(3)] == [0, 1, 0]
     assert byId["s-rail"]["kind"] == "rail" and byId["s-rail"]["isBridge"] is True
+    assert byId["s-foot"]["kind"] == "footway" and byId["s-foot"]["isBridge"] is True
     middle = geoms[ids.index("s-partial#1")]
     np.testing.assert_allclose(shapely.bounds(middle), [103.815, 1.30, 103.825, 1.30], atol=1e-9)
 
