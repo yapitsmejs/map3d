@@ -37,6 +37,9 @@ from map3d.pack.registry import getSource, sourcesForRole
 __all__ = [
     "DEFAULT_BUILDING_HEIGHT_m",
     "DUPLICATE_OVERLAP",
+    "MIN_RASTER_HEIGHT_m",
+    "SMALL_DEFAULT_HEIGHT_m",
+    "SMALL_FOOTPRINT_m2",
     "STOREY_HEIGHT_m",
     "BuildingSet",
     "loadBuildings",
@@ -47,6 +50,9 @@ FloatArray = npt.NDArray[np.float64]
 
 STOREY_HEIGHT_m = 3.0
 DEFAULT_BUILDING_HEIGHT_m = 9.0
+SMALL_DEFAULT_HEIGHT_m = 3.0  # one storey: the default for sheds, kiosks, shelters
+SMALL_FOOTPRINT_m2 = 50.0  # footprints under this get SMALL_DEFAULT_HEIGHT_m
+MIN_RASTER_HEIGHT_m = 2.0  # raster heights below this are treated as missing
 DUPLICATE_OVERLAP = 0.5
 _OUTLINE_STEP_deg = 5e-5  # ~5.5 m: outline densification for the base-height search
 
@@ -120,8 +126,9 @@ def loadBuildings(
     bounds = geometry.footprintBounds_deg(margin_m=geometry.gridSpacing_m)
     geoms, sourceIds, featureIds, heights, floors, authoritative = _fuse(pack, bounds)
     rasterHeight, rasterRes = _rasterHeights(pack, bounds, geoms)
+    area_m2 = shapely.area(toPixelGeometries(geoms, 0.0, geometry)) * geometry.gridSpacing_m**2
     height, code, nativeRes = _resolveHeights(
-        heights, floors, authoritative, rasterHeight, rasterRes
+        heights, floors, authoritative, rasterHeight, rasterRes, area_m2
     )
     correction = GroundCorrection.build(geometry, ground, geoms) if correctGround else None
     if correction is not None:
@@ -303,10 +310,18 @@ def _resolveHeights(
     authoritative: npt.NDArray[np.bool_],
     rasterHeight: FloatArray,
     rasterRes: float,
+    area_m2: FloatArray,
 ) -> tuple[FloatArray, npt.NDArray[np.uint8], FloatArray]:
+    """Pick each building's height by source precedence.
+
+    Raster heights under :data:`MIN_RASTER_HEIGHT_m` are treated as missing
+    (the raster saw ground, not roof). Buildings with no usable source get
+    :data:`SMALL_DEFAULT_HEIGHT_m` when the footprint is under
+    :data:`SMALL_FOOTPRINT_m2`, else :data:`DEFAULT_BUILDING_HEIGHT_m`.
+    """
     hasHeight = np.isfinite(heights) & (heights > 0)
     hasFloors = np.isfinite(floors) & (floors > 0)
-    hasRaster = np.isfinite(rasterHeight) & (rasterHeight > 0)
+    hasRaster = np.isfinite(rasterHeight) & (rasterHeight >= MIN_RASTER_HEIGHT_m)
     rules = [
         (authoritative & hasHeight, heights, HeightSource.AUTHORITATIVE_HEIGHT, 0.0),
         (
@@ -319,7 +334,9 @@ def _resolveHeights(
         (hasRaster, rasterHeight, HeightSource.BUILDING_HEIGHT_RASTER, rasterRes),
         (hasFloors, floors * STOREY_HEIGHT_m, HeightSource.FLOORS, 0.0),
     ]
-    height = np.full(heights.size, DEFAULT_BUILDING_HEIGHT_m)
+    height = np.where(
+        area_m2 < SMALL_FOOTPRINT_m2, SMALL_DEFAULT_HEIGHT_m, DEFAULT_BUILDING_HEIGHT_m
+    )
     code = np.full(heights.size, HeightSource.DEFAULT_HEIGHT, dtype=np.uint8)
     nativeRes = np.zeros(heights.size)
     for condition, value, source, res in reversed(rules):

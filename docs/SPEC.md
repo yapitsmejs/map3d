@@ -253,7 +253,10 @@ building > deck > road/rail > land cover.
 
 **Building height precedence (authoritative first):** local government data →
 OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` ×
-storey height (default 3.0 m) → default height. The winning
+storey height (default 3.0 m) → default height. Raster heights under 2 m
+count as missing (the raster saw ground, not roof) and fall through to the next
+source. The default height is 3 m (one storey) for footprints under 50 m²
+(sheds, kiosks, shelters) and 9 m otherwise. The winning
 source is recorded per feature and per node.
 
 **Ground under buildings (FABDEM residue):** FABDEM's machine-learned

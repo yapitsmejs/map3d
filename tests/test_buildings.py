@@ -231,3 +231,40 @@ def testFeatureTable_columns(plane: SyntheticScene):
     assert list(table["sourceDataset"]) == ["syntheticBuildings"] * 3
     assert list(table["heightSource"]) == ["EXPLICIT_HEIGHT", "EXPLICIT_HEIGHT", "FLOORS"]
     np.testing.assert_array_equal(table["deckLevel"], [-1, -1, -1])
+
+
+def testResolveHeights_rasterBelowMinimumIsMissingAndSmallDefault():
+    from map3d.layers import buildings as bl
+
+    nan = np.nan
+    heights = np.array([nan, nan, nan, nan, nan])
+    floors = np.array([nan, 2.0, nan, nan, nan])
+    authoritative = np.zeros(5, dtype=bool)
+    raster = np.array([0.1, 0.4, 2.5, 1.9, 0.2])
+    area = np.array([30.0, 30.0, 30.0, 400.0, 49.9])
+    height, code, _ = bl._resolveHeights(heights, floors, authoritative, raster, 4.0, area)
+    np.testing.assert_allclose(height, [3.0, 6.0, 2.5, 9.0, 3.0])
+    assert list(code) == [
+        HeightSource.DEFAULT_HEIGHT,  # 0.1 m raster -> missing; small footprint -> 3 m
+        HeightSource.FLOORS,  # 0.4 m raster -> missing; falls through to 2 floors
+        HeightSource.BUILDING_HEIGHT_RASTER,  # 2.5 m raster is plausible
+        HeightSource.DEFAULT_HEIGHT,  # large footprint -> 9 m
+        HeightSource.DEFAULT_HEIGHT,  # just under 50 m2 -> 3 m
+    ]
+    assert (
+        bl.SMALL_DEFAULT_HEIGHT_m == 3.0
+        and bl.SMALL_FOOTPRINT_m2 == 50.0
+        and bl.MIN_RASTER_HEIGHT_m == 2.0
+    )
+
+
+def testLoad_smallFootprintWithoutDataGetsOneStorey(plane: SyntheticScene, tmp_path: Path):
+    pack = _copyPack(plane, tmp_path)
+    shed = _enuBox(plane, -301.0, 251.0, -295.0, 257.0)  # 6 x 6 m = 36 m2
+    ingestFiles(
+        pack, "overtureBuildings", [_writeBuildings(tmp_path / "o.parquet", [shed], [None], [None])]
+    )
+    buildings = _load(plane, _geometry(plane), pack)
+    i = list(buildings.sourceFeatureIds).index("x0")
+    assert buildings.height_m[i] == 3.0
+    assert buildings.heightSource[i] == HeightSource.DEFAULT_HEIGHT
