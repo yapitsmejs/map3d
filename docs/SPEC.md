@@ -1,6 +1,6 @@
 # map3d — Specification (v1)
 
-Status: **agreed**, 2026-11-20. All defaults proposed during review
+Status: **implemented** (M0–M8), 2026-11-20; see `docs/acceptance.md`. Originally agreed 2026-11-20. All defaults proposed during review
 (EGM2008 geoid, FABDEM ground, class precedence, 3.0 m storey, 8 GB RAM) are confirmed.
 
 ## 1. Purpose
@@ -209,10 +209,28 @@ building > deck > road/rail > land cover.
 - **Appearance:** terrain and roofs are draped with imagery, using a
   Sentinel-2 cloud-free composite (~10 m) by default, or the BYO orthophoto
   when given. Walls and deck sides are shaded by class.
-- `map3d view <tilesetDir>` serves the tileset on localhost with a bundled,
-  vendored offline viewer (CesiumJS, Apache-2.0, no Ion token, no online base
-  layers). The tiles stay standards-compliant for use in other 3D Tiles
-  viewers.
+- `map3d view <tilesetDir>` serves the tileset on localhost with a bundled
+  offline viewer.
+  - **Why three.js:** the viewer is vendored three.js r170 (MIT, ~0.9 MB) plus
+    a small 3D Tiles traversal. CesiumJS was the original plan, but it is
+    ~30 MB and needs configuration (Ion token, base layers) to run offline.
+  - **How it draws:** in the local ENU frame, refining by screen-space error.
+    A parent stays visible until all its children have loaded.
+  - **Interoperability:** the tiles are standards-compliant 3D Tiles 1.1 (the
+    official `3d-tiles-validator` 0.6.1 reports 0 errors, 0 warnings), so
+    Cesium and other viewers can load them too.
+- **As built (M7):**
+  - **Layout:** a quadtree in grid coordinates with leaves ≤ 512 m and
+    `REPLACE` refinement.
+  - **Terrain:** RTIN (Martini) on a 129² lattice per tile. The tolerance is
+    0.25 m at the leaves and doubles per level.
+  - **Buildings:** parent tiles keep buildings ≥ 10 m × 2^(levels above the
+    leaves − 1), so distant views keep the skyline.
+  - **Decks:** in leaves and their parents.
+  - **Geometric error:** max(terrain tolerance, omitted building height).
+  - **Texture:** one 256² JPEG per tile, projected top-down onto terrain,
+    roofs and deck tops. Walls and deck sides use RGBA vertex colours.
+  - **Attribution:** stored in `asset.extras.attribution`.
 
 ## 8. Data sources and precedence
 
@@ -225,7 +243,7 @@ building > deck > road/rail > land cover.
 | Land cover | ESA WorldCover 2021 10 m; Impact Observatory 10 m annual LULC | — |
 | Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | URA Master Plan rail lines (`GRND_LEVEL` marks viaducts) |
 | Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
-| Imagery | Sentinel-2 cloud-free composite (~10 m) | BYO orthophoto |
+| Imagery | Sentinel-2 cloudless 2024 by EOX (s2maps.eu WMTS, zoom 14 ≈ 10 m; CC BY-NC-SA 4.0) | BYO orthophoto (`--imagery`) |
 | Geoid | EGM2008 grid (PROJ-data `us_nga_egm08_25.tif`) | — |
 
 **Building height precedence (authoritative first):** local government data →
@@ -285,7 +303,7 @@ sg.pack/
   - **Defaults:** all sources except `copernicusGlo30` (used automatically if
     FABDEM yields nothing) and `impactObservatoryLulc`; Singapore sources only
     when the box overlaps Singapore.
-  - **Imagery:** fetched in M7.
+  - **Imagery:** `sentinel2Composite` (EOX s2cloudless WMTS tiles mosaicked to an RGB GeoTIFF) is a default source.
   - **Failures:** a failing source is reported and skipped; the run fails only
     if ground or geoid is missing.
   - **TLS interception:** on networks with TLS interception, `--system-certs`
@@ -371,9 +389,11 @@ map3d info    sg.pack
 
   | Stage | Time |
   |---|---|
-  | Build | 16.9 s |
-  | Write `.npz` (11 GB) | 10.0 s |
-  | Write GeoTIFFs (1 GB) | 11.5 s |
+  | Build | 16.4 s |
+  | Write `.npz` (11 GB) | 10.6 s |
+  | Write GeoTIFFs (1 GB) | 11.2 s |
+  | Write 3D Tiles (341 tiles, 33 MB) | 15.0 s |
+  | **Total** | **53.2 s** |
 
   Peak private memory: **4.5 GB**. Reproduce with `scripts/benchmark.py`, or
   `pytest -m slow` with `MAP3D_BENCH_PACK` set.

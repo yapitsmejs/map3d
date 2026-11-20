@@ -299,7 +299,7 @@ test, run on demand and before releases rather than in the default gate.
   - Outputs match the pre-M6 build: identical ids, classes and provenance;
     heights within 0.065 mm.
 
-### M7 — 3D Tiles mesh
+### M7 — 3D Tiles mesh ✅ (2026-11-20)
 `mesh/*`: RTIN terrain, LOD1 buildings (LOD2 hook), swept decks, imagery
 drape (Sentinel-2 / BYO), and the tileset writer chosen in S4.
 **Done when:**
@@ -308,10 +308,42 @@ drape (Sentinel-2 / BYO), and the tileset writer chosen in S4.
   tolerance on synthetic packs);
 - the tiles fit within the 10-minute total budget.
 
-### M8 — Viewer, CLI polish, docs, offline acceptance
+### M8 — Viewer, CLI polish, docs, offline acceptance ✅ (2026-11-20)
 `viewer/` (vendored CesiumJS), `map3d view`, CLI help, README usage, and an
 end-to-end run with the network disabled.
 **Done when** acceptance criteria 1–6 in SPEC §12 all pass.
+
+**M7 + M8 done:** 396 tests (plus 1 `slow` benchmark), 98.7% branch coverage.
+See `docs/acceptance.md`.
+- **Imagery:** `prepare/sources/imagery.py` mosaics the EOX Sentinel-2
+  cloudless 2024 WMTS (zoom 14) into an RGB GeoTIFF. It is now a default
+  `prepare` source; BYO imagery is supported via `--imagery`.
+- **`map3d/mesh/`:**
+  - `martini.py`: RTIN as numba kernels, tested compiled and via `.py_func`.
+    Martini bounds error at split points; interior samples observed within
+    1.25× the tolerance.
+  - `gltf.py`: GLB writer. Textured unlit primitive plus RGBA vertex-coloured
+    primitive; y-up (E, U, −N).
+  - `scenery.py`: terrain on exact node columns, LOD1 building extrusions
+    (constrained Delaunay roofs), deck slabs following their profile, imagery
+    or land-class textures.
+  - `tileset.py`: quadtree, skyline thresholds, geometric errors, ENU→ECEF
+    root transform, attribution.
+- **`map3d/viewer/`:**
+  - Vendored three.js r170 (MIT) plus a small `viewer.js` 3D Tiles traversal,
+    instead of CesiumJS (~30 MB, needs configuration offline).
+  - `installViewer` / `serve` with explicit MIME types: Windows can map `.js`
+    to `text/plain`, which breaks ES modules.
+- **CLI:** `map3d build --format 3dtiles`, `map3d view`.
+- **The official validator ran:** `3d-tiles-validator` 0.6.1 via a
+  pip-installable Node (`nodejs-wheel`, used ad hoc and not a project
+  dependency). It **found a real bug**: `COLOR_0` as 3-byte RGB violates
+  glTF's 4-byte vertex-attribute alignment. Fixed (RGBA); it now reports 0
+  errors / 0 warnings on both the Marina 4 km tileset (85 tiles) and the 5 km
+  design point (341 tiles).
+- **Offline guarantee:** `tests/test_offline.py` builds and writes every
+  format with socket connections forbidden.
+- **Design point:** 53 s total including 3D Tiles; peak private memory 4.5 GB.
 
 ## Dependency order
 

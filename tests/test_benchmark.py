@@ -28,6 +28,7 @@ def testDesignPoint_buildsUnderBudget(tmp_path):
         assert scene.geometry.nRows * scene.geometry.nCols == 100_000_000
         scene.writeNpz(tmp_path / "scene")
         scene.writeGeoTiff(tmp_path / "geotiff")
+        scene.write3dTiles(tmp_path / "tiles")
     total_s = time.perf_counter() - t0
     assert build_s < 120.0
-    assert total_s < 300.0  # grid share of the 10-minute budget (3D Tiles is M7)
+    assert total_s < 600.0  # SPEC section 11: all layers + 3D Tiles in under ~10 minutes

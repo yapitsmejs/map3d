@@ -353,9 +353,10 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "sentinel2Composite",
         "imagery",
         "raster",
-        "Sentinel-2 cloud-free composite",
+        "Sentinel-2 cloudless 2024 by EOX (s2maps.eu)",
         "CC BY-NC-SA 4.0",
-        "Contains modified Copernicus Sentinel data",
+        "Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH "
+        "(Contains modified Copernicus Sentinel data 2024)",
         10.0,
     ),
 )

@@ -1,7 +1,7 @@
 """``map3d`` command-line entry point.
 
-Implemented: ``build`` (npz, geotiff), ``prepare``, ``ingest``, ``info``. Still to come (see
-``plans/developmentPlan.md``): ``build --format 3dtiles``, ``view``.
+Commands: ``prepare`` (online) -> ``build`` (npz, geotiff, 3dtiles) -> ``view``;
+``ingest`` / ``info`` manage packs.
 """
 
 from __future__ import annotations
@@ -110,7 +110,6 @@ def info(
 
 
 _FORMATS = ("npz", "geotiff", "3dtiles")
-_NOT_YET = {"3dtiles": "M7"}
 
 
 def _parseAxes(text: str | None) -> list[list[float]]:
@@ -152,16 +151,12 @@ def build(
     ] = "npz",
     imagery: Annotated[Path | None, typer.Option("--imagery", help="BYO orthophoto.")] = None,
 ) -> None:
-    """Build a scene grid from an offline pack."""
+    """Build a scene (grid layers and/or 3D Tiles) from an offline pack."""
     try:
         wanted = [f.strip() for f in formats.split(",") if f.strip()]
         for fmt in wanted:
             if fmt not in _FORMATS:
                 raise ValueError(f"unknown format {fmt!r}; choose from {', '.join(_FORMATS)}")
-            if fmt in _NOT_YET:
-                raise ValueError(
-                    f"format {fmt!r} is not implemented yet (milestone {_NOT_YET[fmt]})"
-                )
         request = SceneRequest(
             sceneCenter_deg=(lat, lon),
             gridSpacing_m=spacing,
@@ -184,6 +179,40 @@ def build(
     if "geotiff" in wanted:
         paths = scene.writeGeoTiff(out / "geotiff")
         typer.echo(f"  wrote {len(paths)} GeoTIFFs to {out / 'geotiff'}")
+    if "3dtiles" in wanted:
+        tileset = scene.write3dTiles(out / "tiles")
+        typer.echo(f"  wrote {tileset} (view with: map3d view {out / 'tiles'})")
+    scene.close()
+
+
+def _waitForever() -> None:  # pragma: no cover - interactive; replaced in tests
+    import time
+
+    while True:
+        time.sleep(3600)
+
+
+@app.command()
+def view(
+    tiles: Annotated[Path, typer.Argument(help="Directory holding tileset.json.")],
+    port: Annotated[int, typer.Option("--port", help="Localhost port (0 = any free port).")] = 8000,
+    noBrowser: Annotated[bool, typer.Option("--no-browser", help="Don't open a browser.")] = False,
+) -> None:
+    """Serve a tileset with the offline viewer on localhost (Ctrl+C to stop)."""
+    from map3d.viewer import serve
+
+    try:
+        server = serve(tiles, port=port, openBrowser=not noBrowser)
+    except (FileNotFoundError, OSError) as exc:
+        _fail(exc)
+    typer.echo(f"Serving {tiles} at http://127.0.0.1:{server.server_address[1]}/ (Ctrl+C to stop)")
+    try:
+        _waitForever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @app.command()

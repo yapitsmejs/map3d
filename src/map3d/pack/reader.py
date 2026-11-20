@@ -35,7 +35,7 @@ from map3d.pack.manifest import (
 )
 from map3d.pack.registry import ROLES, sourcesForRole
 
-__all__ = ["Pack", "RasterWindow", "VectorSelection"]
+__all__ = ["Pack", "RasterWindow", "VectorSelection", "readRasterWindow"]
 
 FloatArray = npt.NDArray[np.float64]
 SampleMethod = Literal["bilinear", "nearest"]
@@ -260,16 +260,9 @@ class Pack:
         files = [f for f in entry.files if f.bounds_deg and _extent(f.bounds_deg).intersects(query)]
         if not files:
             raise ValueError(f"{sourceId!r} has no files intersecting {bounds_deg}")
-        with ExitStack() as stack:
-            srcs = [stack.enter_context(rasterio.open(self.root / f.path)) for f in files]
-            first = srcs[0]
-            left, bottom, right, top = transform_bounds("EPSG:4326", first.crs, *bounds_deg)
-            snapped = _snapToGrid(first.transform, (left, bottom, right, top), marginPixels)
-            data, transform = merge(
-                srcs, bounds=snapped, indexes=[band], dtype="float64", nodata=np.nan
-            )
-            crs = first.crs
-        return RasterWindow(np.asarray(data[0], dtype=np.float64), transform, crs, sourceId)
+        return readRasterWindow(
+            [self.root / f.path for f in files], bounds_deg, sourceId, band, marginPixels
+        )
 
     def readVectors(
         self, sourceId: str, bounds_deg: Bounds, columns: list[str] | None = None
@@ -340,6 +333,40 @@ class Pack:
         if entry.kind != kind:
             raise ValueError(f"source {sourceId!r} is not a {kind} source")
         return entry
+
+
+def readRasterWindow(
+    paths: list[Path],
+    bounds_deg: Bounds,
+    sourceId: str,
+    band: int = 1,
+    marginPixels: int = 2,
+) -> RasterWindow:
+    """Read one band of raster files over a lon/lat box, mosaicking them.
+
+    The window is snapped to the first file's pixel grid (no resampling) and
+    padded by ``marginPixels``. Nodata becomes NaN.
+
+    Args:
+        paths: Raster files sharing one CRS.
+        bounds_deg: ``(minLon, minLat, maxLon, maxLat)``.
+        sourceId: Label recorded on the window.
+        band: 1-based band index.
+        marginPixels: Padding around the box, in source pixels.
+
+    Returns:
+        The raster window.
+    """
+    with ExitStack() as stack:
+        srcs = [stack.enter_context(rasterio.open(path)) for path in paths]
+        first = srcs[0]
+        left, bottom, right, top = transform_bounds("EPSG:4326", first.crs, *bounds_deg)
+        snapped = _snapToGrid(first.transform, (left, bottom, right, top), marginPixels)
+        data, transform = merge(
+            srcs, bounds=snapped, indexes=[band], dtype="float64", nodata=np.nan
+        )
+        crs = first.crs
+    return RasterWindow(np.asarray(data[0], dtype=np.float64), transform, crs, sourceId)
 
 
 def _fileUnion(files: list[PackFile]) -> Any:

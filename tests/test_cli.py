@@ -190,10 +190,35 @@ def testCliBuild_invalidRequestReported(tmp_path, synPack):
     assert "whole multiple" in result.output
 
 
-def testCliBuild_rejectsUnknownAndUnimplementedFormats(tmp_path, synPack):
+def testCliBuild_writes3dTilesWithViewer(tmp_path, synPack):
     result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "a", "--format", "3dtiles"))
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "a" / "tiles" / "tileset.json").is_file()
+    assert (tmp_path / "a" / "tiles" / "index.html").is_file()
+    assert "map3d view" in result.output
+
+
+def testCliView_servesUntilInterrupted(tmp_path, synPack, monkeypatch):
+    runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "a", "--format", "3dtiles"))
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_waitForever", interrupt)
+    result = runner.invoke(
+        cli.app, ["view", str(tmp_path / "a" / "tiles"), "--port", "0", "--no-browser"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Serving" in result.output and "http://127.0.0.1:" in result.output
+
+
+def testCliView_missingTilesetFails(tmp_path):
+    result = runner.invoke(cli.app, ["view", str(tmp_path), "--port", "0", "--no-browser"])
     assert result.exit_code == 1
-    assert "not implemented yet" in result.output
+    assert "tileset.json" in result.output
+
+
+def testCliBuild_rejectsUnknownFormats(tmp_path, synPack):
     result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "a", "--format", "obj"))
     assert result.exit_code == 1
     assert "unknown format" in result.output

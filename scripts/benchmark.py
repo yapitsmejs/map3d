@@ -68,7 +68,9 @@ def main() -> int:
     parser.add_argument("--swath", type=float, default=5000.0)
     parser.add_argument("--decks", type=int, default=5)
     parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--out", type=Path, default=None, help="Also write npz + GeoTIFF here.")
+    parser.add_argument(
+        "--out", type=Path, default=None, help="Also write npz, GeoTIFF and 3D Tiles here."
+    )
     args = parser.parse_args()
 
     from map3d import SceneRequest, buildScene
@@ -96,7 +98,12 @@ def main() -> int:
         t2 = time.perf_counter()
         print(f"write npz: {t2 - t1:.1f} s")
         scene.writeGeoTiff(args.out / "geotiff")
-        print(f"write geotiff: {time.perf_counter() - t2:.1f} s")
+        t3 = time.perf_counter()
+        print(f"write geotiff: {t3 - t2:.1f} s")
+        scene.write3dTiles(args.out / "tiles")
+        t4 = time.perf_counter()
+        print(f"write 3D Tiles: {t4 - t3:.1f} s")
+        print(f"total: {t4 - t0:.1f} s")
     scene.close()
     for name, value in _peakMemory_GB().items():
         print(f"{name}: {value:.2f}")

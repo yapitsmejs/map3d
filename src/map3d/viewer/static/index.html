@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>map3d viewer</title>
+  <style>
+    :root { color-scheme: light dark; --panel: rgba(20, 24, 28, 0.78); --text: #f2f2f2; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1f24; font: 13px/1.4 system-ui, sans-serif; }
+    #view { position: fixed; inset: 0; }
+    .panel { position: fixed; background: var(--panel); color: var(--text); border-radius: 6px; padding: 8px 10px; }
+    #info { top: 12px; left: 12px; max-width: min(420px, calc(100vw - 48px)); }
+    #info h1 { font-size: 14px; margin: 0 0 4px; }
+    #status { opacity: 0.8; }
+    #attribution { bottom: 12px; right: 12px; max-width: min(640px, calc(100vw - 48px)); font-size: 11px; max-height: 30vh; overflow: auto; }
+    #attribution ul { margin: 0; padding-left: 16px; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/build/three.module.min.js",
+        "three/addons/": "./vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="view"></div>
+  <div id="info" class="panel">
+    <h1>map3d scene</h1>
+    <div id="status">Loading tileset…</div>
+    <div>Drag to orbit · right-drag to pan · scroll to zoom</div>
+  </div>
+  <div id="attribution" class="panel"></div>
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>

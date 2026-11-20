@@ -115,6 +115,10 @@ class Scene:
         layers: Layer name to array (see :data:`LAYER_INFO`).
         features: Columns of the features table.
         metadata: Everything written to ``scene.json``.
+        storageDir: Directory of memory-mapped layers, if any.
+        models: Source models used to build the grid (ground, buildings, canopy,
+            land cover, decks), reused to build the 3D Tiles mesh.
+        pack: The pack the scene was built from.
     """
 
     request: SceneRequest
@@ -124,6 +128,8 @@ class Scene:
     metadata: dict[str, Any] = field(default_factory=dict)
     storageDir: Path | None = None
     _ownsStorage: bool = field(default=False, repr=False)
+    models: Any = field(default=None, repr=False)
+    pack: Pack | None = field(default=None, repr=False)
 
     def __enter__(self) -> Scene:
         return self
@@ -179,6 +185,32 @@ class Scene:
         from map3d.io.geotiffWriter import writeGeoTiff
 
         return writeGeoTiff(self, outDir)
+
+    def write3dTiles(
+        self,
+        outDir: str | os.PathLike[str],
+        imageryPath: str | os.PathLike[str] | None = None,
+        withViewer: bool = True,
+    ) -> Path:
+        """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
+
+        Args:
+            outDir: Output directory.
+            imageryPath: BYO RGB GeoTIFF to drape (default: the request's
+                ``imageryPath``, else the pack's imagery, else land-class colours).
+            withViewer: Also install the offline viewer (``map3d view``).
+
+        Returns:
+            Path of ``tileset.json``.
+        """
+        from map3d.mesh.tileset import write3dTiles
+        from map3d.viewer import installViewer
+
+        drape = imageryPath if imageryPath is not None else self.request.imageryPath
+        path = write3dTiles(self, outDir, imageryPath=drape)
+        if withViewer:
+            installViewer(outDir)
+        return path
 
 
 @dataclass(frozen=True, eq=False)
@@ -264,7 +296,17 @@ def buildScene(
     )
     metadata = _metadata(request, geometry, ground, opened, warnings, layers)
     metadata["storage"] = "memory" if storageDir is None else "memmap"
-    return Scene(request, geometry, layers, features, metadata, storageDir, ownsStorage)
+    return Scene(
+        request,
+        geometry,
+        layers,
+        features,
+        metadata,
+        storageDir=storageDir,
+        _ownsStorage=ownsStorage,
+        models=models,
+        pack=opened,
+    )
 
 
 def _concatFeatures(*tables: dict[str, npt.NDArray[Any]]) -> dict[str, npt.NDArray[Any]]:

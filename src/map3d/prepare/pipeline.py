@@ -24,7 +24,7 @@ from map3d.pack.ingest import ingestFiles
 from map3d.pack.manifest import MANIFEST_NAME, Bounds, Manifest, validateBounds
 from map3d.pack.registry import ROLES, getSource
 from map3d.prepare.http import HttpSession
-from map3d.prepare.sources import dataGovSg, googleBuildings, overture, rasters
+from map3d.prepare.sources import dataGovSg, googleBuildings, imagery, overture, rasters
 
 __all__ = ["DEFAULT_SOURCES", "FETCHERS", "PrepareContext", "PrepareReport", "preparePack"]
 
@@ -107,6 +107,9 @@ FETCHERS: dict[str, Fetcher] = {
             c.workDir("overtureTransportation") / "overtureTransportation.parquet",
         )
     ],
+    "sentinel2Composite": lambda c: imagery.fetchSentinel2Cloudless(
+        c.session, c.bounds, c.workDir("sentinel2Composite")
+    ),
     "sgHdbBuildings": _sgHdb,
     "sgUraBuildings": lambda c: [
         dataGovSg.adaptUraBuildings(
@@ -139,6 +142,7 @@ DEFAULT_SOURCES: tuple[str, ...] = (
     "googleOpenBuildings25d",
     "metaCanopy",
     "esaWorldCover",
+    "sentinel2Composite",
     "sgHdbBuildings",
     "sgUraBuildings",
     "sgMasterPlanRail",

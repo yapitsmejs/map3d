@@ -4,41 +4,38 @@ Build offline, georeferenced 3D scene grids and 3D Tiles meshes from open data.
 
 ## Purpose
 
-Given a scene center (lat/lon), grid spacing, grid orientation (a 3×3 matrix of
-grid axes expressed in ENU) and swath size, `map3d` produces:
+Given a scene center (lat/lon), grid spacing, grid orientation (a 3×3 matrix
+whose rows are the grid x, y, z axes in ENU) and swath size, `map3d` produces:
 
-- a **multi-layer grid** for simulation and analysis: ground and top-surface
-  heights (both height-above-datum and curvature-aware ENU z), building and
-  canopy heights, up to K elevated-deck levels, land class, feature IDs and
-  per-node provenance. It is written as `.npz` + JSON and as GeoTIFF.
-- a **3D Tiles mesh** for visualization, with imagery-draped terrain,
-  buildings and true 3D bridges, plus a bundled offline viewer.
+- **A multi-layer grid** for simulation and analysis, written as `.npz` + JSON
+  and as GeoTIFF:
+  - ground and top-surface heights, each above a datum (MSL/EGM2008 or WGS84)
+    and as a curvature-aware ENU z;
+  - building and canopy heights;
+  - up to K stacked elevated-deck levels;
+  - land class, feature IDs and per-node provenance.
+- **A 3D Tiles 1.1 mesh** for visualization: imagery-draped terrain, LOD1
+  buildings and true 3D bridge decks, with a bundled offline viewer.
 
-It runs fully offline from portable **data packs** built from open data
-(Copernicus/FABDEM, Overture, Google Open Buildings 2.5D, Meta/WRI canopy,
-ESA WorldCover, OSM, data.gov.sg). Packs are prepared on an
-internet-connected machine and copied over.
+It runs fully offline from portable **data packs** of open data:
 
-- Specification: [`docs/SPEC.md`](docs/SPEC.md)
-- Roadmap: [`plans/developmentPlan.md`](plans/developmentPlan.md)
+- Ground: FABDEM / Copernicus GLO-30.
+- Buildings: Overture footprints, Google Open Buildings 2.5D heights, OSM.
+- Vegetation and land cover: Meta/WRI canopy height, ESA WorldCover.
+- Imagery: Sentinel-2 cloudless.
+- Singapore: data.gov.sg.
 
-> **Status:** M6 of 8.
-> - **Working now:**
->   - `map3d prepare` downloads real open data into an offline pack.
->   - `map3d build` produces the full grid: terrain, buildings, canopy, land class, stacked decks (`.npz` + JSON,
->     GeoTIFF).
->   - `map3d ingest` / `map3d info` manage packs.
-> - **Performance:** 5 km × 5 km at 0.5 m (10⁸ nodes) builds in ~17 s, peak RAM ~4.5 GB.
-> - **Still to come:**
->   3D Tiles (M7).
->
-> ```bash
-> # online machine (add --system-certs behind TLS-intercepting proxies)
-> uv sync --extra prepare
-> uv run map3d prepare --bbox 103.83 1.26 103.89 1.31 --out marina.pack --system-certs
-> # anywhere, offline
-> uv run map3d build --lat 1.2834 --lon 103.8607 --spacing 2 --swath 4000 4000 --pack marina.pack --out out --format npz,geotiff
-> ```
+Packs are prepared on an internet-connected machine and copied over.
+
+| Doc | What |
+|---|---|
+| [`docs/SPEC.md`](docs/SPEC.md) | Specification: inputs, frames, layers, mesh, packs, performance |
+| [`docs/acceptance.md`](docs/acceptance.md) | Acceptance record against the spec |
+| [`docs/research.md`](docs/research.md) | Data-source research and access-path findings |
+| [`plans/developmentPlan.md`](plans/developmentPlan.md) | Milestones M0–M8 and what each delivered |
+
+**Performance:** 5 km × 5 km at 0.5 m (10⁸ nodes, real Singapore data) builds
+every output in about 53 s, with 4.5 GB peak RAM.
 
 ## Install
 
@@ -51,7 +48,39 @@ uv sync --extra prepare      # (online machine only) extras for `map3d prepare`
 
 ## Usage
 
-Python interface (see the spec, §10); `write3dTiles` is not implemented yet:
+### Command line
+
+```bash
+# 1. Online machine: download open data for a box into an offline pack.
+#    Add --system-certs behind TLS-intercepting proxies (trusts the OS CA store).
+uv run map3d prepare --bbox 103.83 1.26 103.89 1.31 --out marina.pack --system-certs
+uv run map3d info marina.pack --verify
+
+# 2. Anywhere, offline: build a scene (axes default to north-aligned).
+uv run map3d build --lat 1.2834 --lon 103.8607 --spacing 2 --swath 4000 4000 \
+    --axes "[[0.866, -0.5, 0], [0.5, 0.866, 0], [0, 0, 1]]" \
+    --pack marina.pack --out out --format npz,geotiff,3dtiles
+
+# 3. Look at it.
+uv run map3d view out/tiles
+```
+
+Other options:
+
+- `map3d build --datum ellipsoid` switches heights to the WGS84 ellipsoid.
+- `--decks K` sets the number of stacked deck levels.
+- `--imagery ortho.tif` drapes your own orthophoto.
+- `map3d ingest` adds files you obtained yourself to a pack (see the spec,
+  §9).
+
+To try it without downloading anything, use a synthetic pack:
+
+```bash
+uv run python -c "from map3d.pack import makeSyntheticPack; makeSyntheticPack('demo.pack', terrain='hill')"
+uv run map3d build --lat 1.3 --lon 103.8 --spacing 1 --swath 1000 1000 --pack demo.pack --out demo --format npz,3dtiles
+```
+
+### Python
 
 ```python
 from map3d import SceneRequest, buildScene
@@ -60,20 +89,21 @@ request = SceneRequest(
     sceneCenter_deg=(1.2834, 103.8607),
     gridSpacing_m=0.5,
     gridAxes_ENU=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],  # rows: grid x, y, z in ENU
-    swathHorizontal_m=5000.0,
-    swathVertical_m=5000.0,
+    swathHorizontal_m=5000.0,                         # along grid x
+    swathVertical_m=5000.0,                           # along grid y
 )
-scene = buildScene(request, pack="sg.pack")
-scene.writeNpz("out/scene")
-scene.write3dTiles("out/tiles")
+with buildScene(request, pack="marina.pack") as scene:   # large scenes are memory-mapped
+    surface = scene.layers["surfaceHeight_ENU_m"]       # (rows, cols), row 0 at -y
+    scene.writeNpz("out/scene")                          # scene.npz + scene.json
+    scene.writeGeoTiff("out/geotiff")
+    scene.write3dTiles("out/tiles")                      # + offline viewer
 ```
 
-```bash
-map3d prepare --bbox 103.5 1.1 104.2 1.5 --out sg.pack     # online machine
-map3d build --lat 1.2834 --lon 103.8607 --spacing 0.5 --axes axes.json \
-            --swath 5000 5000 --pack sg.pack --out out/ --format npz,geotiff,3dtiles
-map3d view out/tiles
-```
+`scene.json` documents the frame, node convention, datum, every layer's units,
+the provenance and land-class codes, the deck model and source attributions.
+The spec covers the details, including the known limitations (§13): deck
+heights are estimated, buildings are LOD1, and coarse sources are
+interpolated.
 
 ## Development
 
@@ -83,6 +113,7 @@ uv run ruff check .           # lint
 uv run ruff format .          # format
 uv run mypy src/map3d         # type check
 uv run python scripts/check.py   # GATE: lint + format + types + tests + branch coverage ≥ 90%
+uv run pytest -m slow         # design-point benchmark (set MAP3D_BENCH_PACK to a pack)
 ```
 
 Run `scripts/check.py` before pushing or opening a PR. It fails if ruff is
@@ -107,3 +138,8 @@ These run the same gate as you do locally, so a red PR cannot merge:
   GitHub Actions) that must pass the gate like any other.
 - **PR template** (`.github/PULL_REQUEST_TEMPLATE.md`) prompts contributors for
   the red-green workflow and the gate checklist.
+
+### Third-party code
+
+The offline viewer vendors three.js r170 (MIT licence,
+`src/map3d/viewer/static/vendor/three/LICENSE`).
