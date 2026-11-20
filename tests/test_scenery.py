@@ -43,7 +43,7 @@ def testGridEnuRoundTrip(scene: Scene):
 
 
 def testTerrain_verticesSitOnGroundColumns(scene: Scene, plane: SyntheticScene):
-    part = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0)
+    part = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0, withCanopy=False)
     e, n, u = part.positions_ENU_m.T
     lat, lon, uRef = scene.geometry.frame.columnPointAtHeight(
         e, n, plane.terrainHeight_m(e, n) + 8.0
@@ -128,3 +128,32 @@ def testTexture_fromByoImageryFile(scene: Scene, tmp_path: Path):
 
 def testImagerySource_fromPackNoneWithoutImageryRole(scene: Scene):
     assert scenery.ImagerySource.fromPack(scene.pack, scene.geometry.footprintBounds_deg()) is None
+
+
+def testTerrain_includesCanopyAboveThresholdWhenAsked(scene: Scene, plane: SyntheticScene):
+    # Synthetic canopy: a 15 m patch over [-400, -300]^2 (scene axes rotated 20 deg).
+    bare = scenery.terrainPart(scene, _full(scene), gridSize=129, maxError_m=0.0, withCanopy=False)
+    vegetated = scenery.terrainPart(scene, _full(scene), gridSize=129, maxError_m=0.0)
+
+    def heightNear(part, e0, n0):
+        e, n, u = part.positions_ENU_m.T
+        i = np.argmin((e - e0) ** 2 + (n - n0) ** 2)
+        _, _, uGround = scene.geometry.frame.columnPointAtHeight(
+            e[i], n[i], plane.terrainHeight_m(e[i], n[i]) + 8.0
+        )
+        return u[i] - float(uGround)
+
+    assert heightNear(vegetated, -350.0, -350.0) == pytest.approx(15.0, abs=0.05)
+    assert heightNear(bare, -350.0, -350.0) == pytest.approx(0.0, abs=0.05)
+    assert heightNear(vegetated, 150.0, 150.0) == pytest.approx(0.0, abs=0.05)  # open ground
+
+
+def testTerrain_ignoresCanopyBelowThreshold(scene: Scene, monkeypatch: pytest.MonkeyPatch):
+    from map3d.layers.canopy import CanopyModel
+
+    monkeypatch.setattr(
+        CanopyModel, "heightAt", lambda self, lat, lon, col, row: np.full(lat.shape, 1.5)
+    )
+    low = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0)
+    bare = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0, withCanopy=False)
+    np.testing.assert_allclose(low.positions_ENU_m, bare.positions_ENU_m)

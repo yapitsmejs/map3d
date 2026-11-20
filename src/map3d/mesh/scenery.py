@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DECK_COLOR",
+    "MIN_MESH_CANOPY_m",
     "WALL_COLOR",
     "ImagerySource",
     "TileExtent",
@@ -54,6 +55,7 @@ __all__ = [
 FloatArray = npt.NDArray[np.float64]
 
 WALL_COLOR = (214, 210, 200)
+MIN_MESH_CANOPY_m = 2.0  # lower vegetation (grass, shrubs) stays flat in the mesh
 DECK_COLOR = (165, 160, 155)
 _CLASS_PALETTE = {
     0: (90, 90, 90),
@@ -138,15 +140,24 @@ def _columnUp(scene: Scene, e: FloatArray, n: FloatArray, orthometric: FloatArra
 
 
 def terrainPart(
-    scene: Scene, extent: TileExtent, gridSize: int = 129, maxError_m: float = 0.25
+    scene: Scene,
+    extent: TileExtent,
+    gridSize: int = 129,
+    maxError_m: float = 0.25,
+    withCanopy: bool = True,
 ) -> MeshPart:
-    """RTIN terrain mesh of the ground over a tile (textured).
+    """RTIN mesh of the ground (optionally plus vegetation) over a tile (textured).
+
+    With ``withCanopy``, the surface is ground + canopy wherever the canopy is at
+    least :data:`MIN_MESH_CANOPY_m` tall, so tree crowns become part of the draped
+    terrain. The grid layers keep bare ground and canopy separate regardless.
 
     Args:
-        scene: Built scene (uses its ground model).
+        scene: Built scene (uses its ground and canopy models).
         extent: Tile extent in grid metres.
         gridSize: RTIN lattice side (``2^k + 1``).
         maxError_m: RTIN tolerance.
+        withCanopy: Raise the surface by the canopy (trees) where present.
 
     Returns:
         Upward-facing textured mesh part.
@@ -159,6 +170,12 @@ def terrainPart(
     lat, lon, _ = scene.geometry.frame.columnPointAtHeight(e, n, 0.0)
     ground = scene.models.ground
     height = np.nan_to_num(ground.orthometricAt(lat, lon), nan=0.0) + ground.undulation_m(lat, lon)
+    if withCanopy:
+        s = scene.geometry.gridSpacing_m
+        col = (gxm + 0.5 * scene.geometry.nCols * s) / s
+        row = (gym + 0.5 * scene.geometry.nRows * s) / s
+        canopy = scene.models.canopy.heightAt(lat, lon, col, row)
+        height = height + np.where(canopy >= MIN_MESH_CANOPY_m, canopy, 0.0)
     verts, tris = rtinMesh(rtinErrors(np.ascontiguousarray(height)), maxError_m)
     vx, vy = verts[:, 0], verts[:, 1]
     ve, vn = e[vy, vx], n[vy, vx]

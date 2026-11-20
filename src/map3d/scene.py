@@ -191,6 +191,7 @@ class Scene:
         outDir: str | os.PathLike[str],
         imageryPath: str | os.PathLike[str] | None = None,
         withViewer: bool = True,
+        withCanopy: bool = True,
     ) -> Path:
         """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
 
@@ -199,6 +200,7 @@ class Scene:
             imageryPath: BYO RGB GeoTIFF to drape (default: the request's
                 ``imageryPath``, else the pack's imagery, else land-class colours).
             withViewer: Also install the offline viewer (``map3d view``).
+            withCanopy: Include vegetation (canopy >= 2 m) in the terrain surface.
 
         Returns:
             Path of ``tileset.json``.
@@ -207,7 +209,7 @@ class Scene:
         from map3d.viewer import installViewer
 
         drape = imageryPath if imageryPath is not None else self.request.imageryPath
-        path = write3dTiles(self, outDir, imageryPath=drape)
+        path = write3dTiles(self, outDir, imageryPath=drape, withCanopy=withCanopy)
         if withViewer:
             installViewer(outDir)
         return path

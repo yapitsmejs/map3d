@@ -123,6 +123,34 @@ class CanopyModel:
             canopy = np.fmax(canopy, self._rasterizeTrees(columns))
         return canopy
 
+    def heightAt(
+        self, lat_deg: FloatArray, lon_deg: FloatArray, col: FloatArray, row: FloatArray
+    ) -> FloatArray:
+        """Canopy height above ground at arbitrary points (e.g. mesh vertices).
+
+        Args:
+            lat_deg: Latitude of each point.
+            lon_deg: Longitude of each point.
+            col: Grid pixel column of each point (for tree discs).
+            row: Grid pixel row of each point.
+
+        Returns:
+            Heights (bilinear raster, max with tree crowns); 0 where there is no canopy
+            or no source.
+        """
+        out = np.zeros(np.shape(lat_deg))
+        if self.window is not None:
+            values = self.window.sample(lat_deg, lon_deg)
+            values[~np.isfinite(values) | (values < 0) | (values > _MAX_VALID_m)] = 0.0
+            out = values
+        if self.treeDiscs.size:
+            points = shapely.points(np.ravel(col), np.ravel(row))
+            pointIdx, discIdx = shapely.STRtree(self.treeDiscs).query(points, predicate="within")
+            flat = out.reshape(-1)
+            np.maximum.at(flat, pointIdx, self.treeHeights_m[discIdx])
+            out = flat.reshape(np.shape(lat_deg))
+        return out
+
     def _rasterizeTrees(self, columns: ChunkColumns) -> FloatArray:
         r0, c0 = columns.rows.start, columns.cols.start
         nr, nc = columns.shape

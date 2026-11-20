@@ -224,6 +224,11 @@ building > deck > road/rail > land cover.
     `REPLACE` refinement.
   - **Terrain:** RTIN (Martini) on a 129² lattice per tile. The tolerance is
     0.25 m at the leaves and doubles per level.
+  - **Vegetation:** the terrain surface is ground + canopy wherever the canopy
+    is ≥ 2 m (`withCanopy=True`, the default), so tree crowns are draped with
+    the imagery. The grid layers keep bare ground and canopy separate. On the
+    Loyang 4.5 km scene this takes the mesh from 1.05M to 2.9M triangles
+    (53 → 94 MB).
   - **Buildings:** parent tiles keep buildings ≥ 10 m × 2^(levels above the
     leaves − 1), so distant views keep the skyline.
   - **Decks:** in leaves and their parents.

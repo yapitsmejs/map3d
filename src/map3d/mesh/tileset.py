@@ -68,6 +68,7 @@ class _Params:
     textureSize: int
     terrainGridSize: int
     leafTerrainError_m: float
+    withCanopy: bool
 
 
 def write3dTiles(
@@ -78,6 +79,7 @@ def write3dTiles(
     textureSize: int = 256,
     terrainGridSize: int = 129,
     leafTerrainError_m: float = 0.25,
+    withCanopy: bool = True,
 ) -> Path:
     """Write the scene as a 3D Tiles 1.1 tileset.
 
@@ -90,6 +92,7 @@ def write3dTiles(
         textureSize: Texture side in pixels per tile.
         terrainGridSize: RTIN lattice side per tile (``2^k + 1``).
         leafTerrainError_m: RTIN tolerance at the leaves.
+        withCanopy: Include vegetation (canopy >= 2 m) in the terrain surface.
 
     Returns:
         Path of ``tileset.json``.
@@ -108,6 +111,7 @@ def write3dTiles(
         textureSize=textureSize,
         terrainGridSize=terrainGridSize,
         leafTerrainError_m=leafTerrainError_m,
+        withCanopy=withCanopy,
     )
     bounds = g.footprintBounds_deg(margin_m=g.gridSpacing_m)
     imagery = (
@@ -173,6 +177,7 @@ def _writeTile(
         extent,
         params.terrainGridSize,
         terrainError if level < depth else params.leafTerrainError_m,
+        withCanopy=params.withCanopy,
     )
     roofs, walls = buildingParts(scene, selB, extent)
     tops, sides = deckParts(scene, selD, extent)

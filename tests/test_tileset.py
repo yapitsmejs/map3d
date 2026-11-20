@@ -90,3 +90,21 @@ def _uris(tile: dict) -> list[str]:
     for child in tile.get("children", []):
         out += _uris(child)
     return out
+
+
+def testTileset_canopyCanBeLeftOut(scene: Scene, tmp_path: Path):
+    def maxUp(path: Path) -> float:
+        tileset = json.loads(path.read_text(encoding="utf-8"))
+        top = -np.inf
+        for uri in _uris(tileset["root"]):
+            gltf = pygltflib.GLTF2().load_binary(str(path.parent / uri))
+            for prim in gltf.meshes[0].primitives:
+                top = max(top, gltf.accessors[prim.attributes.POSITION].max[1])
+        return top
+
+    withTrees = ts.write3dTiles(scene, tmp_path / "a", leafSize_m=512.0, terrainGridSize=33)
+    bare = ts.write3dTiles(
+        scene, tmp_path / "b", leafSize_m=512.0, terrainGridSize=33, withCanopy=False
+    )
+    assert validateTileset(withTrees) == [] and validateTileset(bare) == []
+    assert maxUp(withTrees) >= maxUp(bare)
