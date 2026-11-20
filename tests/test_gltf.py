@@ -78,3 +78,54 @@ def testWriteGlb_onlyColoredOrNothing(tmp_path: Path):
 def testWriteGlb_texturedPartNeedsUvAndTexture(tmp_path: Path):
     with pytest.raises(ValueError, match="uv"):
         writeGlb(tmp_path / "x.glb", textured=_square(uv=False), texture=b"x", colored=None)
+
+
+_PNG = b"\x89PNG\r\n\x1a\nfakepng"
+
+
+def testVertexNormals_flatAndSmooth():
+    from map3d.mesh.gltf import vertexNormals
+
+    flat = vertexNormals(_square(3.0).positions_ENU_m, _square(3.0).triangles)
+    np.testing.assert_allclose(flat, np.tile([0.0, 0.0, 1.0], (4, 1)))
+    # A ridge: two faces sloping 45 degrees either way share the top edge.
+    pos = np.array([[0, -1, 0], [1, -1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 0], [1, 1, 0]], float)
+    tris = np.array([[0, 1, 3], [0, 3, 2], [3, 5, 4], [3, 4, 2]], dtype=np.uint32)
+    normals = vertexNormals(pos, tris)
+    np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0)
+    np.testing.assert_allclose(normals[2], [0.0, 0.0, 1.0], atol=1e-12)  # averaged on the ridge
+    np.testing.assert_allclose(normals[0], [0.0, -np.sqrt(0.5), np.sqrt(0.5)])
+    # Degenerate (unused) vertices get "up".
+    np.testing.assert_allclose(
+        vertexNormals(np.zeros((1, 3)), np.zeros((0, 3), np.uint32)), [[0, 0, 1]]
+    )
+
+
+def testWriteGlb_litWritesNormalsAndPng(tmp_path: Path):
+    path = writeGlb(
+        tmp_path / "lit.glb",
+        textured=_square(1.0),
+        texture=_PNG,
+        colored=_square(2.0, uv=False, color=True),
+        lit=True,
+    )
+    gltf = pygltflib.GLTF2().load_binary(str(path))
+    assert "KHR_materials_unlit" not in (gltf.extensionsUsed or [])
+    assert gltf.images[0].mimeType == "image/png"
+    blob = gltf.binary_blob()
+    for prim in gltf.meshes[0].primitives:
+        acc = gltf.accessors[prim.attributes.NORMAL]
+        assert acc.type == "VEC3" and acc.componentType == pygltflib.FLOAT
+        view = gltf.bufferViews[acc.bufferView]
+        normals = np.frombuffer(
+            blob[view.byteOffset : view.byteOffset + view.byteLength], np.float32
+        ).reshape(-1, 3)
+        np.testing.assert_allclose(normals, np.tile([0.0, 1.0, 0.0], (4, 1)))  # up is +y in glTF
+
+
+def testWriteGlb_unlitTexturedPartHasNoNormals(tmp_path: Path):
+    path = writeGlb(tmp_path / "u.glb", textured=_square(1.0), texture=_PNG, colored=None)
+    gltf = pygltflib.GLTF2().load_binary(str(path))
+    assert gltf.meshes[0].primitives[0].attributes.NORMAL is None
+    assert "KHR_materials_unlit" in gltf.extensionsUsed
+    assert gltf.images[0].mimeType == "image/png"

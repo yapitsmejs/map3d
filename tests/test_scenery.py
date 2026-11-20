@@ -97,9 +97,9 @@ def testEmptySelections_giveEmptyParts(scene: Scene):
     assert all(p.isEmpty for p in scenery.deckParts(scene, empty, _full(scene)))
 
 
-def testTexture_landClassFallbackWithoutImagery(scene: Scene):
-    jpeg = scenery.renderTexture(scene, None, _full(scene), size=64)
-    assert jpeg[:2] == b"\xff\xd8"
+def testTexture_conceptualIsPngWithoutImagery(scene: Scene):
+    png = scenery.renderTexture(scene, None, _full(scene), size=64)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def testTexture_fromByoImageryFile(scene: Scene, tmp_path: Path):
@@ -157,3 +157,64 @@ def testTerrain_ignoresCanopyBelowThreshold(scene: Scene, monkeypatch: pytest.Mo
     low = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0)
     bare = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0, withCanopy=False)
     np.testing.assert_allclose(low.positions_ENU_m, bare.positions_ENU_m)
+
+
+def _decodePng(data: bytes) -> np.ndarray:
+    import warnings
+
+    from rasterio.errors import NotGeoreferencedWarning
+    from rasterio.io import MemoryFile
+
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    with warnings.catch_warnings(), MemoryFile(data) as mem:
+        warnings.simplefilter("ignore", NotGeoreferencedWarning)
+        with mem.open() as src:
+            return np.moveaxis(src.read(), 0, -1)
+
+
+@pytest.mark.parametrize(
+    ("e", "n", "name"),
+    [
+        (0.0, 380.0, "water"),
+        (100.0, -390.0, "grass"),
+        (-160.0, -100.0, "roof"),
+        (-350.0, -350.0, "tree"),  # canopy patch: tall trees, drawn as trees
+        (0.0, -450.0, "road"),  # ground-level road (centre line)
+        (0.0, 200.0, "deck"),  # bridge deck
+    ],
+)
+def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
+    extent = _full(scene)
+    size = 500  # 2 m pixels
+    rgb = _decodePng(scenery.renderTexture(scene, None, extent, size=size))
+    assert rgb.shape == (size, size, 3)
+    gx, gy = scenery.enuToGrid(scene.geometry, np.array(e), np.array(n))
+    col = int((gx - extent.x0) / (extent.x1 - extent.x0) * size)
+    row = int((extent.y1 - gy) / (extent.y1 - extent.y0) * size)
+    np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS[name])
+
+
+def testTexture_conceptualSoftensLandCoverEdges(scene: Scene):
+    # Grass meets water at n = 350 m: the land-cover colours blend across the
+    # 5 m source pixels instead of switching in a hard step.
+    extent = scenery.TileExtent(-60.0, 60.0, 290.0, 410.0)
+    rgb = _decodePng(scenery.renderTexture(scene, None, extent, size=240)).astype(int)
+    grass, water = (
+        np.array(scenery.CONCEPT_COLORS["grass"]),
+        np.array(scenery.CONCEPT_COLORS["water"]),
+    )
+    between = ~(np.all(rgb == grass, axis=-1) | np.all(rgb == water, axis=-1))
+    assert between.mean() > 0.005
+
+
+def testTexture_conceptualWithoutLandCoverUsesGridClasses(scene: Scene):
+    import dataclasses
+
+    models = dataclasses.replace(
+        scene.models, landCover=dataclasses.replace(scene.models.landCover, window=None)
+    )
+    bare = dataclasses.replace(scene, models=models)
+    rgb = _decodePng(scenery.renderTexture(bare, None, _full(scene), size=100))
+    gx, gy = scenery.enuToGrid(scene.geometry, np.array(100.0), np.array(-390.0))
+    col, row = int((gx + 500) / 10), int((500 - gy) / 10)
+    np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS["grass"])

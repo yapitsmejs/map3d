@@ -8,7 +8,9 @@ are at most ``leafSize_m``. Every tile carries a GLB with:
   at least :func:`minBuildingHeight_m` tall, so distant views keep the
   skyline);
 - decks (leaves and their parents);
-- a top-down texture from imagery or the land-class palette.
+- a top-down texture in one of two styles: ``"conceptual"`` (flat map colours
+  from land cover, roads, roofs and trees; lit, so the renderer shades the
+  shapes) or ``"satellite"`` (imagery draped unlit).
 
 Refinement is ``REPLACE``. A non-leaf tile's ``geometricError`` is the larger
 of its terrain tolerance and the building height it omits. The root
@@ -23,7 +25,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -43,9 +45,15 @@ from map3d.mesh.scenery import (
 if TYPE_CHECKING:
     from map3d.scene import Scene
 
-__all__ = ["minBuildingHeight_m", "quadtreeDepth", "write3dTiles"]
+__all__ = ["STYLES", "Style", "minBuildingHeight_m", "quadtreeDepth", "write3dTiles"]
 
 FloatArray = npt.NDArray[np.float64]
+Style = Literal["conceptual", "satellite"]
+STYLES: tuple[str, ...] = ("conceptual", "satellite")
+_TEXTURE_SIZE = {
+    "conceptual": 512,
+    "satellite": 256,
+}  # flat colours need ~0.5 m pixels at the leaves
 
 _BASE_SKYLINE_m = 10.0
 _BOX_PAD_m = 0.5
@@ -69,6 +77,7 @@ class _Params:
     terrainGridSize: int
     leafTerrainError_m: float
     withCanopy: bool
+    lit: bool
 
 
 def write3dTiles(
@@ -76,49 +85,71 @@ def write3dTiles(
     outDir: str | os.PathLike[str],
     imageryPath: str | os.PathLike[str] | None = None,
     leafSize_m: float = 512.0,
-    textureSize: int = 256,
+    textureSize: int | None = None,
     terrainGridSize: int = 129,
     leafTerrainError_m: float = 0.25,
     withCanopy: bool = True,
+    style: Style | None = None,
 ) -> Path:
     """Write the scene as a 3D Tiles 1.1 tileset.
 
     Args:
         scene: A scene from :func:`map3d.scene.buildScene` (needs its models).
         outDir: Output directory (``tileset.json`` + ``tiles/``).
-        imageryPath: BYO RGB GeoTIFF to drape (default: the pack's imagery,
-            else the land-class palette).
+        imageryPath: BYO RGB GeoTIFF to drape (satellite style; default: the
+            pack's imagery).
         leafSize_m: Maximum leaf tile size.
-        textureSize: Texture side in pixels per tile.
+        textureSize: Texture side in pixels per tile (default: 512 conceptual,
+            256 satellite).
         terrainGridSize: RTIN lattice side per tile (``2^k + 1``).
         leafTerrainError_m: RTIN tolerance at the leaves.
         withCanopy: Include vegetation (canopy >= 2 m) in the terrain surface.
+        style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
+            (imagery, unlit). Default: satellite when ``imageryPath`` is given,
+            else conceptual.
 
     Returns:
         Path of ``tileset.json``.
 
     Raises:
-        ValueError: If the scene was not built with ``buildScene``.
+        ValueError: If the scene was not built with ``buildScene``, the style is
+            unknown, imagery is given for the conceptual style, or the
+            satellite style has no imagery.
     """
     if scene.models is None or scene.pack is None:
         raise ValueError("write3dTiles needs a scene returned by buildScene (with its models)")
+    chosen = (
+        style if style is not None else ("satellite" if imageryPath is not None else "conceptual")
+    )
+    if chosen not in STYLES:
+        raise ValueError(f"unknown style {chosen!r}; choose from {', '.join(STYLES)}")
+    if chosen == "conceptual" and imageryPath is not None:
+        raise ValueError("imagery cannot be draped in the conceptual style; use style 'satellite'")
     root = Path(outDir)
     g = scene.geometry
     width_m, height_m = g.nCols * g.gridSpacing_m, g.nRows * g.gridSpacing_m
     params = _Params(
         depth=quadtreeDepth(width_m, height_m, leafSize_m),
         rootExtent=TileExtent(-width_m / 2, width_m / 2, -height_m / 2, height_m / 2),
-        textureSize=textureSize,
+        textureSize=textureSize if textureSize is not None else _TEXTURE_SIZE[chosen],
         terrainGridSize=terrainGridSize,
         leafTerrainError_m=leafTerrainError_m,
         withCanopy=withCanopy,
+        lit=chosen == "conceptual",
     )
     bounds = g.footprintBounds_deg(margin_m=g.gridSpacing_m)
-    imagery = (
-        ImagerySource.fromFile(imageryPath, bounds)
-        if imageryPath is not None
-        else ImagerySource.fromPack(scene.pack, bounds)
-    )
+    imagery: ImagerySource | None = None
+    if chosen == "satellite":
+        imagery = (
+            ImagerySource.fromFile(imageryPath, bounds)
+            if imageryPath is not None
+            else ImagerySource.fromPack(scene.pack, bounds)
+        )
+        if imagery is None:
+            raise ValueError(
+                "the satellite style needs imagery: the pack has no imagery source; "
+                "pass an imagery file or use style 'conceptual'"
+            )
     buildingXY = _centroidsGrid(scene, scene.models.buildings.pixelGeometries)
     deckXY = _centroidsGrid(scene, scene.models.decks.pixelShapes)
     tileJson = _writeTile(scene, root, params, imagery, buildingXY, deckXY, 0, 0, 0)
@@ -131,7 +162,11 @@ def write3dTiles(
         "asset": {
             "version": "1.1",
             "generator": f"map3d {__version__}",
-            "extras": {"attribution": attribution, "request": scene.metadata.get("request", {})},
+            "extras": {
+                "attribution": attribution,
+                "request": scene.metadata.get("request", {}),
+                "style": chosen,
+            },
         },
         "geometricError": 2.0 * tileJson["geometricError"] + 1.0,
         "root": tileJson,
@@ -185,7 +220,11 @@ def _writeTile(
     colored = MeshPart.concatenate([walls, sides])
     uri = f"tiles/{level}/{ix}_{iy}.glb"
     writeGlb(
-        root / uri, textured, renderTexture(scene, imagery, extent, params.textureSize), colored
+        root / uri,
+        textured,
+        renderTexture(scene, imagery, extent, params.textureSize),
+        colored,
+        lit=params.lit,
     )
 
     positions = np.concatenate([p.positions_ENU_m for p in (textured, colored) if not p.isEmpty])

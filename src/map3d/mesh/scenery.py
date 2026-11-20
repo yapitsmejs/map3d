@@ -31,6 +31,13 @@ from rasterio.io import MemoryFile
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.decks import DECK_THICKNESS_m
+from map3d.layers.landCover import (
+    CLASS_BUILDING,
+    CLASS_DECK,
+    CLASS_RAIL,
+    CLASS_ROAD,
+    remapClasses,
+)
 from map3d.mesh.gltf import MeshPart
 from map3d.mesh.martini import checkGridSize, rtinErrors, rtinMesh
 from map3d.pack.reader import Pack, RasterWindow, readRasterWindow
@@ -39,6 +46,7 @@ if TYPE_CHECKING:
     from map3d.scene import Scene
 
 __all__ = [
+    "CONCEPT_COLORS",
     "DECK_COLOR",
     "MIN_MESH_CANOPY_m",
     "WALL_COLOR",
@@ -54,26 +62,44 @@ __all__ = [
 
 FloatArray = npt.NDArray[np.float64]
 
-WALL_COLOR = (214, 210, 200)
+WALL_COLOR = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
 MIN_MESH_CANOPY_m = 2.0  # lower vegetation (grass, shrubs) stays flat in the mesh
-DECK_COLOR = (165, 160, 155)
-_CLASS_PALETTE = {
-    0: (90, 90, 90),
-    10: (46, 110, 46),
-    20: (140, 140, 70),
-    30: (140, 180, 100),
-    40: (215, 200, 110),
-    50: (170, 120, 105),
-    60: (180, 170, 150),
-    70: (240, 240, 240),
-    80: (50, 95, 170),
-    90: (70, 140, 140),
-    95: (30, 100, 80),
-    100: (160, 170, 140),
-    200: (200, 195, 185),
-    210: (95, 95, 95),
-    220: (130, 125, 120),
-    230: (120, 100, 80),
+DECK_COLOR = (172, 174, 180)
+
+# Conceptual (map-like) style: flat pastel colours, shaded by the renderer.
+CONCEPT_COLORS: dict[str, tuple[int, int, int]] = {
+    "grass": (205, 229, 172),
+    "treeCover": (186, 219, 154),  # WorldCover trees where the canopy is under 2 m
+    "tree": (96, 164, 76),  # canopy >= MIN_MESH_CANOPY_m (raised in the mesh)
+    "builtUp": (233, 230, 223),
+    "bare": (232, 223, 198),
+    "snow": (246, 246, 246),
+    "water": (146, 200, 235),
+    "wetland": (178, 214, 188),
+    "road": (178, 180, 186),
+    "rail": (162, 154, 148),
+    "deck": (190, 192, 198),
+    "roof": (214, 214, 212),
+    "unknown": (228, 228, 222),
+}
+_LAND_COVER_STYLE = {
+    10: "treeCover",
+    20: "grass",
+    30: "grass",
+    40: "grass",
+    50: "builtUp",
+    60: "bare",
+    70: "snow",
+    80: "water",
+    90: "wetland",
+    95: "treeCover",
+    100: "grass",
+}
+_OVERLAY_STYLE = {
+    CLASS_BUILDING: "roof",
+    CLASS_ROAD: "road",
+    CLASS_DECK: "deck",
+    CLASS_RAIL: "rail",
 }
 
 
@@ -319,50 +345,103 @@ class ImagerySource:
 def renderTexture(
     scene: Scene, imagery: ImagerySource | None, extent: TileExtent, size: int = 256
 ) -> bytes:
-    """Render a tile's top-down texture as JPEG bytes.
+    """Render a tile's top-down texture.
+
+    With imagery, the imagery is sampled (JPEG). Without, the conceptual style
+    is drawn (lossless PNG, flat colours from :data:`CONCEPT_COLORS`):
+
+    - **Land cover:** the source raster's classes coloured and sampled
+      bilinearly, so its coarse pixels blend softly (grid classes if absent).
+    - **Crisp overlays** from the grid's ``landClass`` layer: roads, rail, decks
+      and building roofs.
+    - **Trees:** wherever the canopy is at least :data:`MIN_MESH_CANOPY_m`,
+      matching where the mesh raises the surface (not on roofs or decks).
 
     Args:
         scene: Built scene.
-        imagery: Imagery to drape, or ``None`` for the land-class palette.
+        imagery: Imagery to drape, or ``None`` for the conceptual style.
         extent: Tile extent.
         size: Texture side in pixels.
 
     Returns:
-        JPEG bytes.
+        JPEG (imagery) or PNG (conceptual) bytes.
     """
     t = (np.arange(size) + 0.5) / size
     gx = extent.x0 + t * (extent.x1 - extent.x0)
     gy = extent.y1 - t * (extent.y1 - extent.y0)
     gxm, gym = np.meshgrid(gx, gy)
+    e, n = gridToEnu(scene.geometry, gxm, gym)
+    toGeo = _orthoToGeographic(scene.geometry.orthoCrs().to_wkt())
+    lon, lat = (np.asarray(v) for v in toGeo.transform(e, n))
     if imagery is not None:
-        e, n = gridToEnu(scene.geometry, gxm, gym)
-        toGeo = _orthoToGeographic(scene.geometry.orthoCrs().to_wkt())
-        lon, lat = toGeo.transform(e, n)
-        rgb = imagery.sampleRgb(np.asarray(lat), np.asarray(lon))
-    else:
-        rgb = _classTexture(scene, gxm, gym)
-    return _jpeg(rgb)
+        return _encode(imagery.sampleRgb(lat, lon), "JPEG")
+    return _encode(_conceptTexture(scene, extent, size, lat, lon), "PNG")
 
 
-def _classTexture(scene: Scene, gx: FloatArray, gy: FloatArray) -> npt.NDArray[np.uint8]:
+_SUPERSAMPLE = 2  # crisp overlays are sampled 2x per axis and averaged (anti-aliased edges)
+
+
+def _styleLut(table: dict[int, str]) -> npt.NDArray[np.float64]:
+    lut = np.tile(np.array(CONCEPT_COLORS["unknown"], dtype=np.float64), (256, 1))
+    for code, name in table.items():
+        lut[code] = CONCEPT_COLORS[name]
+    return lut
+
+
+def _softLandCover(scene: Scene, lat: FloatArray, lon: FloatArray) -> FloatArray:
+    """Land-cover colours sampled bilinearly from the source raster (NaN outside / absent)."""
+    rgb = np.full((*lat.shape, 3), np.nan)
+    window = scene.models.landCover.window if scene.models is not None else None
+    if window is None:
+        return rgb
+    landLut = _styleLut(_LAND_COVER_STYLE)
+    valid = np.isfinite(window.values)
+    codes = remapClasses(np.where(valid, window.values, 0).astype(np.int64), window.sourceId)
+    for k in range(3):
+        band = RasterWindow(
+            np.where(valid, landLut[codes, k], np.nan),
+            window.transform,
+            window.crs,
+            window.sourceId,
+        )
+        rgb[..., k] = band.sample(lat, lon)
+    return rgb
+
+
+def _conceptTexture(
+    scene: Scene, extent: TileExtent, size: int, lat: FloatArray, lon: FloatArray
+) -> npt.NDArray[np.uint8]:
+    k = _SUPERSAMPLE
+    t = (np.arange(size * k) + 0.5) / (size * k)
+    gx, gy = np.meshgrid(
+        extent.x0 + t * (extent.x1 - extent.x0), extent.y1 - t * (extent.y1 - extent.y0)
+    )
     g = scene.geometry
     s = g.gridSpacing_m
     col = np.clip(((gx + 0.5 * g.nCols * s) / s).astype(np.int64), 0, g.nCols - 1)
     row = np.clip(((gy + 0.5 * g.nRows * s) / s).astype(np.int64), 0, g.nRows - 1)
     classes = np.asarray(scene.layers["landClass"])[row, col]
-    lut = np.zeros((256, 3), dtype=np.uint8)
-    for code, colour in _CLASS_PALETTE.items():
-        lut[code] = colour
-    rgb: npt.NDArray[np.uint8] = lut[classes]
-    return rgb
+    canopy = np.nan_to_num(np.asarray(scene.layers["canopyHeight_m"])[row, col], nan=0.0)
+
+    # Land cover is soft anyway: sample it at the texture resolution, then repeat.
+    soft = np.repeat(np.repeat(_softLandCover(scene, lat, lon), k, axis=0), k, axis=1)
+    rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
+    overlay = np.isin(classes, list(_OVERLAY_STYLE))
+    rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
+    trees = (canopy >= MIN_MESH_CANOPY_m) & ~np.isin(classes, [CLASS_BUILDING, CLASS_DECK])
+    rgb[trees] = CONCEPT_COLORS["tree"]
+    averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
+    out: npt.NDArray[np.uint8] = np.clip(np.round(averaged), 0, 255).astype(np.uint8)
+    return out
 
 
-def _jpeg(rgb: npt.NDArray[np.uint8]) -> bytes:
+def _encode(rgb: npt.NDArray[np.uint8], driver: str) -> bytes:
     height, width, _ = rgb.shape
+    options = {"quality": 85} if driver == "JPEG" else {}
     with warnings.catch_warnings(), MemoryFile() as mem:
         warnings.simplefilter("ignore", NotGeoreferencedWarning)  # textures are not georeferenced
         with mem.open(
-            driver="JPEG", width=width, height=height, count=3, dtype="uint8", quality=85
+            driver=driver, width=width, height=height, count=3, dtype="uint8", **options
         ) as dst:
             dst.write(np.moveaxis(rgb, -1, 0))
         return bytes(mem.read())

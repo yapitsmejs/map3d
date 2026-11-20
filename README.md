@@ -14,8 +14,9 @@ whose rows are the grid x, y, z axes in ENU) and swath size, `map3d` produces:
   - building and canopy heights;
   - up to K stacked elevated-deck levels;
   - land class, feature IDs and per-node provenance.
-- **A 3D Tiles 1.1 mesh** for visualization: imagery-draped terrain, LOD1
-  buildings and true 3D bridge decks, with a bundled offline viewer.
+- **A 3D Tiles 1.1 mesh** for visualization: terrain with trees, LOD1
+  buildings and true 3D bridge decks, in a clean map-like style (or draped
+  with satellite imagery), with a bundled offline viewer.
 
 It runs fully offline from portable **data packs** of open data:
 
@@ -69,7 +70,11 @@ Other options:
 
 - `map3d build --datum ellipsoid` switches heights to the WGS84 ellipsoid.
 - `--decks K` sets the number of stacked deck levels.
-- `--imagery ortho.tif` drapes your own orthophoto.
+- `--style satellite` drapes the pack's Sentinel-2 imagery instead of the
+  default conceptual (map-like) colours.
+- `--imagery ortho.tif` drapes your own orthophoto (implies `--style satellite`).
+- In the viewer, the URL hash (`#cam=...`) holds the camera, so a view can be
+  bookmarked or shared.
 - `--ground-smoothing M` sets the ground low-pass width in metres (default 90;
   0 keeps FABDEM's raw 30 m bumps).
 - `map3d ingest` adds files you obtained yourself to a pack (see the spec,

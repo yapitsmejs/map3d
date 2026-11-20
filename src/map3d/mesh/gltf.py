@@ -2,11 +2,12 @@
 
 A tile's GLB holds one mesh with up to two primitives:
 
-- **textured:** terrain, roofs and deck tops, draped with the tile's imagery
-  texture (an embedded JPEG). Unlit (``KHR_materials_unlit``), so imagery
-  keeps its true colours.
-- **colored:** walls and deck sides, with per-vertex colours. Lit and
-  double-sided.
+- **textured:** terrain, roofs and deck tops, draped with the tile's
+  texture (an embedded JPEG or PNG). Unlit (``KHR_materials_unlit``) for
+  imagery, which already carries real light and shadow; lit, with vertex
+  normals, for the conceptual style, so the shape reads through flat colours.
+- **colored:** walls and deck sides, with per-vertex colours and normals. Lit
+  and double-sided.
 
 Positions are ENU metres relative to the scene centre, written y-up as glTF
 requires: ``(x, y, z) = (E, U, -N)``. 3D Tiles rotates glTF content y-up ->
@@ -25,12 +26,13 @@ import numpy as np
 import numpy.typing as npt
 import pygltflib
 
-__all__ = ["MeshPart", "enuToGltf", "writeGlb"]
+__all__ = ["MeshPart", "enuToGltf", "vertexNormals", "writeGlb"]
 
 FloatArray = npt.NDArray[np.float64]
 
 _ARRAY_BUFFER = 34962
 _ELEMENT_ARRAY_BUFFER = 34963
+_PNG_SIGNATURE = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
 
 
 @dataclass(frozen=True, eq=False)
@@ -84,19 +86,48 @@ def enuToGltf(positions_ENU_m: FloatArray) -> FloatArray:
     return np.column_stack([p[:, 0], p[:, 2], -p[:, 1]])
 
 
+def vertexNormals(positions: FloatArray, triangles: npt.NDArray[np.uint32]) -> FloatArray:
+    """Area-weighted unit vertex normals.
+
+    Vertices shared between triangles get a smooth (averaged) normal; triangles
+    with their own vertices come out flat. Unused or degenerate vertices point up.
+
+    Args:
+        positions: Vertex positions, ``(n, 3)``.
+        triangles: Vertex indices, ``(m, 3)``.
+
+    Returns:
+        Unit normals, ``(n, 3)``, in the frame of ``positions``.
+    """
+    p = np.asarray(positions, dtype=np.float64)
+    tris = np.asarray(triangles, dtype=np.int64)
+    acc = np.zeros_like(p)
+    if tris.shape[0]:
+        face = np.cross(p[tris[:, 1]] - p[tris[:, 0]], p[tris[:, 2]] - p[tris[:, 0]])
+        for k in range(3):
+            np.add.at(acc, tris[:, k], face)
+    length = np.linalg.norm(acc, axis=1)
+    ok = length > 0
+    out = np.tile(np.array([0.0, 0.0, 1.0]), (p.shape[0], 1))
+    out[ok] = acc[ok] / length[ok, None]
+    return out
+
+
 def writeGlb(
     path: str | os.PathLike[str],
     textured: MeshPart | None,
     texture: bytes | None,
     colored: MeshPart | None,
+    lit: bool = False,
 ) -> Path:
     """Write a GLB with a textured and/or a vertex-coloured primitive.
 
     Args:
         path: Output path.
         textured: Part with UVs (drawn with ``texture``), or ``None``.
-        texture: JPEG bytes for the textured part.
+        texture: JPEG or PNG bytes for the textured part.
         colored: Part with vertex colours, or ``None``.
+        lit: Shade the textured part (vertex normals, no ``KHR_materials_unlit``).
 
     Returns:
         The written path.
@@ -150,7 +181,7 @@ def writeGlb(
         gltf.accessors.append(accessor)
         return len(gltf.accessors) - 1
 
-    def addPrimitive(part: MeshPart, material: int, uv: bool) -> None:
+    def addPrimitive(part: MeshPart, material: int, uv: bool, normals: bool) -> None:
         attributes = pygltflib.Attributes(
             POSITION=addAccessor(
                 enuToGltf(part.positions_ENU_m).astype(np.float32),
@@ -160,6 +191,10 @@ def writeGlb(
                 withBounds=True,
             )
         )
+        if normals:
+            n = enuToGltf(vertexNormals(part.positions_ENU_m, part.triangles)).astype(np.float32)
+            n /= np.linalg.norm(n, axis=1, keepdims=True)  # unit length after float32 rounding
+            attributes.NORMAL = addAccessor(n, pygltflib.FLOAT, pygltflib.VEC3, _ARRAY_BUFFER)
         if uv and part.uv is not None:
             attributes.TEXCOORD_0 = addAccessor(
                 part.uv.astype(np.float32), pygltflib.FLOAT, pygltflib.VEC2, _ARRAY_BUFFER
@@ -188,7 +223,8 @@ def writeGlb(
 
     if hasTextured and textured is not None and texture is not None:
         image = addView(texture, None)
-        gltf.images.append(pygltflib.Image(bufferView=image, mimeType="image/jpeg"))
+        mime = "image/png" if texture.startswith(_PNG_SIGNATURE) else "image/jpeg"
+        gltf.images.append(pygltflib.Image(bufferView=image, mimeType=mime))
         gltf.samplers.append(
             pygltflib.Sampler(magFilter=9729, minFilter=9987, wrapS=33071, wrapT=33071)
         )
@@ -200,11 +236,12 @@ def writeGlb(
                     metallicFactor=0.0,
                     roughnessFactor=1.0,
                 ),
-                extensions={"KHR_materials_unlit": {}},
+                extensions={} if lit else {"KHR_materials_unlit": {}},
             )
         )
-        gltf.extensionsUsed.append("KHR_materials_unlit")
-        addPrimitive(textured, len(gltf.materials) - 1, uv=True)
+        if not lit:
+            gltf.extensionsUsed.append("KHR_materials_unlit")
+        addPrimitive(textured, len(gltf.materials) - 1, uv=True, normals=lit)
     if hasColored and colored is not None:
         gltf.materials.append(
             pygltflib.Material(
@@ -214,7 +251,7 @@ def writeGlb(
                 doubleSided=True,
             )
         )
-        addPrimitive(colored, len(gltf.materials) - 1, uv=False)
+        addPrimitive(colored, len(gltf.materials) - 1, uv=False, normals=True)
 
     gltf.meshes.append(pygltflib.Mesh(primitives=primitives))
     while len(blob) % 4:

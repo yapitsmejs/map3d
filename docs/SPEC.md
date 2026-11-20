@@ -206,9 +206,21 @@ building > deck > road/rail > land cover.
   - **Elevated structures:** true 3D decks (road/rail centerline swept to
     width, with thickness) with open space underneath. Every level is
     included, not just `K`.
-- **Appearance:** terrain and roofs are draped with imagery, using a
-  Sentinel-2 cloud-free composite (~10 m) by default, or the BYO orthophoto
-  when given. Walls and deck sides are shaded by class.
+- **Appearance:** two styles (`write3dTiles(style=...)`, `map3d build --style`):
+  - **`conceptual` (default):** a clean, map-like look in the spirit of
+    geosg.app. Terrain, roofs and deck tops get flat pastel colours:
+    - **Land cover:** WorldCover, sampled bilinearly so its 10 m cells blend
+      softly. Grass is pale green, built-up land warm light grey, water blue.
+    - **Crisp overlays from the grid:** grey roads, rail and decks, grey roofs,
+      and tree green wherever the canopy is ≥ 2 m (the crowns the mesh raises).
+    - **Shading:** materials are lit, with vertex normals (smooth on terrain,
+      so canopy reads as rounded crowns; flat on roofs and walls). The renderer
+      shades the shapes; walls are white.
+    - **Not drawn:** road labels, lane markings, windows and roof colours (no
+      open data for the last two).
+  - **`satellite`:** the Sentinel-2 cloud-free composite (~10 m), or the BYO
+    orthophoto, draped unlit. Chosen automatically when `--imagery` is given;
+    an error if no imagery is available.
 - `map3d view <tilesetDir>` serves the tileset on localhost with a bundled
   offline viewer.
   - **Why three.js:** the viewer is vendored three.js r170 (MIT, ~0.9 MB) plus
@@ -225,16 +237,23 @@ building > deck > road/rail > land cover.
   - **Terrain:** RTIN (Martini) on a 129² lattice per tile. The tolerance is
     0.25 m at the leaves and doubles per level.
   - **Vegetation:** the terrain surface is ground + canopy wherever the canopy
-    is ≥ 2 m (`withCanopy=True`, the default), so tree crowns are draped with
-    the imagery. The grid layers keep bare ground and canopy separate. On the
+    is ≥ 2 m (`withCanopy=True`, the default), so tree crowns are part of the
+    draped surface. The grid layers keep bare ground and canopy separate. On the
     Loyang 4.5 km scene this takes the mesh from 1.05M to 2.9M triangles
     (53 → 94 MB).
   - **Buildings:** parent tiles keep buildings ≥ 10 m × 2^(levels above the
     leaves − 1), so distant views keep the skyline.
   - **Decks:** in leaves and their parents.
   - **Geometric error:** max(terrain tolerance, omitted building height).
-  - **Texture:** one 256² JPEG per tile, projected top-down onto terrain,
-    roofs and deck tops. Walls and deck sides use RGBA vertex colours.
+  - **Texture:** one per tile, projected top-down onto terrain, roofs and deck
+    tops. Conceptual: 512² PNG, overlays sampled 2× per axis and averaged
+    (anti-aliased edges, ~0.55 m pixels at the leaves). Satellite: 256² JPEG.
+    Walls and deck sides use RGBA vertex colours.
+  - **Loyang 4.5 km, conceptual:** 141 MB of tiles, written in ~75 s
+    (satellite: ~94 MB in ~18 s).
+  - **Viewer camera in the URL:** `#cam=E,N,U,targetE,targetN,targetU` (scene
+    ENU metres). The hash follows the camera, so views can be bookmarked or
+    shared.
   - **Attribution:** stored in `asset.extras.attribution`.
 
 ## 8. Data sources and precedence
@@ -414,7 +433,7 @@ scene.write3dTiles("out/tiles", imageryPath=None)
 map3d build   --lat 1.2834 --lon 103.8607 --spacing 0.5 --axes axes.json \
               --swath 5000 5000 --datum msl --decks 5 --pack sg.pack \
               --out out/ --format npz,geotiff,3dtiles [--imagery ortho.tif] \
-              [--ground-smoothing 90]
+              [--ground-smoothing 90] [--style conceptual|satellite]
 map3d prepare --bbox 103.5 1.1 104.2 1.5 --out sg.pack
 map3d ingest  --pack sg.pack --source overtureBuildings ./buildings.parquet
 map3d view    out/tiles

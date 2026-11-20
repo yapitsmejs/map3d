@@ -18,10 +18,15 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 container.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x9fb8cf);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
-const sun = new THREE.DirectionalLight(0xffffff, 1.4);
-sun.position.set(-0.4, 1.0, 0.6);
+scene.background = new THREE.Color(0xdde8f2);
+// Conceptual style lighting (satellite tiles are unlit and ignore it): a soft
+// sky with a light ground bounce keeps shaded walls light grey, and a sun 35
+// degrees up in the south-west lights south- and west-facing walls and leaves
+// east- and north-facing ones in shade, so roofs, sunlit walls and shaded walls
+// read apart from any southern viewpoint.
+scene.add(new THREE.HemisphereLight(0xffffff, 0xe0dcd2, 1.7));
+const sun = new THREE.DirectionalLight(0xfff8ee, 1.9);
+sun.position.set(-0.6, 0.6, 0.6);
 scene.add(sun);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 200000);
@@ -113,6 +118,22 @@ const size = extent.getSize(new THREE.Vector3());
 const radius = Math.max(size.x, size.z) * 0.6;
 controls.target.copy(centre);
 camera.position.set(centre.x + radius * 0.6, centre.y + radius * 0.8, centre.z + radius * 0.9);
+
+// Optional view in the URL: #cam=E,N,U,targetE,targetN,targetU (scene ENU metres).
+// The hash follows the camera, so a view can be bookmarked or shared.
+const enuToThree = (e, n, u) => new THREE.Vector3(e, u, -n);
+const fromHash = /cam=([-\d.,e]+)/.exec(window.location.hash);
+const parts = fromHash ? fromHash[1].split(',').map(Number) : [];
+if (parts.length === 6 && parts.every(Number.isFinite)) {
+  camera.position.copy(enuToThree(parts[0], parts[1], parts[2]));
+  controls.target.copy(enuToThree(parts[3], parts[4], parts[5]));
+}
+controls.addEventListener('end', () => {
+  const p = camera.position;
+  const t = controls.target;
+  const view = [p.x, -p.z, p.y, t.x, -t.z, t.y].map((v) => v.toFixed(1)).join(',');
+  history.replaceState(null, '', `#cam=${view}`);
+});
 controls.update();
 
 window.addEventListener('resize', () => {

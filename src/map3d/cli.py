@@ -158,6 +158,14 @@ def build(
             help="Ground low-pass width (m, FWHM): removes terrain bumps narrower than this. 0 = off.",
         ),
     ] = DEFAULT_GROUND_SMOOTHING_m,
+    style: Annotated[
+        str | None,
+        typer.Option(
+            "--style",
+            help="3D Tiles look: conceptual (flat map colours) or satellite (imagery). "
+            "Default: satellite with --imagery, else conceptual.",
+        ),
+    ] = None,
 ) -> None:
     """Build a scene (grid layers and/or 3D Tiles) from an offline pack."""
     try:
@@ -188,7 +196,11 @@ def build(
         paths = scene.writeGeoTiff(out / "geotiff")
         typer.echo(f"  wrote {len(paths)} GeoTIFFs to {out / 'geotiff'}")
     if "3dtiles" in wanted:
-        tileset = scene.write3dTiles(out / "tiles")
+        try:
+            tileset = scene.write3dTiles(out / "tiles", style=style)  # type: ignore[arg-type]
+        except ValueError as exc:
+            scene.close()
+            _fail(exc)
         typer.echo(f"  wrote {tileset} (view with: map3d view {out / 'tiles'})")
     scene.close()
 

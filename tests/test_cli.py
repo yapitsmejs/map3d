@@ -363,3 +363,16 @@ def testCliBuild_groundSmoothingFlag(tmp_path, synPack):
     assert json.loads((tmp_path / "b" / "scene.json").read_text())["groundSmoothing_m"] == 90.0
     result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "c", "--ground-smoothing", "-5"))
     assert result.exit_code == 1 and "smoothing" in result.output
+
+
+def testCliBuild_styleFlag(tmp_path, synPack):
+    import json
+
+    result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "a", "--format", "3dtiles"))
+    assert result.exit_code == 0, result.output
+    tileset = json.loads((tmp_path / "a" / "tiles" / "tileset.json").read_text())
+    assert tileset["asset"]["extras"]["style"] == "conceptual"
+    result = runner.invoke(
+        cli.app, _buildArgs(synPack, tmp_path / "b", "--format", "3dtiles", "--style", "satellite")
+    )
+    assert result.exit_code == 1 and "imagery" in result.output

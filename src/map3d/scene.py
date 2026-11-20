@@ -17,7 +17,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -37,6 +37,9 @@ from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
 from map3d.pack.reader import Pack
 from map3d.pack.registry import sourcesForRole
 from map3d.request import SceneRequest
+
+if TYPE_CHECKING:
+    from map3d.mesh.tileset import Style
 
 __all__ = ["LAYER_INFO", "Scene", "buildScene"]
 
@@ -193,15 +196,19 @@ class Scene:
         imageryPath: str | os.PathLike[str] | None = None,
         withViewer: bool = True,
         withCanopy: bool = True,
+        style: Style | None = None,
     ) -> Path:
         """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
 
         Args:
             outDir: Output directory.
             imageryPath: BYO RGB GeoTIFF to drape (default: the request's
-                ``imageryPath``, else the pack's imagery, else land-class colours).
+                ``imageryPath``, else the pack's imagery in the satellite style).
             withViewer: Also install the offline viewer (``map3d view``).
             withCanopy: Include vegetation (canopy >= 2 m) in the terrain surface.
+            style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
+                (imagery). Default: satellite when imagery is given (here or in
+                the request), else conceptual.
 
         Returns:
             Path of ``tileset.json``.
@@ -210,7 +217,7 @@ class Scene:
         from map3d.viewer import installViewer
 
         drape = imageryPath if imageryPath is not None else self.request.imageryPath
-        path = write3dTiles(self, outDir, imageryPath=drape, withCanopy=withCanopy)
+        path = write3dTiles(self, outDir, imageryPath=drape, withCanopy=withCanopy, style=style)
         if withViewer:
             installViewer(outDir)
         return path
