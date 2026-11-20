@@ -22,14 +22,21 @@ internet-connected machine and copied over.
 - Specification: [`docs/SPEC.md`](docs/SPEC.md)
 - Roadmap: [`plans/developmentPlan.md`](plans/developmentPlan.md)
 
-> **Status:** M3 of 8. `map3d build` produces terrain + buildings grids
-> (`.npz` + JSON, GeoTIFF) from offline packs; `map3d ingest` / `map3d info`
-> manage packs. Canopy, land cover, decks (M5), `prepare` (M4) and 3D Tiles
-> (M7) are still to come. Try it on a synthetic pack:
+> **Status:** M4 of 8.
+> - **Working now:**
+>   - `map3d prepare` downloads real open data into an offline pack.
+>   - `map3d build` produces terrain + buildings grids (`.npz` + JSON,
+>     GeoTIFF).
+>   - `map3d ingest` / `map3d info` manage packs.
+> - **Still to come:** canopy, land cover and decks (M5), performance (M6),
+>   3D Tiles (M7).
 >
 > ```bash
-> uv run python -c "from map3d.pack import makeSyntheticPack; makeSyntheticPack('demo.pack', terrain='hill')"
-> uv run map3d build --lat 1.3 --lon 103.8 --spacing 1 --swath 1000 1000 --pack demo.pack --out out --format npz,geotiff
+> # online machine (add --system-certs behind TLS-intercepting proxies)
+> uv sync --extra prepare
+> uv run map3d prepare --bbox 103.83 1.26 103.89 1.31 --out marina.pack --system-certs
+> # anywhere, offline
+> uv run map3d build --lat 1.2834 --lon 103.8607 --spacing 2 --swath 4000 4000 --pack marina.pack --out out --format npz,geotiff
 > ```
 
 ## Install
@@ -43,8 +50,7 @@ uv sync --extra prepare      # (online machine only) extras for `map3d prepare`
 
 ## Usage
 
-Target interface (see the spec, §10); `write3dTiles` and `prepare` are not
-implemented yet:
+Python interface (see the spec, §10); `write3dTiles` is not implemented yet:
 
 ```python
 from map3d import SceneRequest, buildScene

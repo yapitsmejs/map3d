@@ -82,3 +82,57 @@ heights, no open LiDAR/DEM, and no downloadable tree inventory**.
 - Buildings use authoritative-first precedence: HDB, then Overture, then URA.
 - `SourceEntry.accessedDate` is filled into `{accessed}` in attribution
   notices.
+
+## M4 access-path findings (verified 2026-11-20)
+
+**Networking**
+- **TLS interception:** this network intercepts TLS for most hosts (Google
+  Cloud Storage was the exception). Python/certifi, GDAL's bundled curl
+  (Schannel on Windows wheels) and Arrow S3 all fail verification by default.
+- **Fix:** export the Windows ROOT + CA stores plus certifi to a PEM file
+  (`map3d.prepare.certs.exportCaBundle`). It works for `httpx` (via an SSL
+  context) and for Arrow (`S3FileSystem(tls_ca_file_path=…)`).
+- **GDAL:** its curl/Schannel ignored the bundle in every combination tried
+  (`CURL_CA_BUNDLE`, `GDAL_HTTP_SSL_OPTIONS=NATIVE_CA`). So GDAL never makes
+  network requests itself: `rasterio.open(url, opener=…)` drives GDAL through
+  a Python HTTP range reader (`HttpRangeFile`) instead. rasterio validates an
+  opener by sizing a dummy path `test/test`; anything other than
+  `AttributeError`/`TypeError`/`ValueError` (e.g. `FileNotFoundError`) passes.
+
+**Rasters**
+- **Windowed reads are cheap:** EGM2008, GLO-30 and WorldCover windows cost
+  2–4 range requests (~2–4 MB) each.
+- **FABDEM:** the Bristol repository serves 10°×10° zips (`N00E100-N10E110` is
+  556 MB, 61 members). Reading the central directory takes one request, and
+  the `N01E103` member is 14.8 MB.
+- **Meta canopy:** zoom-9 quadkey tiles are 1.1 GB, EPSG:3857, uint8,
+  65536² px, in row strips with no overviews. Windowed reads still work, but
+  cost roughly one strip per output row.
+- **Google 2.5D manifests:**
+  - `uriPrefix` (`gs://…/v1/geotiffs/31`) is a literal string prefix:
+    prefix + uri gives `…/geotiffs/3123c_2023_06_30/tile_*.tif`.
+  - The 2023 manifests list 151 files; Singapore/Johor/Riau-north use
+    `31_EPSG_32648`, and Riau-south uses `2f_EPSG_32748`.
+  - Tile discovery: list the bucket, keep the area's UTM zone(s), then select
+    by each tile's affine transform.
+
+**Vectors**
+- **Overture `2026-11-18.0`:** buildings have `height`, `num_floors`,
+  `is_underground`, `has_parts` and a `bbox` struct (512 files, 128 row groups
+  each). Segments have `subtype` (road/rail/water), plus
+  `road_flags`/`rail_flags`/`level_rules`/`width_rules` as linear-referenced
+  `between` lists.
+- **data.gov.sg:**
+  - **Formats:** GeoJSONs have plain WGS84 properties (no HTML
+    `Description`). The metadata endpoint is not under `/v1/public/api`;
+    poll-download needs no key.
+  - **LTA `TYP_CD`:** Vehicular Bridge 368, Flyover 189, Vehicular Tunnel 25,
+    Vehicular Underpass 21. Tunnels and underpasses are excluded.
+  - **Master Plan rail:** 466 ABOVEGROUND vs 931 UNDERGROUND segments.
+- **HDB storey join:**
+  - Block-number-set matching between `ST_COD` and street names joins 91.9%
+    of footprints.
+  - Adding the code's two-letter prefix as a tie-breaker (`YIA06H` → YIshun
+    Ave) raises that to **98.6%** (634/660 codes).
+  - A hard prefix *filter* is worse (89.6%) because Property Information
+    abbreviates names (BT = Bukit, etc.).

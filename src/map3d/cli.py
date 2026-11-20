@@ -1,7 +1,7 @@
 """``map3d`` command-line entry point.
 
-Implemented: ``build`` (npz, geotiff), ``ingest``, ``info``. Still to come (see
-``plans/developmentPlan.md``): ``build --format 3dtiles``, ``prepare``, ``view``.
+Implemented: ``build`` (npz, geotiff), ``prepare``, ``ingest``, ``info``. Still to come (see
+``plans/developmentPlan.md``): ``build --format 3dtiles``, ``view``.
 """
 
 from __future__ import annotations
@@ -184,6 +184,61 @@ def build(
     if "geotiff" in wanted:
         paths = scene.writeGeoTiff(out / "geotiff")
         typer.echo(f"  wrote {len(paths)} GeoTIFFs to {out / 'geotiff'}")
+
+
+@app.command()
+def prepare(
+    bbox: Annotated[
+        tuple[float, float, float, float],
+        typer.Option("--bbox", metavar="MINLON MINLAT MAXLON MAXLAT", help="Pack coverage."),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Pack directory to create or update.")],
+    sources: Annotated[
+        str | None, typer.Option("--sources", help="Comma list of source ids (default: all).")
+    ] = None,
+    cache: Annotated[Path | None, typer.Option("--cache", help="Download cache directory.")] = None,
+    caBundle: Annotated[
+        Path | None, typer.Option("--ca-bundle", help="PEM CA bundle (TLS-intercepting networks).")
+    ] = None,
+    systemCerts: Annotated[
+        bool, typer.Option("--system-certs", help="Trust the operating system's CA store.")
+    ] = False,
+    year: Annotated[
+        int, typer.Option("--year", help="Year for Google Open Buildings 2.5D.")
+    ] = 2023,
+) -> None:
+    """Download open data for a box and build an offline pack (needs internet)."""
+    try:
+        from map3d.prepare import certs, pipeline
+    except ImportError as exc:
+        _fail(
+            RuntimeError(
+                f"`map3d prepare` needs the 'prepare' extra (pip install 'map3d[prepare]'): {exc}"
+            )
+        )
+    if caBundle is not None and systemCerts:
+        _fail(ValueError("use either --ca-bundle or --system-certs, not both"))
+    cacheDir = cache if cache is not None else out.with_name(out.name + ".cache")
+    bundle = certs.exportCaBundle(cacheDir / "ca-bundle.pem") if systemCerts else caBundle
+    wanted = [s.strip() for s in sources.split(",") if s.strip()] if sources else None
+    try:
+        report = pipeline.preparePack(
+            bbox,
+            out,
+            sources=wanted,
+            cacheDir=cacheDir,
+            caBundle=bundle,
+            year=year,
+            log=lambda message: typer.echo(message, err=True),
+        )
+    except (ValueError, RuntimeError) as exc:
+        _fail(exc)
+    for sourceId, count in report.ingested.items():
+        typer.echo(f"ingested  {sourceId} ({count} file(s))")
+    for sourceId, reason in report.skipped.items():
+        typer.echo(f"skipped   {sourceId}: {reason}")
+    for sourceId, reason in report.failed.items():
+        typer.echo(f"FAILED    {sourceId}: {reason}")
 
 
 def main() -> None:

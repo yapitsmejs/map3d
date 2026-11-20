@@ -159,7 +159,7 @@ box buildings; a single bridge).
 - **Defaults:** default building height 9.0 m; duplicate threshold 50%
   overlap.
 
-### M4 — `prepare`: real data acquisition
+### M4 — `prepare`: real data acquisition ✅ (2026-11-20)
 `pack/prepare.py` and `pack/sources/*` for FABDEM/GLO-30, Overture
 (buildings, transportation), Google Open Buildings 2.5D, Meta canopy,
 WorldCover, Impact Observatory, Sentinel-2 composite, the EGM2008 grid and the
@@ -184,6 +184,42 @@ data.gov.sg datasets from S2.
   them:
   - URA rail: `GRND_LEVEL == ABOVEGROUND` maps to `isBridge`.
   - LTA flyovers map to `elevatedStructures`.
+
+**Done:** 307 tests, 99.1% branch coverage. Live run verified (see below).
+- **Layout:** the code lives in `map3d/prepare/` (network-only; needs the
+  `prepare` extra):
+  - `certs.py`: OS trust-store export.
+  - `http.py`: retries, per-host throttle, cached downloads, and
+    `HttpRangeFile` as rasterio's `opener`.
+  - `rasterClip.py`: windowed clip with decimation aligned to whole blocks.
+  - `sources/rasters.py`: FABDEM (zip members only), GLO-30, EGM2008,
+    WorldCover, Meta canopy.
+  - `sources/googleBuildings.py`: manifests, UTM tile selection, band 2 at
+    ~4 m.
+  - `sources/overture.py`: Arrow S3 bbox pushdown; linear-referenced segment
+    splitting.
+  - `sources/dataGovSg.py`: poll-download plus four adapters, including the
+    98.6% HDB street-code join.
+  - `pipeline.py`: orchestration, GLO-30 fallback, report.
+  - `map3d prepare` CLI: `--system-certs` / `--ca-bundle`.
+- **Changes from the original plan:** `duckdb` was dropped (Arrow S3 is
+  enough), `httpx` was added to dev, and imagery moved to M7.
+- **Environment finding:** TLS interception on this network. GDAL's curl
+  can't be pointed at the organisation's CA, so GDAL never makes network
+  requests itself (`docs/research.md`).
+- **Live run** (Marina Bay, 0.06°×0.05° ≈ 6.7×5.6 km):
+  - All 11 sources were ingested in 5 min 10 s; the pack is 6.8 MB.
+  - A 4 km × 4 km scene at 2 m (4M nodes) built in 12.6 s.
+  - The render is recognisable: CBD towers, Marina Bay Sands at 207 m
+    (explicit OSM height), the ArtScience Museum, Gardens by the Bay, and
+    MBFC T3 at 245 m.
+- **Observations for later milestones:**
+  - Google 2.5D heights are capped at 100 m, so tall towers rely on OSM
+    explicit heights (precedence already does this).
+  - 577 of 4,842 scene buildings fell back to the 9 m default.
+  - FABDEM's 30 m coastline shows as stair-steps in the ground layer (M5 land
+    cover could mask water).
+  - There's no Singapore trees source, so `trees` is always missing there.
 
 ### M5 — Full layer set
 `layers/canopy.py`, `layers/landCover.py`, `layers/decks.py` (K levels, the S5

@@ -245,9 +245,27 @@ sg.pack/
   ATTRIBUTION.md     # generated from the manifest
 ```
 
-- `map3d prepare --bbox <minLon> <minLat> <maxLon> <maxLat> --out sg.pack`
-  runs on an internet-connected machine. It downloads, clips, reprojects as
-  needed and writes the pack.
+- `map3d prepare --bbox <minLon> <minLat> <maxLon> <maxLat> --out sg.pack
+  [--sources …] [--cache DIR] [--system-certs | --ca-bundle PEM] [--year 2023]`
+  runs on an internet-connected machine with the `prepare` extra installed.
+  - **Clipping:** rasters are clipped with windowed HTTP range reads in their
+    native CRS. Only the needed blocks are fetched: FABDEM members come out of
+    the 10° zips through the zip directory, and Google 2.5D is decimated to
+    ~4 m. Vectors are bbox-filtered (Overture via Arrow S3 pushdown;
+    data.gov.sg via its poll-download API, throttled to 2 requests per 10 s).
+  - **Validation:** everything then goes through the same validation as
+    `ingest`.
+  - **Defaults:** all sources except `copernicusGlo30` (used automatically if
+    FABDEM yields nothing) and `impactObservatoryLulc`; Singapore sources only
+    when the box overlaps Singapore.
+  - **Imagery:** fetched in M7.
+  - **Failures:** a failing source is reported and skipped; the run fails only
+    if ground or geoid is missing.
+  - **TLS interception:** on networks with TLS interception, `--system-certs`
+    exports the OS trust store (plus certifi) to a PEM file used by `httpx`
+    and Arrow S3. GDAL never makes network requests itself: raster reads go
+    through a Python range-read `opener`, so they share the same verified TLS
+    settings. Verification is never disabled.
 - `map3d ingest --pack sg.pack --source <sourceId> [--bbox …] [--accessed DATE] <files…>`
   validates **pack-ready** files and copies them into a pack:
   - GeoTIFF with a CRS for raster sources (one CRS per source);

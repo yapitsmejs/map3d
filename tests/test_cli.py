@@ -197,3 +197,132 @@ def testCliBuild_rejectsUnknownAndUnimplementedFormats(tmp_path, synPack):
     result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "a", "--format", "obj"))
     assert result.exit_code == 1
     assert "unknown format" in result.output
+
+
+def testCliPrepare_runsPipelineAndPrintsReport(tmp_path, monkeypatch):
+    from map3d.prepare import pipeline
+
+    seen = {}
+
+    def fake(
+        bounds, packDir, sources=None, cacheDir=None, caBundle=None, year=2023, log=None, **kw
+    ):
+        seen.update(bounds=bounds, sources=sources, caBundle=caBundle, year=year, cacheDir=cacheDir)
+        log("fabdem: fetching")
+        return pipeline.PrepareReport(
+            ingested={"fabdem": 2},
+            skipped={"metaCanopy": "no data in bounds"},
+            failed={"esaWorldCover": "ConnectError: x"},
+        )
+
+    monkeypatch.setattr(pipeline, "preparePack", fake)
+    result = runner.invoke(
+        cli.app,
+        [
+            "prepare",
+            "--bbox",
+            "103.8",
+            "1.28",
+            "103.84",
+            "1.32",
+            "--out",
+            str(tmp_path / "p"),
+            "--sources",
+            "fabdem,metaCanopy",
+            "--year",
+            "2022",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["bounds"] == (103.8, 1.28, 103.84, 1.32)
+    assert seen["sources"] == ["fabdem", "metaCanopy"]
+    assert seen["year"] == 2022 and seen["caBundle"] is None
+    assert "ingested  fabdem" in result.output
+    assert "skipped   metaCanopy" in result.output
+    assert "FAILED    esaWorldCover" in result.output
+
+
+def testCliPrepare_systemCertsExportsBundleIntoCache(tmp_path, monkeypatch):
+    from map3d.prepare import certs, pipeline
+
+    exported = {}
+    monkeypatch.setattr(certs, "exportCaBundle", lambda path: exported.setdefault("path", path))
+    monkeypatch.setattr(
+        pipeline,
+        "preparePack",
+        lambda *a, **kw: exported.update(ca=kw["caBundle"]) or pipeline.PrepareReport(),
+    )
+    result = runner.invoke(
+        cli.app,
+        [
+            "prepare",
+            "--bbox",
+            "103.8",
+            "1.28",
+            "103.84",
+            "1.32",
+            "--out",
+            str(tmp_path / "p"),
+            "--cache",
+            str(tmp_path / "c"),
+            "--system-certs",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert exported["path"] == tmp_path / "c" / "ca-bundle.pem"
+    assert exported["ca"] == exported["path"]
+
+
+def testCliPrepare_errorsExitNonZero(tmp_path, monkeypatch):
+    from map3d.prepare import pipeline
+
+    def boom(*a, **kw):
+        raise RuntimeError("pack is missing required role 'geoid'")
+
+    monkeypatch.setattr(pipeline, "preparePack", boom)
+    result = runner.invoke(
+        cli.app,
+        ["prepare", "--bbox", "103.8", "1.28", "103.84", "1.32", "--out", str(tmp_path / "p")],
+    )
+    assert result.exit_code == 1
+    assert "geoid" in result.output
+
+
+def testCliPrepare_caBundleAndSystemCertsAreExclusive(tmp_path):
+    result = runner.invoke(
+        cli.app,
+        [
+            "prepare",
+            "--bbox",
+            "103.8",
+            "1.28",
+            "103.84",
+            "1.32",
+            "--out",
+            str(tmp_path / "p"),
+            "--ca-bundle",
+            "x.pem",
+            "--system-certs",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "either" in result.output
+
+
+def testCliPrepare_missingExtraIsExplained(tmp_path, monkeypatch):
+    import builtins
+
+    realImport = builtins.__import__
+
+    def fakeImport(name, *args, **kwargs):
+        if name.startswith("map3d.prepare"):
+            raise ImportError("No module named 'httpx'")
+        return realImport(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fakeImport)
+    result = runner.invoke(
+        cli.app,
+        ["prepare", "--bbox", "103.8", "1.28", "103.84", "1.32", "--out", str(tmp_path / "p")],
+    )
+    assert result.exit_code == 1
+    assert "prepare" in result.output and "extra" in result.output
