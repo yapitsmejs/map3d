@@ -166,3 +166,75 @@ def testBuild_degenerateFootprintsAreSkippedSafely(mound: SyntheticScene):
     offPack = shapely.box(120.0, 10.0, 120.001, 10.001)  # no ground data at all (ring is NaN)
     corr = GroundCorrection.build(geom, ground, np.array([tiny, sliver, offPack], dtype=object))
     assert corr.coeffs.shape == (0, 3)  # flat open ground: nothing to correct, nothing crashes
+
+
+SKIRT_m = 10.0  # residue spilling 85 m east of B1's wall (e = 150 -> 235)
+
+
+@pytest.fixture(scope="module")
+def wideMound(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
+    """B1 mound plus a wide residue skirt to the east and a genuine hill far from buildings."""
+    root = tmp_path_factory.mktemp("w")
+    scene = makeSyntheticPack(root / "wide.pack", terrain="plane")
+    src = scene.packDir / "raster" / "syntheticGround" / "ground.tif"
+    with rasterio.open(src) as ds:
+        profile, data, transform = ds.profile, ds.read(1), ds.transform
+    rows, cols = np.mgrid[0 : data.shape[0], 0 : data.shape[1]]
+    lon, lat = rasterio.transform.xy(transform, rows.ravel(), cols.ravel())
+    e, n, _ = scene.frame.geodeticToEnu(np.array(lat), np.array(lon), 0.0)
+    halfE, halfN = (B1[2] - B1[0]) / 2 + 5, (B1[3] - B1[1]) / 2 + 5
+    pyramid = MOUND_m * np.clip(
+        np.minimum(1 - np.abs(e - 100.0) / halfE, 1 - np.abs(n - 70.0) / halfN), 0, None
+    )
+    skirt = np.where(
+        (e >= 150) & (e <= 235) & (n >= 45) & (n <= 95), SKIRT_m * (1 - (e - 150) / 85), 0.0
+    )
+    hill = 3.0 * np.clip(
+        1 - np.hypot(e + 300, n - 300) / 30, 0, None
+    )  # genuine terrain, no building
+    data = data + np.maximum(pyramid, skirt).reshape(data.shape).astype(data.dtype)
+    data = data + hill.reshape(data.shape).astype(data.dtype)
+    out = root / "staging" / "ground.tif"
+    out.parent.mkdir()
+    with rasterio.open(out, "w", **profile) as dst:
+        dst.write(data, 1)
+    ingestFiles(scene.packDir, "syntheticGround", [out])
+    return scene
+
+
+def _groundAt(scene, layers, e0: float, n0: float) -> float:
+    e, n = scene.geometry.nodesEnu()
+    return float(
+        layers["groundHeight_datum_m"][
+            np.unravel_index(np.argmin((e - e0) ** 2 + (n - n0) ** 2), e.shape)
+        ]
+    )
+
+
+def testAdaptiveZone_flattensConnectedSpillWithinReachOnly(wideMound: SyntheticScene):
+    fixed = buildScene(_request(wideMound), wideMound.packDir)
+    raw = buildScene(_request(wideMound), wideMound.packDir, correctGround=False)
+    # 25 m past the wall: residue (~7 m) removed down to the plane (growth stops at 0.5 m excess).
+    assert _groundAt(fixed, fixed.layers, 175.0, 70.0) == pytest.approx(
+        _plane(175.0, 70.0), abs=0.6
+    )
+    assert _groundAt(raw, raw.layers, 175.0, 70.0) > _plane(175.0, 70.0) + 5.0
+    # 80 m past the wall: beyond the 60 m reach, left as it was.
+    assert _groundAt(fixed, fixed.layers, 230.0, 70.0) == pytest.approx(
+        _groundAt(raw, raw.layers, 230.0, 70.0), abs=1e-6
+    )
+    # Genuine hill far from any building: untouched.
+    assert _groundAt(fixed, fixed.layers, -300.0, 300.0) == pytest.approx(
+        _groundAt(raw, raw.layers, -300.0, 300.0), abs=1e-6
+    )
+    assert fixed.metadata["groundCorrection"]["correctedArea_m2"] > 100 * 40  # more than B1 itself
+
+
+def testAdaptiveZone_edgeStepIsSmall(wideMound: SyntheticScene):
+    fixed = buildScene(_request(wideMound), wideMound.packDir)
+    e, n = fixed.geometry.nodesEnu()
+    row = np.argmin(np.abs(n[:, 0] - 70.0))
+    g = fixed.layers["groundHeight_datum_m"][row].astype(float)
+    sel = (e[row] > 140) & (e[row] < 260)
+    steps = np.abs(np.diff(g[sel] - _plane(e[row][sel], 70.0)))
+    assert steps.max() < 1.0  # no cliff at the zone edge (was ~SKIRT_m with a fixed 10 m buffer)

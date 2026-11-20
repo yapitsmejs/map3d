@@ -264,13 +264,26 @@ this (`buildScene(correctGround=True)`, the default):
 
 1. Fit a robust plane to the ground on rings 20–45 m outside each footprint.
 2. If the ground inside stands clearly above that plane (90th-percentile
-   excess > 1 m), cap the ground at the plane within the footprint + 10 m.
+   excess > 1 m), correct this building.
+3. The correction zone starts at the footprint + 10 m and grows across
+   connected ground more than 0.5 m above the plane, up to 60 m from the
+   walls. Residue often spills past the walls, or past the mapped outline.
+4. Inside the zone, ground is capped at the plane, fading back to the raw
+   ground over the last 20 m of the reach, so no cliffs form.
 
 Ground is only ever lowered. The correction applies to the grid ground layer,
 building bases, deck ends and the 3D Tiles terrain. `scene.json`
-`groundCorrection` reports how many buildings were corrected and the largest
-lowering. On the Loyang 4.5 km scene that's 833 buildings (median 1.9 m, max
-21.3 m), at a build-time cost of about 7 s.
+`groundCorrection` reports how many buildings were corrected, the largest
+lowering and the zone area.
+
+On the Loyang 4.5 km scene:
+- **Corrected:** 833 buildings. Ground was lowered by > 0.5 m over 2.4 km²,
+  1.6 km² of it outside footprints (median 1.35 m, p99 10.8 m).
+- **The depot:** exposed again, at 10.8 m.
+- **Cost:** about 16 s of build time.
+- **Caveat:** without open LiDAR, genuine raised ground near buildings
+  (embankments, landscaped mounds) can't be told apart from residue, so it
+  may also be lowered.
 
 **Deck heights:** no open source has deck elevations or clearances,
 Singapore included (see `docs/research.md`). LTA flyover polygons and URA

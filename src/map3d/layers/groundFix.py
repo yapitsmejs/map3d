@@ -13,8 +13,14 @@ For each building footprint:
    (neighbouring mounds, embankments).
 2. **Trigger:** correct the building only if its interior ground clearly
    stands above that plane (90th-percentile excess > :data:`TRIGGER_m`).
-3. **Correction:** within the footprint buffered by :data:`ZONE_BUFFER_m`, set
-   ground = min(ground, plane). Ground is only ever lowered.
+3. **Zone:** start from the footprint buffered by :data:`ZONE_BUFFER_m`, then
+   grow across connected ground standing more than :data:`GROW_EXCESS_m` above
+   the plane, up to :data:`MAX_GROW_m` from the walls. Residue often spills
+   further than the walls, or beyond the mapped outline.
+4. **Correction:** inside the zone, ground = min(ground, plane), fading back to
+   the raw ground over the last :data:`TAPER_m` of the reach. Ground is only
+   ever lowered and stays continuous: zone edges sit where the residue fades out
+   or within the taper.
 
 Everything is in scene-centre ENU metres; heights are orthometric.
 """
@@ -27,6 +33,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import numpy.typing as npt
 import shapely
+from rasterio.features import shapes
+from rasterio.transform import Affine
 
 from map3d.frames import LocalFrame
 from map3d.gridGeometry import GridGeometry
@@ -35,7 +43,16 @@ from map3d.layers.pixels import rasterizePixels
 if TYPE_CHECKING:
     from map3d.layers.terrain import GroundModel
 
-__all__ = ["RING_INNER_m", "RING_OUTER_m", "TRIGGER_m", "ZONE_BUFFER_m", "GroundCorrection"]
+__all__ = [
+    "GROW_EXCESS_m",
+    "MAX_GROW_m",
+    "TAPER_m",
+    "RING_INNER_m",
+    "RING_OUTER_m",
+    "TRIGGER_m",
+    "ZONE_BUFFER_m",
+    "GroundCorrection",
+]
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -43,6 +60,10 @@ ZONE_BUFFER_m = 10.0
 RING_INNER_m = 20.0
 RING_OUTER_m = 45.0
 TRIGGER_m = 1.0
+GROW_EXCESS_m = 0.5
+MAX_GROW_m = 60.0
+TAPER_m = 20.0  # correction fades out over the last TAPER_m of the reach
+_GROW_STEP_m = 2.5
 _RING_STEP_m = 5.0
 _INTERIOR_STEP_m = 5.0
 _ABOVE_FIT_m = 1.0
@@ -56,7 +77,8 @@ class GroundCorrection:
     Attributes:
         frame: Scene ENU frame.
         geometry: Scene grid geometry.
-        zones: Corrected zones (footprint + buffer) as ENU polygons.
+        zones: Corrected zones (grown from footprint + buffer) as ENU polygons.
+        footprints: The triggering buildings' footprints as ENU polygons (taper distance).
         pixelZones: The same zones in grid pixel space.
         coeffs: Plane ``H = a + b*e + c*n`` per zone, shape ``(Z, 3)``.
         buildingIndex: Index of each zone's building in the input array.
@@ -66,6 +88,7 @@ class GroundCorrection:
     frame: LocalFrame
     geometry: GridGeometry
     zones: npt.NDArray[np.object_]
+    footprints: npt.NDArray[np.object_]
     pixelZones: npt.NDArray[np.object_]
     coeffs: FloatArray
     buildingIndex: npt.NDArray[np.int64]
@@ -89,6 +112,7 @@ class GroundCorrection:
         empty = cls(
             frame,
             geometry,
+            np.array([], dtype=object),
             np.array([], dtype=object),
             np.array([], dtype=object),
             np.zeros((0, 3)),
@@ -122,17 +146,19 @@ class GroundCorrection:
             excess = excess[np.isfinite(excess)]
             if excess.size == 0 or np.percentile(excess, 90) <= TRIGGER_m:
                 continue
-            zones.append(shapely.buffer(enu[i], ZONE_BUFFER_m))
+            zones.append(enu[i])  # grown into the final zone below
             coeffs.append(plane)
             index.append(i)
             lowering.append(float(excess.max()))
         if not zones:
             return empty
-        zoneArray = np.array(zones, dtype=object)
+        footprintArray = np.array(zones, dtype=object)
+        zoneArray = _growZones(frame, ground, footprintArray, np.array(coeffs))
         return cls(
             frame,
             geometry,
             zoneArray,
+            footprintArray,
             _enuToPixel(geometry, zoneArray),
             np.array(coeffs),
             np.array(index, dtype=np.int64),
@@ -163,8 +189,12 @@ class GroundCorrection:
         if pointIdx.size:
             c = self.coeffs[zoneIdx]
             plane = c[:, 0] + c[:, 1] * e[pointIdx] + c[:, 2] * n[pointIdx]
+            dist = shapely.distance(
+                self.footprints[zoneIdx], shapely.points(e[pointIdx], n[pointIdx])
+            )
+            capped = _taperedCap(out.reshape(-1)[pointIdx], plane, dist)
             with np.errstate(invalid="ignore"):  # NaN (no data) stays NaN by design
-                np.minimum.at(out.reshape(-1), pointIdx, plane)
+                np.minimum.at(out.reshape(-1), pointIdx, capped)
         return out
 
     def correctChunk(self, rows: slice, cols: slice, groundH: FloatArray) -> FloatArray:
@@ -196,7 +226,9 @@ class GroundCorrection:
             )
             if mask.any():
                 a, b, c = self.coeffs[z]
-                out[mask] = np.minimum(out[mask], a + b * e[mask] + c * n[mask])
+                dist = shapely.distance(self.footprints[z], shapely.points(e[mask], n[mask]))
+                capped = _taperedCap(out[mask], a + b * e[mask] + c * n[mask], dist)
+                out[mask] = np.minimum(out[mask], capped)
         return out
 
     def summary(self) -> dict[str, Any]:
@@ -204,12 +236,99 @@ class GroundCorrection:
         return {
             "buildingsCorrected": int(self.coeffs.shape[0]),
             "maxLowering_m": float(self.maxLowering_m.max()) if self.maxLowering_m.size else 0.0,
+            "correctedArea_m2": float(shapely.area(shapely.union_all(self.zones)))
+            if self.zones.size
+            else 0.0,
             "method": (
                 "ground under buildings capped by a robust plane fitted to ground "
-                f"{RING_INNER_m:g}-{RING_OUTER_m:g} m outside the footprint, within the footprint "
-                f"+{ZONE_BUFFER_m:g} m, when the interior stands > {TRIGGER_m:g} m above it"
+                f"{RING_INNER_m:g}-{RING_OUTER_m:g} m outside the footprint, when the interior stands "
+                f"> {TRIGGER_m:g} m above it; the zone (footprint + {ZONE_BUFFER_m:g} m) grows across "
+                f"connected ground > {GROW_EXCESS_m:g} m above the plane, up to {MAX_GROW_m:g} m out"
             ),
         }
+
+
+def _taperedCap(heights: FloatArray, plane: FloatArray, dist_m: FloatArray) -> FloatArray:
+    """Ground after correction: the plane up to the taper, then blending back to the raw ground.
+
+    ``plane + w * (h - plane)`` where it lies above the plane; ``w`` rises 0 -> 1 over
+    the last :data:`TAPER_m` of the :data:`MAX_GROW_m` reach. Ground below the plane
+    is kept.
+    """
+    w = np.clip((dist_m - (MAX_GROW_m - TAPER_m)) / TAPER_m, 0.0, 1.0)
+    with np.errstate(invalid="ignore"):
+        result: FloatArray = np.where(heights > plane, plane + w * (heights - plane), heights)
+    return result
+
+
+def _growZones(
+    frame: LocalFrame, ground: GroundModel, footprints: npt.NDArray[np.object_], coeffs: FloatArray
+) -> npt.NDArray[np.object_]:
+    """Grow each zone from footprint + buffer across connected residue, within reach.
+
+    On a :data:`_GROW_STEP_m` lattice around each footprint, cells whose ground
+    stands more than :data:`GROW_EXCESS_m` above the building's plane and lie
+    within :data:`MAX_GROW_m` of it are added when 4-connected to the seed
+    (footprint + :data:`ZONE_BUFFER_m`). The zone edge therefore sits where the
+    residue falls to ~0.5 m, so capping leaves no cliff.
+    """
+    grids: list[tuple[FloatArray, FloatArray]] = []
+    pts: list[FloatArray] = []
+    for poly in footprints:
+        x0, y0, x1, y1 = poly.bounds
+        xs = np.arange(x0 - MAX_GROW_m, x1 + MAX_GROW_m + _GROW_STEP_m, _GROW_STEP_m)
+        ys = np.arange(y0 - MAX_GROW_m, y1 + MAX_GROW_m + _GROW_STEP_m, _GROW_STEP_m)
+        gx, gy = np.meshgrid(xs, ys)
+        grids.append((xs, ys))
+        pts.append(np.column_stack([gx.ravel(), gy.ravel()]))
+    allPts = np.concatenate(pts)
+    allH = _groundAtEnu(frame, ground, allPts)
+    zones: list[Any] = []
+    offset = 0
+    for poly, plane, (xs, ys), cellPts in zip(footprints, coeffs, grids, pts, strict=True):
+        h = allH[offset : offset + cellPts.shape[0]].reshape(ys.size, xs.size)
+        offset += cellPts.shape[0]
+        gx, gy = cellPts[:, 0].reshape(h.shape), cellPts[:, 1].reshape(h.shape)
+        seedPoly = shapely.buffer(poly, ZONE_BUFFER_m)
+        seed = shapely.contains_xy(seedPoly, gx, gy)
+        reach = shapely.contains_xy(shapely.buffer(poly, MAX_GROW_m), gx, gy)
+        with np.errstate(invalid="ignore"):
+            residue = (h - (plane[0] + plane[1] * gx + plane[2] * gy)) > GROW_EXCESS_m
+        grown = _floodFill(seed, seed | (residue & reach))
+        zone = seedPoly
+        if (grown & ~seed).any():
+            transform = Affine(
+                _GROW_STEP_m,
+                0.0,
+                xs[0] - _GROW_STEP_m / 2,
+                0.0,
+                _GROW_STEP_m,
+                ys[0] - _GROW_STEP_m / 2,
+            )
+            cells = [
+                shapely.geometry.shape(g)
+                for g, _ in shapes(grown.astype(np.uint8), mask=grown, transform=transform)
+            ]
+            zone = shapely.make_valid(shapely.union_all([seedPoly, *cells]))
+        zones.append(zone)
+    return np.array(zones, dtype=object)
+
+
+def _floodFill(
+    seed: npt.NDArray[np.bool_], allowed: npt.NDArray[np.bool_]
+) -> npt.NDArray[np.bool_]:
+    """Cells of ``allowed`` 4-connected to ``seed`` (iterative constrained dilation)."""
+    grown = seed & allowed
+    while True:
+        nxt = grown.copy()
+        nxt[1:, :] |= grown[:-1, :]
+        nxt[:-1, :] |= grown[1:, :]
+        nxt[:, 1:] |= grown[:, :-1]
+        nxt[:, :-1] |= grown[:, 1:]
+        nxt &= allowed
+        if np.array_equal(nxt, grown):
+            return grown
+        grown = nxt
 
 
 def _toEnu(frame: LocalFrame, geoms: npt.NDArray[np.object_]) -> npt.NDArray[np.object_]:
