@@ -255,12 +255,17 @@ class LocalFrame:
             np.asarray(heightEll_m, dtype=np.float64),
         )
         # Initial guess: spherical curvature drop below the tangent plane.
-        u = h - (e**2 + n**2) / (2.0 * WGS84_A_m)
+        # Each element stops updating once it converges, so results are
+        # bitwise independent of which other points share the batch.
+        u = np.array(h - (e**2 + n**2) / (2.0 * WGS84_A_m), dtype=np.float64)
+        active = np.ones(u.shape, dtype=bool)
         for _ in range(_COLUMN_MAX_ITER):
-            lat_deg, lon_deg, hGot = self.enuToGeodetic(e, n, u)
-            delta = h - hGot
-            u = u + delta
-            if np.all(np.abs(delta) < _COLUMN_TOL_m):
+            _, _, hGot = self.enuToGeodetic(e[active], n[active], u[active])
+            delta = h[active] - hGot
+            u[active] = u[active] + delta
+            stillActive = np.abs(delta) >= _COLUMN_TOL_m
+            active[active] = stillActive
+            if not active.any():
                 lat_deg, lon_deg, _ = self.enuToGeodetic(e, n, u)
                 return lat_deg, lon_deg, u
         raise RuntimeError("columnPointAtHeight did not converge")

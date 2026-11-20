@@ -45,3 +45,19 @@ def testToPixel_emptyAndNanHeight():
         shapely.get_coordinates(toPixelGeometries(pt, np.array([np.nan]), geom)),
         shapely.get_coordinates(toPixelGeometries(pt, 0.0, geom)),
     )
+
+
+def testRasterizePixels_chunkOffsetsAndNoIdentityTransformWarning():
+    import warnings
+
+    from map3d.layers.pixels import rasterizePixels
+
+    square = shapely.box(1.0, 1.0, 3.0, 2.0)  # cols 1..3, rows 1..2 in pixel space
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for r0, c0 in [(0, 0), (1, 1), (1, 0), (5, 5)]:
+            out = rasterizePixels([(square, 7)], (4, 4), r0, c0, allTouched=False, dtype="uint8")
+            expected = np.zeros((4, 4), dtype=np.uint8)
+            rows, cols = np.mgrid[r0 : r0 + 4, c0 : c0 + 4]
+            expected[(rows == 1) & (cols >= 1) & (cols < 3)] = 7
+            np.testing.assert_array_equal(out, expected)

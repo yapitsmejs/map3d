@@ -87,3 +87,43 @@ def testSupersampleFactor():
     assert supersampleFactor(10.0, 1.0) == 8  # capped
     assert supersampleFactor(10.0, 4.0) == 3
     assert supersampleFactor(5.0, 0.0) == 1  # vector / unknown
+
+
+def testInterpolatedFootprint_matchesExactSolverOverDesignSwath():
+    # 5 km swath, 0.5 m-ish sampling over a corner chunk far from the center.
+    geom = _geom(17.0, swath_m=5000.0, s=0.5)
+    rows, cols = slice(9000, 9400), slice(9300, 9900)
+    chunk = ChunkColumns(geom, rows, cols)
+    lat, lon = chunk.nodeLatLon()
+    e_m, n_m = geom.nodesEnu(rows, cols)
+    latRef, lonRef, uRef = geom.frame.columnPointAtHeight(e_m, n_m, 0.0)
+    np.testing.assert_allclose(lat, latRef, atol=1e-10, rtol=0)  # ~11 um
+    np.testing.assert_allclose(lon, lonRef, atol=1e-10, rtol=0)
+    for h in (0.0, 250.0):
+        _, _, uExact = geom.frame.columnPointAtHeight(e_m, n_m, h)
+        np.testing.assert_allclose(chunk.toEnuUp(np.full(e_m.shape, h)), uExact, atol=1e-6, rtol=0)
+
+
+def testMapLattice_interpolatesSmoothFunctionOfPosition():
+    geom = _geom(0.0, swath_m=4000.0, s=2.0)
+    chunk = ChunkColumns(geom, slice(100, 400), slice(200, 700))
+    lat, lon = chunk.latticeLatLon(3)
+
+    def fn(la, lo):
+        return la * 1000.0, np.sin(np.radians(lo)) * 1e5
+
+    a, b = chunk.mapLattice(3, fn)
+    np.testing.assert_allclose(a, lat * 1000.0, atol=1e-7)
+    np.testing.assert_allclose(b, np.sin(np.radians(lon)) * 1e5, atol=1e-6)
+    na, nb = chunk.mapNodes(fn)
+    nlat, nlon = chunk.nodeLatLon()
+    np.testing.assert_allclose(na, nlat * 1000.0, atol=1e-7)
+    assert nb.shape == (300, 500)
+
+
+def testCoarseLattice_handlesSingleNodeChunks():
+    geom = _geom(0.0, swath_m=2000.0, s=500.0)
+    lat, lon = ChunkColumns(geom, slice(1, 2), slice(2, 3)).nodeLatLon()
+    e_m, n_m = geom.nodesEnu(slice(1, 2), slice(2, 3))
+    latRef, lonRef, _ = geom.frame.columnPointAtHeight(e_m, n_m, 0.0)
+    np.testing.assert_allclose(lat, latRef, atol=1e-12)

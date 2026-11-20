@@ -260,12 +260,44 @@ heuristic), `featureId` + `features` table, `heightSource` /
   Benjamin Sheares Bridge (~25–30 m clearance) is underestimated, and there's
   no open data to do better.
 
-### M6 — Scale and performance
+### M6 — Scale and performance ✅ (2026-11-20)
 Chunked out-of-core build (`_chunking.py`), numba kernels, parallel chunks,
 incremental writers.
 **Done when** the design-point benchmark (5 km × 5 km @ 0.5 m, K = 5) runs in
 **under 10 minutes** within the RAM budget. The benchmark is a `slow`-marked
 test, run on demand and before releases rather than in the default gate.
+
+**Done:** 354 tests (plus 1 `slow` benchmark), 98.9% branch coverage.
+- **Profiled first:** on the real 4M-node Marina scene, 70% of the time went
+  to the exact per-point column solve (mostly the canopy's 2× sub-lattice) and
+  13% to raster sampling.
+- **Changes:**
+  - **Coarse-lattice interpolation:** a global lattice fixed by the grid
+    (≤ 50 m; sub-cell points for coarse grids) for footprints (the quadratic
+    Up term is removed analytically), dU/dh, raster pixel coordinates
+    (`ChunkColumns.mapLattice` / `mapNodes`, `RasterWindow.pixelCoords` /
+    `sampleAtPixels`) and the geoid.
+  - **Numba kernels** (`layers/_kernels.py`): bilinear and nearest sampling,
+    separable interpolation, cell-max pooling. They are tested compiled *and*
+    via `.py_func`, so coverage is real.
+  - **Determinism:** the column solver converges per element, so results don't
+    depend on the batch; chunked builds are bitwise identical to whole ones.
+  - **Parallel chunks** on a thread pool, each worker with its own
+    `rasterio.Env`.
+  - **Memmap layer storage** (`workDir` / `memoryBudget_GB`, `Scene.close()`).
+  - **GeoTIFFs** written in bands with `NUM_THREADS=ALL_CPUS`.
+- **Bug found and fixed:** rasterio's in-memory dataset suppresses warnings
+  with `catch_warnings()`, which isn't thread-safe. In threads it leaked
+  warnings and could alter the caller's global warning filters, so
+  `rasterizePixels` now serializes rasterize calls behind a lock. A test
+  asserts the filters are unchanged after a parallel build.
+- **Results:**
+  - Marina 4M nodes: 23.1 s → **1.5 s**.
+  - Design point (10⁸ nodes, K = 5, real data): build **16.9 s**, npz
+    **10.0 s**, GeoTIFF **11.5 s** (was 87.5 s single-threaded). Peak private
+    memory **4.5 GB** (budget 8 GB).
+  - Outputs match the pre-M6 build: identical ids, classes and provenance;
+    heights within 0.065 mm.
 
 ### M7 — 3D Tiles mesh
 `mesh/*`: RTIN terrain, LOD1 buildings (LOD2 hook), swept decks, imagery

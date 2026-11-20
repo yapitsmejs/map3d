@@ -5,6 +5,7 @@ Scene builds never touch the network: everything comes through :class:`Pack`.
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 from contextlib import ExitStack
@@ -22,6 +23,7 @@ from rasterio.merge import merge
 from rasterio.warp import transform_bounds
 
 from map3d.geoid import GeoidGrid
+from map3d.layers import _kernels
 from map3d.pack.geoparquet import readGeoParquet
 from map3d.pack.manifest import (
     Bounds,
@@ -74,47 +76,63 @@ class RasterWindow:
         Raises:
             ValueError: For an unknown method.
         """
+        col, row = self.pixelCoords(lat_deg, lon_deg)
+        return self.sampleAtPixels(col, row, method)
+
+    def pixelCoords(
+        self, lat_deg: npt.ArrayLike, lon_deg: npt.ArrayLike
+    ) -> tuple[FloatArray, FloatArray]:
+        """Fractional pixel-corner coordinates ``(col, row)`` of geographic positions.
+
+        A smooth map, so callers on dense regular grids may evaluate it on a
+        coarse lattice and interpolate (see ``ChunkColumns.mapLattice``).
+        """
         lat, lon = np.broadcast_arrays(
             np.asarray(lat_deg, dtype=np.float64), np.asarray(lon_deg, dtype=np.float64)
         )
         x, y = self._toCrs(lon, lat)
         inv = ~self.transform
-        col = inv.a * x + inv.b * y + inv.c
-        row = inv.d * x + inv.e * y + inv.f
-        nRows, nCols = self.values.shape
-        if method == "nearest":
-            i = np.floor(row).astype(np.intp)
-            j = np.floor(col).astype(np.intp)
-            inside = (i >= 0) & (i < nRows) & (j >= 0) & (j < nCols)
-            out = np.full(lat.shape, np.nan)
-            out[inside] = self.values[i[inside], j[inside]]
-            return out
-        if method != "bilinear":
+        return inv.a * x + inv.b * y + inv.c, inv.d * x + inv.e * y + inv.f
+
+    def sampleAtPixels(
+        self, col: FloatArray, row: FloatArray, method: SampleMethod = "bilinear"
+    ) -> FloatArray:
+        """Sample at fractional pixel-corner coordinates (see :meth:`sample`).
+
+        Raises:
+            ValueError: For an unknown method.
+        """
+        if method not in ("bilinear", "nearest"):
             raise ValueError(f"unknown sampling method {method!r}")
-        fr = row - 0.5
-        fc = col - 0.5
-        i0 = np.floor(fr).astype(np.intp)
-        j0 = np.floor(fc).astype(np.intp)
-        inside = (i0 >= 0) & (i0 + 1 < nRows) & (j0 >= 0) & (j0 + 1 < nCols)
-        out = np.full(lat.shape, np.nan)
-        ii, jj = i0[inside], j0[inside]
-        ti, tj = fr[inside] - ii, fc[inside] - jj
-        v = self.values
-        out[inside] = (
-            (1 - ti) * (1 - tj) * v[ii, jj]
-            + (1 - ti) * tj * v[ii, jj + 1]
-            + ti * (1 - tj) * v[ii + 1, jj]
-            + ti * tj * v[ii + 1, jj + 1]
-        )
+        colArr = np.ascontiguousarray(col, dtype=np.float64)
+        rowArr = np.ascontiguousarray(row, dtype=np.float64)
+        out = np.empty(colArr.shape, dtype=np.float64)
+        kernel = _kernels.nearestSample if method == "nearest" else _kernels.bilinearSample
+        kernel(self._contiguousValues(), colArr.ravel(), rowArr.ravel(), out.ravel())
         return out
 
+    def _contiguousValues(self) -> FloatArray:
+        values = self.values
+        if not values.flags.c_contiguous or values.dtype != np.float64:
+            values = np.ascontiguousarray(values, dtype=np.float64)
+            object.__setattr__(self, "values", values)
+        return values
+
     def _toCrs(self, lon: FloatArray, lat: FloatArray) -> tuple[FloatArray, FloatArray]:
-        crs = pyproj.CRS.from_wkt(self.crs.to_wkt())
-        if crs.equals(pyproj.CRS("OGC:CRS84"), ignore_axis_order=True):
+        toCrs = _transformerFromWgs84(self.crs.to_wkt())
+        if toCrs is None:
             return lon, lat
-        toCrs = pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
         x, y = toCrs.transform(lon, lat)
         return np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+
+
+@functools.lru_cache(maxsize=32)
+def _transformerFromWgs84(wkt: str) -> pyproj.Transformer | None:
+    """Cached lon/lat -> raster-CRS transformer; ``None`` when already lon/lat."""
+    crs = pyproj.CRS.from_wkt(wkt)
+    if crs.equals(pyproj.CRS("OGC:CRS84"), ignore_axis_order=True):
+        return None
+    return pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
 
 
 @dataclass(frozen=True, eq=False)

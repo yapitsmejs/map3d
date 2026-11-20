@@ -82,3 +82,19 @@ def testWriteGeoTiff_skipsZeroBandLayers(tmp_path: Path):
     )
     paths = writeGeoTiff(buildScene(req, syn.packDir), tmp_path / "tif")
     assert not any(p.stem.startswith("deck") for p in paths)
+
+
+def testWriteGeoTiff_bandedWritesMatchForTallRasters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from map3d.io import geotiffWriter
+
+    monkeypatch.setattr(geotiffWriter, "_BAND_ROWS", 7)  # force several bands, last one partial
+    syn = makeSyntheticPack(tmp_path / "p.pack")
+    req = SceneRequest((syn.frame.lat0_deg, syn.frame.lon0_deg), 20.0, np.eye(3), 400.0, 600.0)
+    scene = buildScene(req, syn.packDir)
+    for path in writeGeoTiff(scene, tmp_path / "tif"):
+        with rasterio.open(path) as src:
+            expected = scene.layers[path.stem]
+            data = src.read() if expected.ndim == 3 else src.read(1)
+            np.testing.assert_array_equal(data, expected)

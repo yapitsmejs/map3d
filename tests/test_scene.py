@@ -213,3 +213,44 @@ def testBuildScene_withoutBuildingsSource(plane: SyntheticScene, tmp_path: Path)
     assert scene.layers["featureId"].max() == 0
     assert np.isnan(scene.layers["buildingHeight_m"]).all()
     assert any("buildings" in w for w in scene.warnings)
+
+
+def testParallelWorkers_identicalToSequential(plane: SyntheticScene, built: Scene):
+    import warnings
+
+    before = list(warnings.filters)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no leaked warnings from worker threads
+        parallel = buildScene(
+            _request(plane, heading_deg=20.0), plane.packDir, chunkSize=64, workers=8
+        )
+    assert warnings.filters == before  # global warning filters left untouched
+    for name, arr in built.layers.items():
+        np.testing.assert_array_equal(parallel.layers[name], arr, err_msg=name)
+
+
+def testMemmapStorage_identicalAndCleanedUp(plane: SyntheticScene, built: Scene, tmp_path: Path):
+    work = tmp_path / "work"
+    with buildScene(_request(plane, heading_deg=20.0), plane.packDir, workDir=work) as scene:
+        assert scene.metadata["storage"] == "memmap"
+        assert isinstance(scene.layers["surfaceHeight_ENU_m"], np.memmap)
+        assert (work / "surfaceHeight_ENU_m.npy").is_file()
+        for name, arr in built.layers.items():
+            np.testing.assert_array_equal(scene.layers[name], arr, err_msg=name)
+    assert (work / "surfaceHeight_ENU_m.npy").is_file()  # caller-owned workDir is kept
+
+
+def testMemmapStorage_autoWhenOverBudgetUsesOwnedTempDir(plane: SyntheticScene):
+    scene = buildScene(_request(plane, swath_m=200.0), plane.packDir, memoryBudget_GB=1e-6)
+    assert scene.metadata["storage"] == "memmap"
+    storage = scene.storageDir
+    assert storage is not None and storage.is_dir()
+    scene.close()
+    assert not storage.exists()
+    scene.close()  # idempotent
+
+
+def testMemoryStorage_byDefaultForSmallScenes(built: Scene):
+    assert built.metadata["storage"] == "memory"
+    assert built.storageDir is None
+    built.close()  # no-op for in-memory scenes

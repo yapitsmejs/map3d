@@ -15,12 +15,10 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 import shapely
-from rasterio.features import rasterize
-from rasterio.transform import Affine
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns, cellMax, supersampleFactor
-from map3d.layers.pixels import toPixelGeometries
+from map3d.layers.pixels import rasterizePixels, toPixelGeometries
 from map3d.pack.reader import Pack, RasterWindow
 
 __all__ = ["CanopyModel", "treeRadius_m"]
@@ -113,8 +111,8 @@ class CanopyModel:
         shape = columns.shape
         if self.window is not None:
             ss = supersampleFactor(self.gridSpacing_m, self.nativeResolution_m)
-            lat, lon = columns.latticeLatLon(ss)
-            values = self.window.sample(lat, lon)
+            col, row = columns.mapLattice(ss, self.window.pixelCoords)
+            values = self.window.sampleAtPixels(col, row)
             values[(values < 0) | (values > _MAX_VALID_m)] = np.nan
             canopy = cellMax(values, ss)
         elif self.treeSourceId is not None:
@@ -133,12 +131,13 @@ class CanopyModel:
         if hits.size == 0:
             return np.zeros((nr, nc))
         order = hits[np.argsort(self.treeHeights_m[hits], kind="stable")]
-        burned = rasterize(
+        burned = rasterizePixels(
             ((self.treeDiscs[i], float(self.treeHeights_m[i])) for i in order),
-            out_shape=(nr, nc),
-            transform=Affine.translation(c0, r0),
-            fill=0.0,
-            all_touched=True,
+            (nr, nc),
+            r0,
+            c0,
+            allTouched=True,
             dtype="float64",
+            fill=0.0,
         )
         return np.asarray(burned, dtype=np.float64)

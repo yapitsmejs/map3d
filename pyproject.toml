@@ -81,3 +81,6 @@ testpaths = ["tests"]
 # (`uv run pytest`) stays fast and does not fail during red-phase work; the
 # coverage threshold is enforced by `scripts/check.py` instead.
 addopts = ["--strict-markers", "--strict-config", "-ra"]
+markers = [
+    "slow: design-point benchmark; needs MAP3D_BENCH_PACK (run with -m slow)",
+]

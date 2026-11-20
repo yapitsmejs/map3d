@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import rasterio
 
 from map3d import __version__
 from map3d.gridGeometry import GridGeometry
@@ -118,6 +122,30 @@ class Scene:
     layers: dict[str, npt.NDArray[Any]]
     features: dict[str, npt.NDArray[Any]]
     metadata: dict[str, Any] = field(default_factory=dict)
+    storageDir: Path | None = None
+    _ownsStorage: bool = field(default=False, repr=False)
+
+    def __enter__(self) -> Scene:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release disk-backed layers; delete their directory if the scene created it.
+
+        A no-op for in-memory scenes. Safe to call more than once.
+        """
+        if self.storageDir is None:
+            return
+        for array in self.layers.values():
+            mm = getattr(array, "_mmap", None)
+            if mm is not None:
+                mm.close()
+        self.layers = {}
+        if self._ownsStorage:
+            shutil.rmtree(self.storageDir, ignore_errors=True)
+        self.storageDir = None
 
     @property
     def warnings(self) -> list[str]:
@@ -163,14 +191,27 @@ class _Models:
 
 
 def buildScene(
-    request: SceneRequest, pack: str | os.PathLike[str] | Pack, chunkSize: int = 1024
+    request: SceneRequest,
+    pack: str | os.PathLike[str] | Pack,
+    chunkSize: int = 1024,
+    workers: int | None = None,
+    workDir: str | os.PathLike[str] | None = None,
+    memoryBudget_GB: float = 2.0,
 ) -> Scene:
     """Build the scene grid for a request from an offline pack.
+
+    Chunks are processed in parallel threads (the hot loops are numba ``nogil``
+    kernels). Results are bitwise identical for any chunking or worker count.
 
     Args:
         request: Validated scene request.
         pack: Pack directory or opened pack.
         chunkSize: Rows/columns per processing chunk.
+        workers: Parallel chunk workers (default: min(8, CPU count)).
+        workDir: Store layers as memory-mapped ``.npy`` files here (kept).
+        memoryBudget_GB: If the layers would exceed this and no ``workDir`` is
+            given, they are memory-mapped in a temporary directory that
+            :meth:`Scene.close` deletes.
 
     Returns:
         The scene.
@@ -192,10 +233,23 @@ def buildScene(
     )
     warnings += _resolutionWarnings(opened, request.gridSpacing_m)
 
-    layers = _allocate(geometry.shape, request.maxDeckLevels)
-    overflow = 0
-    for rows, cols in geometry.iterChunks(chunkSize, chunkSize):
-        overflow += _buildChunk(layers, request, geometry, models, rows, cols)
+    storageDir, ownsStorage = _chooseStorage(
+        geometry.shape, request.maxDeckLevels, workDir, memoryBudget_GB
+    )
+    layers = _allocate(geometry.shape, request.maxDeckLevels, storageDir)
+    chunks = list(geometry.iterChunks(chunkSize, chunkSize))
+    nWorkers = workers if workers is not None else min(8, os.cpu_count() or 1)
+    if nWorkers > 1 and len(chunks) > 1:
+        with ThreadPoolExecutor(max_workers=nWorkers) as pool:
+            overflow = sum(
+                pool.map(
+                    lambda rc: _buildChunkInThread(layers, request, geometry, models, *rc), chunks
+                )
+            )
+    else:
+        overflow = sum(
+            _buildChunk(layers, request, geometry, models, rows, cols) for rows, cols in chunks
+        )
     if overflow:
         warnings.append(
             f"{overflow} nodes have more than maxDeckLevels={request.maxDeckLevels} deck levels; "
@@ -209,7 +263,8 @@ def buildScene(
         models.decks.featureTable(firstFeatureId=len(models.buildings) + 1),
     )
     metadata = _metadata(request, geometry, ground, opened, warnings, layers)
-    return Scene(request, geometry, layers, features, metadata)
+    metadata["storage"] = "memory" if storageDir is None else "memmap"
+    return Scene(request, geometry, layers, features, metadata, storageDir, ownsStorage)
 
 
 def _concatFeatures(*tables: dict[str, npt.NDArray[Any]]) -> dict[str, npt.NDArray[Any]]:
@@ -224,18 +279,60 @@ _DECK_LAYERS = (
 )
 
 
-def _allocate(shape: tuple[int, int], maxDeckLevels: int) -> dict[str, npt.NDArray[Any]]:
-    layers: dict[str, npt.NDArray[Any]] = {}
+def _layerSpecs(
+    shape: tuple[int, int], maxDeckLevels: int
+) -> dict[str, tuple[tuple[int, ...], type]]:
+    specs: dict[str, tuple[tuple[int, ...], type]] = {}
     for name in LAYER_INFO:
         if name == "featureId":
-            layers[name] = np.zeros(shape, dtype=np.int64)
+            specs[name] = (shape, np.int64)
         elif name in ("heightSource", "landClass"):
-            layers[name] = np.zeros(shape, dtype=np.uint8)
+            specs[name] = (shape, np.uint8)
         elif name in _DECK_LAYERS:
-            layers[name] = np.full((maxDeckLevels, *shape), np.nan, dtype=np.float32)
+            specs[name] = ((maxDeckLevels, *shape), np.float32)
         else:
-            layers[name] = np.full(shape, np.nan, dtype=np.float32)
+            specs[name] = (shape, np.float32)
+    return specs
+
+
+def _chooseStorage(
+    shape: tuple[int, int],
+    maxDeckLevels: int,
+    workDir: str | os.PathLike[str] | None,
+    budget_GB: float,
+) -> tuple[Path | None, bool]:
+    if workDir is not None:
+        path = Path(workDir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path, False
+    total = sum(
+        int(np.prod(sh)) * np.dtype(dt).itemsize
+        for sh, dt in _layerSpecs(shape, maxDeckLevels).values()
+    )
+    if total > budget_GB * 1e9:
+        return Path(tempfile.mkdtemp(prefix="map3d-scene-")), True
+    return None, False
+
+
+def _allocate(
+    shape: tuple[int, int], maxDeckLevels: int, storageDir: Path | None = None
+) -> dict[str, npt.NDArray[Any]]:
+    # No prefill: _buildChunk assigns every element of every layer.
+    layers: dict[str, npt.NDArray[Any]] = {}
+    for name, (layerShape, dtype) in _layerSpecs(shape, maxDeckLevels).items():
+        if storageDir is None:
+            layers[name] = np.empty(layerShape, dtype=dtype)
+        else:
+            layers[name] = np.lib.format.open_memmap(
+                storageDir / f"{name}.npy", mode="w+", dtype=dtype, shape=layerShape
+            )
     return layers
+
+
+def _buildChunkInThread(*args: Any) -> int:
+    # rasterio's GDAL environment (Env) is thread-local; give each worker its own.
+    with rasterio.Env():
+        return _buildChunk(*args)
 
 
 def _buildChunk(
@@ -298,8 +395,7 @@ def _buildChunk(
     landClass = np.where(hasDeck, np.uint8(CLASS_DECK), landClass)
     landClass = np.where(hasBuilding, np.uint8(CLASS_BUILDING), landClass).astype(np.uint8)
 
-    lat, lon = columns.nodeLatLon()
-    undulation = ground.undulation_m(lat, lon)
+    (undulation,) = columns.mapNodes(lambda la, lo: (ground.undulation_m(la, lo),))
     offset = undulation if request.verticalDatum == "ellipsoid" else 0.0
     layers["groundHeight_datum_m"][rows, cols] = groundH + offset
     layers["groundHeight_ENU_m"][rows, cols] = columns.toEnuUp(groundH + undulation)

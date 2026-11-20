@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import rasterio
+from rasterio.windows import Window
 
 if TYPE_CHECKING:
     from map3d.scene import Scene
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 __all__ = ["writeGeoTiff"]
 
 _TILE = 256
+_BAND_ROWS = 2048  # a multiple of the tile size
 
 
 def writeGeoTiff(scene: Scene, outDir: str | os.PathLike[str]) -> list[Path]:
@@ -56,6 +58,7 @@ def writeGeoTiff(scene: Scene, outDir: str | os.PathLike[str]) -> list[Path]:
             "crs": crsWkt,
             "transform": transform,
             "compress": "deflate",
+            "num_threads": "ALL_CPUS",  # parallel compression (GDAL GTiff option)
             "nodata": np.nan if isFloat else None,
         }
         if rows >= _TILE and cols >= _TILE:
@@ -63,7 +66,12 @@ def writeGeoTiff(scene: Scene, outDir: str | os.PathLike[str]) -> list[Path]:
         path = root / f"{name}.tif"
         info = layerInfo.get(name, {})
         with rasterio.open(path, "w", **profile) as dst:
-            dst.write(bands)
+            # Write in row bands so huge (memory-mapped) layers never load whole.
+            for row0 in range(0, rows, _BAND_ROWS):
+                row1 = min(rows, row0 + _BAND_ROWS)
+                dst.write(
+                    np.asarray(bands[:, row0:row1, :]), window=Window(0, row0, cols, row1 - row0)
+                )
             dst.update_tags(
                 units=info.get("units", ""),
                 description=info.get("description", ""),

@@ -24,10 +24,9 @@ import numpy.typing as npt
 import pyproj
 import shapely
 from rasterio.features import rasterize
-from rasterio.transform import Affine
 
 from map3d.gridGeometry import GridGeometry
-from map3d.layers.pixels import toPixelGeometries
+from map3d.layers.pixels import rasterizePixels, toPixelGeometries
 from map3d.layers.provenance import HeightSource
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack, RasterWindow
@@ -161,13 +160,14 @@ def rasterizeBuildings(
         return out
     order = hits[np.argsort(buildings.roofOrthometric_m[hits], kind="stable")]
     shapes = ((buildings.pixelGeometries[i], int(i) + 1) for i in order)
-    burned = rasterize(
+    burned = rasterizePixels(
         shapes,
-        out_shape=out.shape,
-        transform=Affine.translation(c0, r0),
-        fill=0,
-        all_touched=True,
+        out.shape,
+        r0,
+        c0,
+        allTouched=True,
         dtype="int32",
+        fill=0,
     )
     result: npt.NDArray[np.int64] = np.asarray(burned, dtype=np.int64)
     return result

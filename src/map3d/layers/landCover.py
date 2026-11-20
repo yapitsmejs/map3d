@@ -16,12 +16,10 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 import shapely
-from rasterio.features import rasterize
-from rasterio.transform import Affine
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns
-from map3d.layers.pixels import toPixelGeometries
+from map3d.layers.pixels import rasterizePixels, toPixelGeometries
 from map3d.pack.reader import Pack, RasterWindow
 from map3d.pack.registry import sourcesForRole
 
@@ -166,8 +164,8 @@ class LandCoverModel:
         """
         nr, nc = columns.shape
         if self.window is not None and self.sourceId is not None:
-            lat, lon = columns.nodeLatLon()
-            sampled = self.window.sample(lat, lon, method="nearest")
+            col, row = columns.mapNodes(self.window.pixelCoords)
+            sampled = self.window.sampleAtPixels(col, row, method="nearest")
             out = remapClasses(np.nan_to_num(sampled, nan=0.0), self.sourceId)
         else:
             out = np.zeros((nr, nc), dtype=np.uint8)
@@ -179,13 +177,14 @@ class LandCoverModel:
                 order = hits[
                     np.argsort(self.transportClasses[hits], kind="stable")
                 ]  # rail drawn last
-                burned = rasterize(
+                burned = rasterizePixels(
                     ((self.transportShapes[i], int(self.transportClasses[i])) for i in order),
-                    out_shape=(nr, nc),
-                    transform=Affine.translation(c0, r0),
-                    fill=0,
-                    all_touched=False,
+                    (nr, nc),
+                    r0,
+                    c0,
+                    allTouched=False,
                     dtype="uint8",
+                    fill=0,
                 )
                 out = np.where(burned > 0, burned, out).astype(np.uint8)
         return out

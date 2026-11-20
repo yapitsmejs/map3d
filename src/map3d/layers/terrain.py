@@ -106,5 +106,14 @@ class GroundModel:
             Orthometric cell-max ground height, chunk-shaped.
         """
         ss = supersampleFactor(gridSpacing_m, self.nativeResolution_m)
-        lat, lon = columns.latticeLatLon(ss)
-        return cellMax(self.orthometricAt(lat, lon), ss)
+        col, row = columns.mapLattice(ss, self.window.pixelCoords)
+        values = self.window.sampleAtPixels(col, row)
+        if self.verticalReference == "WGS84":
+            lat, lon = columns.latticeLatLon(ss)
+            values = values - self.undulation_m(lat, lon)
+        elif self.verticalReference != "EGM2008":
+            raise ValueError(
+                f"ground source {self.sourceId!r} has unsupported vertical reference "
+                f"{self.verticalReference!r}"
+            )
+        return cellMax(values, ss)

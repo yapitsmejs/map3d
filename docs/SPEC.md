@@ -356,6 +356,27 @@ map3d info    sg.pack
 - **Memory:** about 26 float32 layers at K = 5 is ≈ 12 GB if fully
   materialized, so processing is **chunked** (grid tiles) and written
   incrementally. Peak RAM budget is ≤ 8 GB at the design point.
+- **How (M6):**
+  - Node footprints, raster pixel coordinates and the geoid are solved exactly
+    on a global coarse lattice (≤ 50 m) and interpolated. Interpolation error
+    is < 1 µm in position and ≤ 0.07 mm in heights (float32).
+  - Hot loops are numba `nogil` kernels.
+  - Chunks run on a thread pool (`workers`, default min(8, CPUs)). Results are
+    bitwise identical for any chunking or worker count.
+  - Layers are memory-mapped `.npy` files when they would exceed
+    `memoryBudget_GB` (default 2) or when `workDir` is given.
+  - GeoTIFFs are written in row bands with multi-threaded deflate.
+- **Measured** (24-core workstation, real Marina Bay pack, design point,
+  K = 5):
+
+  | Stage | Time |
+  |---|---|
+  | Build | 16.9 s |
+  | Write `.npz` (11 GB) | 10.0 s |
+  | Write GeoTIFFs (1 GB) | 11.5 s |
+
+  Peak private memory: **4.5 GB**. Reproduce with `scripts/benchmark.py`, or
+  `pytest -m slow` with `MAP3D_BENCH_PACK` set.
 
 ## 12. Acceptance criteria
 

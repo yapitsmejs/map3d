@@ -27,12 +27,10 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import shapely
-from rasterio.features import rasterize
-from rasterio.transform import Affine
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns
-from map3d.layers.pixels import toPixelGeometries
+from map3d.layers.pixels import rasterizePixels, toPixelGeometries
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack
 from map3d.pack.registry import sourcesForRole
@@ -265,13 +263,14 @@ def rasterizeDecks(
     values: list[FloatArray] = []
     owners: list[npt.NDArray[np.int64]] = []
     for i in hits:
-        mask = rasterize(
+        mask = rasterizePixels(
             [(decks.pixelShapes[i], 1)],
-            out_shape=(nr, nc),
-            transform=Affine.translation(c0, r0),
-            fill=0,
-            all_touched=True,
+            (nr, nc),
+            r0,
+            c0,
+            allTouched=True,
             dtype="uint8",
+            fill=0,
         )
         rr, cc = np.nonzero(mask)
         if rr.size == 0:
