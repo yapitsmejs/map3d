@@ -143,6 +143,7 @@ def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
         color=(90, 160, 70),
         translations_ENU_m=np.array([[10.0, 20.0, 5.0], [-3.0, 4.0, 1.0]]),
         scales=np.array([[2.0, 2.0, 3.0], [1.0, 1.0, 1.5]]),
+        rotations_ENU=np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.6, 0.8]]),
     )
     path = writeGlb(tmp_path / "i.glb", _square(1.0), _PNG, None, lit=True, instanced=[part, part])
     gltf = pygltflib.GLTF2().load_binary(str(path))
@@ -161,11 +162,43 @@ def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
 
     np.testing.assert_allclose(read(ext["TRANSLATION"]), [[10, 5, -20], [-3, 1, -4]])  # y-up
     np.testing.assert_allclose(read(ext["SCALE"]), [[2, 3, 2], [1, 1.5, 1]])
+    # ENU yaw (x, y, z, w) -> glTF yaw about +y: (x, z, -y, w).
+    np.testing.assert_allclose(
+        read(ext["ROTATION"]), [[0, 0, 0, 1], [0, 0.6, 0, 0.8]], atol=1e-6
+    )
     prim = gltf.meshes[node.mesh].primitives[0]
     assert prim.attributes.NORMAL is not None
     mat = gltf.materials[prim.material]
     linear = (np.array([90, 160, 70]) / 255) ** 2.2  # glTF colour factors are linear
     np.testing.assert_allclose(mat.pbrMetallicRoughness.baseColorFactor[:3], linear, rtol=0.05)
+
+
+def testWriteGlb_texturedFacadesRepeatAndKeepVertexColors(tmp_path: Path):
+    facade = _square(2.0, uv=True, color=True)
+    path = writeGlb(
+        tmp_path / "f.glb",
+        textured=_square(1.0),
+        texture=_PNG,
+        colored=None,
+        lit=True,
+        facades=facade,
+        facadeTexture=_PNG,
+    )
+    gltf = pygltflib.GLTF2().load_binary(str(path))
+    assert len(gltf.images) == 2
+    assert len(gltf.meshes[0].primitives) == 2
+    primitive = gltf.meshes[0].primitives[1]
+    assert primitive.attributes.TEXCOORD_0 is not None
+    assert primitive.attributes.COLOR_0 is not None
+    assert primitive.attributes.NORMAL is not None
+    material = gltf.materials[primitive.material]
+    assert material.doubleSided is True
+    sampler = gltf.samplers[
+        gltf.textures[material.pbrMetallicRoughness.baseColorTexture.index].sampler
+    ]
+    assert sampler.wrapS == 10497 and sampler.wrapT == 10497
+    with pytest.raises(ValueError, match="facade"):
+        writeGlb(tmp_path / "bad.glb", None, None, None, facades=facade)
 
 
 def testWriteGlb_onlyInstancedIsAllowed(tmp_path: Path):

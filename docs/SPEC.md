@@ -47,7 +47,6 @@ WorldCover / Impact Observatory, OSM, data.gov.sg).
 | `swathVertical_m` | `float > 0` | Swath extent `Ly` along grid **y** (an in-plane extent, *not* altitude). |
 | `verticalDatum` | `"msl"` (default) \| `"ellipsoid"` | Datum for the "height above datum" layers. MSL = EGM2008 geoid (not Singapore Height Datum). |
 | `maxDeckLevels` | `int ≥ 0`, default `5` | `K`, the number of elevated-structure levels stored in the grid. |
-| `imageryPath` | path \| `None` | Optional BYO orthophoto (GeoTIFF). It replaces Sentinel-2 in the mesh drape. |
 | `pack` | path | Offline data pack to read from (§9). |
 
 ### 4.1 Validation (strict; failures raise `ValueError` with a specific message)
@@ -203,22 +202,32 @@ building > deck > road/rail > land cover.
   - **Elevated structures:** true 3D decks (road/rail centerline swept to
     width, with thickness) with open space underneath. Every level is
     included, not just `K`.
-- **Appearance:** two styles (`write3dTiles(style=...)`, `map3d build --style`):
-  - **`conceptual` (default):** a clean, map-like look in the spirit of
-    geosg.app. Terrain, roofs and deck tops get flat pastel colours:
-    - **Land cover:** WorldCover, sampled bilinearly so its 10 m cells blend
-      softly. Grass is pale green, built-up land warm light grey, water blue.
-    - **Crisp overlays from the grid:** grey roads, rail and decks, grey roofs,
-      and a soft green on the ground under canopy ≥ 2 m (not on roads), so gaps
-      between crowns and distant views read as wooded.
-    - **Shading:** materials are lit, with vertex normals (smooth on terrain
-      and tree crowns, flat on roofs and walls). The renderer shades the
-      shapes; walls are white.
-    - **Not drawn:** road labels, lane markings, windows and roof colours (no
-      open data for the last two).
-  - **`satellite`:** the Sentinel-2 cloud-free composite (~10 m), or the BYO
-    orthophoto, draped unlit. Chosen automatically when `--imagery` is given;
-    an error if no imagery is available.
+- **Appearance:** `write3dTiles(style=...)` and `map3d build --style` select a
+  style. Currently **`conceptual`** is supported and is the default: a clean,
+  map-like look in the spirit of geosg.app.
+  - **Land cover:** WorldCover, sampled bilinearly so its 10 m cells blend
+    softly. Grass is pale green, built-up land warm light grey, water blue.
+  - **Crisp overlays from the grid:** grey roads, rail and decks, and a soft
+    green on the ground under canopy ≥ 2 m (not on roads), so gaps between
+    crowns and distant views read as wooded.
+  - **Building palettes:** robust median roof colours from interior imagery
+    pixel centres, capped at 256 samples per building. Dark/shadowed and
+    vegetation-like samples are rejected. Footprints under one source pixel or
+    with fewer than two usable samples keep neutral colours. Walls receive a
+    coordinated lighter, desaturated tint with deterministic per-feature variation.
+  - **Procedural facades:** a shared repeating PNG supplies framed and divided
+    windows, sills and floor bands. UV repetition uses approximately 3 m window
+    bays and floors derived from building height. These are illustrative, not
+    observed facade features; the tileset's `asset.extras.buildingAppearance`
+    records this and the imagery source. No imagery or shadows are projected
+    onto walls, and lighting remains in the renderer.
+  - **Imagery choice:** `buildingImageryPath` / `--building-imagery` supplies an
+    RGB orthophoto; otherwise the pack's imagery is used. This does not restore
+    a satellite style or drape the terrain with imagery.
+  - **Shading:** materials are lit, with vertex normals (smooth on terrain
+    and tree crowns, flat on roofs and walls). Walls use the facade texture
+    multiplied by their per-building tint.
+  - **Not drawn:** road labels, lane markings, or measured architectural details.
 - `map3d view <tilesetDir>` serves the tileset on localhost with a bundled
   offline viewer.
   - **Why three.js:** the viewer is vendored three.js r170 (MIT, ~0.9 MB) plus
@@ -261,10 +270,11 @@ building > deck > road/rail > land cover.
     leaves − 1), so distant views keep the skyline.
   - **Decks:** in leaves and their parents.
   - **Geometric error:** max(terrain tolerance, omitted building height).
-  - **Texture:** one per tile, projected top-down onto terrain, roofs and deck
-    tops. Conceptual: 512² PNG, overlays sampled 2× per axis and averaged
-    (anti-aliased edges, ~0.55 m pixels at the leaves). Satellite: 256² JPEG.
-    Walls and deck sides use RGBA vertex colours.
+  - **Texture:** one 512² PNG per tile, projected top-down onto terrain, roofs
+    and deck tops. Overlays are sampled 2× per axis and averaged (anti-aliased
+    edges, ~0.55 m pixels at the leaves). Building walls have a second, shared
+    repeating 96² facade PNG, physical-scale UVs and per-vertex tints; deck
+    sides use RGBA vertex colours.
   - **Loyang 4.5 km, conceptual with trees:** 95 MB of tiles, written in
     ~80 s.
   - **Viewer camera in the URL:** `#cam=E,N,U,targetE,targetN,targetU` (scene
@@ -283,7 +293,7 @@ building > deck > road/rail > land cover.
 | Land cover | ESA WorldCover 2021 10 m; Impact Observatory 10 m annual LULC | — |
 | Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | URA Master Plan rail lines (`GRND_LEVEL` marks viaducts) |
 | Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
-| Imagery | Sentinel-2 cloudless 2024 by EOX (s2maps.eu WMTS, zoom 14 ≈ 10 m; CC BY-NC-SA 4.0) | BYO orthophoto (`--imagery`) |
+| Imagery | Sentinel-2 cloudless 2024 by EOX (s2maps.eu WMTS, zoom 14 ≈ 10 m; CC BY-NC-SA 4.0) | BYO RGB orthophoto (`--building-imagery`) for building palettes |
 | Geoid | EGM2008 grid (PROJ-data `us_nga_egm08_25.tif`) | — |
 
 **Building height precedence (authoritative first):** local government data →
@@ -440,7 +450,7 @@ scene.layers["surfaceHeight_ENU_m"]            # numpy array (Ny, Nx)
 scene.metadata                                 # dict, same content as scene.json
 scene.writeNpz("out/scene")                    # scene.npz + scene.json
 scene.writeGeoTiff("out/geotiff")
-scene.write3dTiles("out/tiles", imageryPath=None)
+scene.write3dTiles("out/tiles", style="conceptual")
 ```
 
 ### 10.2 CLI
@@ -448,8 +458,8 @@ scene.write3dTiles("out/tiles", imageryPath=None)
 ```
 map3d build   --lat 1.2834 --lon 103.8607 --spacing 0.5 --axes axes.json \
               --swath 5000 5000 --datum msl --decks 5 --pack sg.pack \
-              --out out/ --format npz,geotiff,3dtiles [--imagery ortho.tif] \
-              [--ground-smoothing 90] [--style conceptual|satellite]
+              --out out/ --format npz,geotiff,3dtiles [--building-imagery ortho.tif] \
+              [--ground-smoothing 90] [--style conceptual]
 map3d prepare --bbox 103.5 1.1 104.2 1.5 --out sg.pack
 map3d ingest  --pack sg.pack --source overtureBuildings ./buildings.parquet
 map3d view    out/tiles
@@ -513,5 +523,7 @@ map3d info    sg.pack
 - Open LOD2 roof data is scarce, so expect mostly LOD1 buildings even in
   Singapore.
 - Deck elevations are mostly heuristic (§8).
-- Sentinel-2 imagery is ~10 m, so it gives context only. Use BYO imagery for
-  detail.
+- Sentinel-2 imagery is ~10 m, so many buildings lack reliable independent
+  colours and use neutral fallback. Higher-resolution orthophotos improve roof
+  palettes, but still do not observe facades. Windows, floor bands and wall
+  tints are procedural illustrations, not measured architectural features.

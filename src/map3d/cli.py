@@ -150,7 +150,6 @@ def build(
     formats: Annotated[
         str, typer.Option("--format", help="Comma list: npz, geotiff, 3dtiles.")
     ] = "npz",
-    imagery: Annotated[Path | None, typer.Option("--imagery", help="BYO orthophoto.")] = None,
     groundSmoothing: Annotated[
         float,
         typer.Option(
@@ -159,11 +158,14 @@ def build(
         ),
     ] = DEFAULT_GROUND_SMOOTHING_m,
     style: Annotated[
-        str | None,
+        str,
+        typer.Option("--style", help="3D Tiles look. Currently supported: conceptual."),
+    ] = "conceptual",
+    buildingImagery: Annotated[
+        Path | None,
         typer.Option(
-            "--style",
-            help="3D Tiles look: conceptual (flat map colours) or satellite (imagery). "
-            "Default: satellite with --imagery, else conceptual.",
+            "--building-imagery",
+            help="Optional high-resolution RGB orthophoto for building roof and facade colours.",
         ),
     ] = None,
 ) -> None:
@@ -181,7 +183,6 @@ def build(
             swathVertical_m=swath[1],
             verticalDatum=datum,  # type: ignore[arg-type]
             maxDeckLevels=decks,
-            imageryPath=imagery,
         )
         scene = buildScene(request, pack, groundSmoothing_m=groundSmoothing)
     except ValueError as exc:
@@ -197,7 +198,11 @@ def build(
         typer.echo(f"  wrote {len(paths)} GeoTIFFs to {out / 'geotiff'}")
     if "3dtiles" in wanted:
         try:
-            tileset = scene.write3dTiles(out / "tiles", style=style)  # type: ignore[arg-type]
+            tileset = scene.write3dTiles(
+                out / "tiles",
+                style=style,  # type: ignore[arg-type]
+                buildingImageryPath=buildingImagery,
+            )
         except ValueError as exc:
             scene.close()
             _fail(exc)

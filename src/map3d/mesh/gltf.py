@@ -6,8 +6,9 @@ A tile's GLB holds one mesh with up to two primitives:
   texture (an embedded JPEG or PNG). Unlit (``KHR_materials_unlit``) for
   imagery, which already carries real light and shadow; lit, with vertex
   normals, for the conceptual style, so the shape reads through flat colours.
-- **colored:** walls and deck sides, with per-vertex colours and normals. Lit
-  and double-sided.
+- **colored:** deck sides, with per-vertex colours and normals. Lit and double-sided.
+- **facades:** building walls with repeating procedural texture UVs and
+  per-vertex tints. Lit and double-sided.
 
 Positions are ENU metres relative to the scene centre, written y-up as glTF
 requires: ``(x, y, z) = (E, U, -N)``. 3D Tiles rotates glTF content y-up ->
@@ -89,12 +90,15 @@ class InstancedPart:
         color: sRGB colour of its lit material.
         translations_ENU_m: Instance positions, ``(n, 3)``, scene ENU metres.
         scales: Per-instance scale along E, N, U, ``(n, 3)``.
+        rotations_ENU: Optional per-instance unit quaternions ``(x, y, z, w)``
+            in the ENU frame (typically a yaw about up), ``(n, 4)``.
     """
 
     mesh: MeshPart
     color: tuple[int, int, int]
     translations_ENU_m: FloatArray
     scales: FloatArray
+    rotations_ENU: FloatArray | None = None
 
     @property
     def count(self) -> int:
@@ -142,6 +146,8 @@ def writeGlb(
     colored: MeshPart | None,
     lit: bool = False,
     instanced: Sequence[InstancedPart] = (),
+    facades: MeshPart | None = None,
+    facadeTexture: bytes | None = None,
 ) -> Path:
     """Write a GLB with a textured and/or a vertex-coloured primitive, plus instances.
 
@@ -153,6 +159,8 @@ def writeGlb(
         lit: Shade the textured part (vertex normals, no ``KHR_materials_unlit``).
         instanced: Meshes drawn once per instance, each as its own node with
             ``EXT_mesh_gpu_instancing`` (required by the file when present).
+        facades: Optional textured wall part with UVs and optional vertex tints.
+        facadeTexture: Repeating procedural facade PNG for ``facades``.
 
     Returns:
         The written path.
@@ -162,11 +170,14 @@ def writeGlb(
     """
     hasTextured = textured is not None and not textured.isEmpty
     hasColored = colored is not None and not colored.isEmpty
+    hasFacades = facades is not None and not facades.isEmpty
     instances = [p for p in instanced if p.count and not p.mesh.isEmpty]
-    if not hasTextured and not hasColored and not instances:
+    if not hasTextured and not hasColored and not hasFacades and not instances:
         raise ValueError("cannot write an empty GLB")
     if hasTextured and (textured is None or textured.uv is None or texture is None):
         raise ValueError("the textured part needs uv coordinates and a texture")
+    if hasFacades and (facades is None or facades.uv is None or facadeTexture is None):
+        raise ValueError("the facade part needs uv coordinates and a facade texture")
 
     blob = bytearray()
     gltf = pygltflib.GLTF2(scene=0, scenes=[pygltflib.Scene(nodes=[])])
@@ -243,27 +254,39 @@ def writeGlb(
         )
         return pygltflib.Primitive(attributes=attributes, indices=indices, material=material)
 
-    if hasTextured and textured is not None and texture is not None:
-        image = addView(texture, None)
-        mime = "image/png" if texture.startswith(_PNG_SIGNATURE) else "image/jpeg"
+    def addTextureMaterial(data: bytes, doubleSided: bool, repeat: bool) -> int:
+        image = addView(data, None)
+        mime = "image/png" if data.startswith(_PNG_SIGNATURE) else "image/jpeg"
+        imageIndex = len(gltf.images)
         gltf.images.append(pygltflib.Image(bufferView=image, mimeType=mime))
+        samplerIndex = len(gltf.samplers)
+        wrap = 10497 if repeat else 33071  # REPEAT or CLAMP_TO_EDGE
         gltf.samplers.append(
-            pygltflib.Sampler(magFilter=9729, minFilter=9987, wrapS=33071, wrapT=33071)
+            pygltflib.Sampler(magFilter=9729, minFilter=9987, wrapS=wrap, wrapT=wrap)
         )
-        gltf.textures.append(pygltflib.Texture(source=0, sampler=0))
+        textureIndex = len(gltf.textures)
+        gltf.textures.append(pygltflib.Texture(source=imageIndex, sampler=samplerIndex))
         gltf.materials.append(
             pygltflib.Material(
                 pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
-                    baseColorTexture=pygltflib.TextureInfo(index=0),
+                    baseColorTexture=pygltflib.TextureInfo(index=textureIndex),
                     metallicFactor=0.0,
                     roughnessFactor=1.0,
                 ),
+                doubleSided=doubleSided,
                 extensions={} if lit else {"KHR_materials_unlit": {}},
             )
         )
-        if not lit:
+        if not lit and "KHR_materials_unlit" not in gltf.extensionsUsed:
             gltf.extensionsUsed.append("KHR_materials_unlit")
-        primitives.append(addPrimitive(textured, len(gltf.materials) - 1, uv=True, normals=lit))
+        return len(gltf.materials) - 1
+
+    if hasTextured and textured is not None and texture is not None:
+        material = addTextureMaterial(texture, doubleSided=False, repeat=False)
+        primitives.append(addPrimitive(textured, material, uv=True, normals=lit))
+    if hasFacades and facades is not None and facadeTexture is not None:
+        material = addTextureMaterial(facadeTexture, doubleSided=True, repeat=True)
+        primitives.append(addPrimitive(facades, material, uv=True, normals=lit))
     if hasColored and colored is not None:
         gltf.materials.append(
             pygltflib.Material(
@@ -307,6 +330,16 @@ def writeGlb(
                 None,
             ),
         }
+        if part.rotations_ENU is not None:
+            # ENU (x, y, z) -> glTF (x, z, -y); a yaw about ENU up is a yaw
+            # about glTF +y. w is unchanged (the map is orthogonal).
+            q = np.asarray(part.rotations_ENU, dtype=np.float64)
+            attributes["ROTATION"] = addAccessor(
+                np.column_stack([q[:, 0], q[:, 2], -q[:, 1], q[:, 3]]).astype(np.float32),
+                pygltflib.FLOAT,
+                pygltflib.VEC4,
+                None,
+            )
         gltf.nodes.append(
             pygltflib.Node(
                 mesh=len(gltf.meshes) - 1,

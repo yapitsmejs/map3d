@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
-import rasterio
-from rasterio.transform import from_bounds
 
 from map3d.mesh import scenery
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
@@ -72,7 +69,10 @@ def testBuildings_roofAtRoofHeightAndWallsColored(scene: Scene):
     ]
     assert roofs.positions_ENU_m[:, 2].max() == pytest.approx(float(expectedU.max()), abs=1e-6)
     assert roofs.positions_ENU_m[:, 2].min() == pytest.approx(float(expectedU.min()), abs=1e-6)
-    assert roofs.uv is not None and walls.colors is not None
+    assert roofs.uv is not None and walls.colors is not None and walls.uv is not None
+    assert walls.uv.shape == (walls.positions_ENU_m.shape[0], 2)
+    assert walls.uv[:, 0].max() > 1.0  # physical window bays repeat around the facade
+    assert walls.uv[:, 1].max() == pytest.approx(10.0)  # 30 m / 3 m floors
     # Rectangle: 2 roof triangles, 4 walls x 2 triangles.
     assert roofs.triangles.shape[0] == 2 and walls.triangles.shape[0] == 8
     p = roofs.positions_ENU_m[roofs.triangles]
@@ -97,37 +97,9 @@ def testEmptySelections_giveEmptyParts(scene: Scene):
     assert all(p.isEmpty for p in scenery.deckParts(scene, empty, _full(scene)))
 
 
-def testTexture_conceptualIsPngWithoutImagery(scene: Scene):
-    png = scenery.renderTexture(scene, None, _full(scene), size=64)
+def testTexture_conceptualIsPng(scene: Scene):
+    png = scenery.renderTexture(scene, _full(scene), size=64)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
-
-
-def testTexture_fromByoImageryFile(scene: Scene, tmp_path: Path):
-    bounds = scene.geometry.footprintBounds_deg(margin_m=50.0)
-    path = tmp_path / "ortho.tif"
-    data = np.stack([np.full((50, 50), v, np.uint8) for v in (200, 30, 30)])
-    with rasterio.open(
-        path,
-        "w",
-        driver="GTiff",
-        width=50,
-        height=50,
-        count=3,
-        dtype="uint8",
-        crs="EPSG:4326",
-        transform=from_bounds(*bounds, 50, 50),
-    ) as dst:
-        dst.write(data)
-    imagery = scenery.ImagerySource.fromFile(path, bounds)
-    rgb = imagery.sampleRgb(
-        np.array([scene.geometry.frame.lat0_deg]), np.array([scene.geometry.frame.lon0_deg])
-    )
-    np.testing.assert_array_equal(rgb, [[200, 30, 30]])
-    assert scenery.renderTexture(scene, imagery, _full(scene), size=32)[:2] == b"\xff\xd8"
-
-
-def testImagerySource_fromPackNoneWithoutImageryRole(scene: Scene):
-    assert scenery.ImagerySource.fromPack(scene.pack, scene.geometry.footprintBounds_deg()) is None
 
 
 def _decodePng(data: bytes) -> np.ndarray:
@@ -157,7 +129,7 @@ def _decodePng(data: bytes) -> np.ndarray:
 def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
     extent = _full(scene)
     size = 500  # 2 m pixels
-    rgb = _decodePng(scenery.renderTexture(scene, None, extent, size=size))
+    rgb = _decodePng(scenery.renderTexture(scene, extent, size=size))
     assert rgb.shape == (size, size, 3)
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(e), np.array(n))
     col = int((gx - extent.x0) / (extent.x1 - extent.x0) * size)
@@ -165,11 +137,21 @@ def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS[name])
 
 
+def testTexture_imageryDerivedBuildingRoofColour(scene: Scene):
+    from map3d.mesh.buildingAppearance import BuildingAppearance
+
+    appearance = BuildingAppearance.neutral(scene.models.buildings)
+    appearance.roofColors[0] = [160, 100, 80]
+    rgb = _decodePng(scenery.renderTexture(scene, _full(scene), size=500, appearance=appearance))
+    gx, gy = scenery.enuToGrid(scene.geometry, np.array(-160.0), np.array(-100.0))
+    np.testing.assert_array_equal(rgb[int(500 - gy) // 2, int(gx + 500) // 2], [160, 100, 80])
+
+
 def testTexture_conceptualSoftensLandCoverEdges(scene: Scene):
     # Grass meets water at n = 350 m: the land-cover colours blend across the
     # 5 m source pixels instead of switching in a hard step.
     extent = scenery.TileExtent(-60.0, 60.0, 290.0, 410.0)
-    rgb = _decodePng(scenery.renderTexture(scene, None, extent, size=240)).astype(int)
+    rgb = _decodePng(scenery.renderTexture(scene, extent, size=240)).astype(int)
     grass, water = (
         np.array(scenery.CONCEPT_COLORS["grass"]),
         np.array(scenery.CONCEPT_COLORS["water"]),
@@ -185,7 +167,7 @@ def testTexture_conceptualWithoutLandCoverUsesGridClasses(scene: Scene):
         scene.models, landCover=dataclasses.replace(scene.models.landCover, window=None)
     )
     bare = dataclasses.replace(scene, models=models)
-    rgb = _decodePng(scenery.renderTexture(bare, None, _full(scene), size=100))
+    rgb = _decodePng(scenery.renderTexture(bare, _full(scene), size=100))
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(100.0), np.array(-390.0))
     col, row = int((gx + 500) / 10), int((500 - gy) / 10)
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS["grass"])

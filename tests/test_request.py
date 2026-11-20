@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -43,7 +42,6 @@ def testSceneRequest_validDefaults():
     req = _make()
     assert req.verticalDatum == "msl"
     assert req.maxDeckLevels == 5
-    assert req.imageryPath is None
     assert req.nCols == 4000
     assert req.nRows == 2000
     assert req.gridAxes_ENU.shape == (3, 3)
@@ -60,10 +58,6 @@ def testSceneRequest_acceptsSpecExampleHeading():
     axes = [[0.8660254, -0.5, 0.0], [0.5, 0.8660254, 0.0], [0.0, 0.0, 1.0]]
     req = _make(gridAxes_ENU=axes, axesTol=1e-7)
     assert req.nCols == 4000
-
-
-def testSceneRequest_imageryPathCoercedToPath():
-    assert _make(imageryPath="ortho.tif").imageryPath == Path("ortho.tif")
 
 
 def testSceneRequest_ellipsoidDatumAndZeroDecksAllowed():

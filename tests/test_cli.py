@@ -375,4 +375,17 @@ def testCliBuild_styleFlag(tmp_path, synPack):
     result = runner.invoke(
         cli.app, _buildArgs(synPack, tmp_path / "b", "--format", "3dtiles", "--style", "satellite")
     )
-    assert result.exit_code == 1 and "imagery" in result.output
+    assert result.exit_code == 1 and "unknown style" in result.output
+
+    result = runner.invoke(
+        cli.app,
+        _buildArgs(
+            synPack,
+            tmp_path / "c",
+            "--format",
+            "3dtiles",
+            "--building-imagery",
+            str(tmp_path / "missing.tif"),
+        ),
+    )
+    assert result.exit_code == 1 and "not found" in result.output

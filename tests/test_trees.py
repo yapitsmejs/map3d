@@ -163,3 +163,33 @@ def testSegment_smoothWoodIsFilledWithCrowns():
     assert np.all(r <= tr.MAX_CROWN_RADIUS_m) and np.all(r >= tr.MIN_CROWN_RADIUS_m)
     # The crowns account for most of the wood's area.
     assert np.sum(np.pi * r**2) == pytest.approx(np.pi * 40.0**2, rel=0.25)
+
+
+def testCrownShape_isLumpyNotSmooth():
+    # The lumpy crown is not the plain icosphere: radial displacement varies
+    # and stays small, and the poles (trunk and top) stay round.
+    sphere = tr._icosphere(2)
+    lumped = tr._CROWN
+    assert lumped.positions_ENU_m.shape[0] == sphere.positions_ENU_m.shape[0]
+    radii = np.linalg.norm(lumped.positions_ENU_m, axis=1)
+    assert 1.0 - tr._CROWN_LUMPINESS < radii.min() < 1.0 < radii.max() < 1.0 + tr._CROWN_LUMPINESS
+    polar = np.abs(sphere.positions_ENU_m[:, 2]) > 0.92
+    np.testing.assert_allclose(lumped.positions_ENU_m[polar], sphere.positions_ENU_m[polar])
+
+
+def testTreeParts_yawAndTrunkGrowWithSize(trees: tr.TreeSet):
+    parts = trees.select(np.arange(len(trees)))
+    crowns = [p for p in parts if p.color in tr.CROWN_COLORS]
+    quats = np.vstack([p.rotations_ENU for p in crowns])
+    np.testing.assert_allclose(np.linalg.norm(quats, axis=1), 1.0)
+    # The golden-angle yaw spreads the fixed lump pattern across trees.
+    yaw = 2.0 * np.arctan2(quats[:, 2], quats[:, 3])
+    assert np.unique(np.round(yaw, 6)).size == len(trees)  # every tree yaws apart
+    trunk = next(p for p in parts if p.color == tr.TRUNK_COLOR)
+    radius = trunk.scales[:, 0]
+    # Trunks grow with both the crown radius and the tree height.
+    assert np.corrcoef(radius, trees.height_m)[0, 1] > 0.9
+    h, r = trees.height_m, trees.crownRadius_m
+    np.testing.assert_allclose(
+        radius, np.clip(0.08 * r + 0.02 * h, 0.15, tr._TRUNK_RADIUS_MAX_m), rtol=1e-9
+    )

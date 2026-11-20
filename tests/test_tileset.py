@@ -106,46 +106,53 @@ def testTileset_conceptualStyleIsDefault(written: Path):
     assert all(p.attributes.NORMAL is not None for p in gltf.meshes[0].primitives)
 
 
-def _ortho(scene: Scene, path: Path) -> Path:
+def testTileset_buildingImageryAndProceduralFacades(scene: Scene, tmp_path: Path):
     import rasterio
     from rasterio.transform import from_bounds
 
+    ortho = tmp_path / "ortho.tif"
     bounds = scene.geometry.footprintBounds_deg(margin_m=50.0)
     with rasterio.open(
-        path,
+        ortho,
         "w",
         driver="GTiff",
-        width=40,
-        height=40,
+        width=100,
+        height=100,
         count=3,
         dtype="uint8",
         crs="EPSG:4326",
-        transform=from_bounds(*bounds, 40, 40),
+        transform=from_bounds(*bounds, 100, 100),
     ) as dst:
-        dst.write(np.full((3, 40, 40), 120, np.uint8))
-    return path
-
-
-def testTileset_satelliteStyleDrapesImageryUnlit(scene: Scene, tmp_path: Path):
-    ortho = _ortho(scene, tmp_path / "ortho.tif")
+        dst.write(np.full((3, 100, 100), 120, np.uint8))
     path = ts.write3dTiles(
-        scene, tmp_path / "s", imageryPath=ortho, leafSize_m=512.0, terrainGridSize=33
+        scene,
+        tmp_path / "styled",
+        buildingImageryPath=ortho,
+        leafSize_m=512.0,
+        terrainGridSize=33,
     )
-    assert json.loads(path.read_text(encoding="utf-8"))["asset"]["extras"]["style"] == "satellite"
-    gltf = _firstGlb(path)
-    assert gltf.images[0].mimeType == "image/jpeg"
-    assert "KHR_materials_unlit" in gltf.extensionsUsed
+    tileset = json.loads(path.read_text(encoding="utf-8"))
+    appearance = tileset["asset"]["extras"]["buildingAppearance"]
+    assert appearance == {
+        "facades": "procedural; windows and floor bands are illustrative, not measured",
+        "imagerySource": "byoBuildingImagery",
+        "imageryColoredBuildings": 3,
+        "buildingCount": 3,
+    }
+    assert any("ortho.tif" in text for text in tileset["asset"]["extras"]["attribution"])
+    assert any(
+        len(pygltflib.GLTF2().load_binary(str(path.parent / uri)).images) == 2
+        for uri in _uris(tileset["root"])
+    )
     assert validateTileset(path) == []
 
 
 def testTileset_styleValidation(scene: Scene, tmp_path: Path):
-    ortho = _ortho(scene, tmp_path / "ortho.tif")
-    with pytest.raises(ValueError, match="conceptual"):
-        ts.write3dTiles(scene, tmp_path / "a", imageryPath=ortho, style="conceptual")
-    with pytest.raises(ValueError, match="imagery"):
-        ts.write3dTiles(scene, tmp_path / "b", style="satellite")  # pack has no imagery
-    with pytest.raises(ValueError, match="style"):
-        ts.write3dTiles(scene, tmp_path / "c", style="cartoon")  # type: ignore[arg-type]
+    assert ts.STYLES == ("conceptual",)
+    with pytest.raises(ValueError, match="unknown style.*conceptual"):
+        ts.write3dTiles(scene, tmp_path / "a", style="satellite")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown style.*conceptual"):
+        ts.write3dTiles(scene, tmp_path / "b", style="cartoon")  # type: ignore[arg-type]
 
 
 def _instanceCounts(path: Path) -> dict[str, int]:

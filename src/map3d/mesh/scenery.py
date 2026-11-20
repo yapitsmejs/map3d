@@ -10,16 +10,13 @@ scene-centre ENU metres:
   at roof height; walls run from base to roof along the local vertical.
 - **Decks:** slabs whose top follows the deck profile (ground interpolated
   between the bridge ends + level height), with an underside and side walls.
-- **Textures:** one per tile, projected top-down. Imagery (pack source or BYO
-  file) when available, otherwise a land-class palette rendered from the grid.
+- **Textures:** one conceptual land-class palette per tile, projected top-down.
 """
 
 from __future__ import annotations
 
-import os
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -38,10 +35,11 @@ from map3d.layers.landCover import (
     CLASS_ROAD,
     remapClasses,
 )
+from map3d.mesh.buildingAppearance import BuildingAppearance, facadeUv
 from map3d.mesh.gltf import MeshPart
 from map3d.mesh.martini import checkGridSize, rtinErrors, rtinMesh
 from map3d.mesh.trees import MIN_TREE_HEIGHT_m
-from map3d.pack.reader import Pack, RasterWindow, readRasterWindow
+from map3d.pack.reader import RasterWindow
 
 if TYPE_CHECKING:
     from map3d.scene import Scene
@@ -50,7 +48,6 @@ __all__ = [
     "CONCEPT_COLORS",
     "DECK_COLOR",
     "WALL_COLOR",
-    "ImagerySource",
     "TileExtent",
     "buildingParts",
     "deckParts",
@@ -203,7 +200,10 @@ def terrainPart(
 
 
 def buildingParts(
-    scene: Scene, indices: npt.NDArray[np.int64], extent: TileExtent
+    scene: Scene,
+    indices: npt.NDArray[np.int64],
+    extent: TileExtent,
+    appearance: BuildingAppearance | None = None,
 ) -> tuple[MeshPart, MeshPart]:
     """LOD1 extrusions of the selected buildings.
 
@@ -211,12 +211,14 @@ def buildingParts(
         scene: Built scene.
         indices: Building indices (into ``scene.models.buildings``).
         extent: Tile extent (for roof UVs).
+        appearance: Imagery-derived facade tints, or neutral conceptual colours.
 
     Returns:
-        ``(roofs, walls)``: textured roofs and vertex-coloured walls.
+        ``(roofs, walls)``: textured roofs and textured, vertex-tinted walls.
+        Wall UVs repeat procedural window bays and floor bands at physical scale.
     """
     if indices.size == 0:
-        return MeshPart.empty(withUv=True), MeshPart.empty(withColors=True)
+        return MeshPart.empty(withUv=True), MeshPart.empty(withUv=True, withColors=True)
     b = scene.models.buildings
     geoms = b.geometries[indices]
     centroids = shapely.centroid(geoms)
@@ -238,7 +240,12 @@ def buildingParts(
     gx, gy = enuToGrid(scene.geometry, e, n)
     roofs = MeshPart(roofPos, _upward(roofPos, roofTris), extent.uv(gx, gy))
 
-    walls = _walls(frame, geoms, baseEll, roofEll, WALL_COLOR)
+    wallColors = (
+        appearance.wallColors[indices]
+        if appearance is not None
+        else np.tile(np.array(WALL_COLOR, dtype=np.uint8), (indices.size, 1))
+    )
+    walls = _walls(frame, geoms, baseEll, roofEll, wallColors)
     return roofs, walls
 
 
@@ -299,46 +306,13 @@ def deckParts(
     return tops, MeshPart.concatenate([underside, sides])
 
 
-@dataclass(frozen=True, eq=False)
-class ImagerySource:
-    """RGB imagery as three raster windows."""
-
-    bands: tuple[RasterWindow, RasterWindow, RasterWindow]
-
-    @classmethod
-    def fromPack(
-        cls, pack: Pack | None, bounds_deg: tuple[float, float, float, float]
-    ) -> ImagerySource | None:
-        """Imagery from the pack's ``imagery`` role, or ``None`` if absent."""
-        entry = pack.primarySource("imagery") if pack is not None else None
-        if pack is None or entry is None:
-            return None
-        r, g, b = (pack.readRaster(entry.sourceId, bounds_deg, band=k) for k in (1, 2, 3))
-        return cls((r, g, b))
-
-    @classmethod
-    def fromFile(
-        cls, path: str | os.PathLike[str], bounds_deg: tuple[float, float, float, float]
-    ) -> ImagerySource:
-        """Imagery from a bring-your-own RGB GeoTIFF (any CRS)."""
-        r, g, b = (
-            readRasterWindow([Path(path)], bounds_deg, "byoImagery", band=k) for k in (1, 2, 3)
-        )
-        return cls((r, g, b))
-
-    def sampleRgb(self, lat_deg: FloatArray, lon_deg: FloatArray) -> npt.NDArray[np.uint8]:
-        """Bilinear RGB at positions; black where outside."""
-        channels = [np.nan_to_num(w.sample(lat_deg, lon_deg), nan=0.0) for w in self.bands]
-        return np.clip(np.round(np.stack(channels, axis=-1)), 0, 255).astype(np.uint8)
-
-
 def renderTexture(
-    scene: Scene, imagery: ImagerySource | None, extent: TileExtent, size: int = 256
+    scene: Scene,
+    extent: TileExtent,
+    size: int = 512,
+    appearance: BuildingAppearance | None = None,
 ) -> bytes:
-    """Render a tile's top-down texture.
-
-    With imagery, the imagery is sampled (JPEG). Without, the conceptual style
-    is drawn (lossless PNG, flat colours from :data:`CONCEPT_COLORS`):
+    """Render a tile's conceptual top-down texture as lossless PNG.
 
     - **Land cover:** the source raster's classes coloured and sampled
       bilinearly, so its coarse pixels blend softly (grid classes if absent).
@@ -350,12 +324,12 @@ def renderTexture(
 
     Args:
         scene: Built scene.
-        imagery: Imagery to drape, or ``None`` for the conceptual style.
         extent: Tile extent.
         size: Texture side in pixels.
+        appearance: Optional per-building roof colours derived from imagery.
 
     Returns:
-        JPEG (imagery) or PNG (conceptual) bytes.
+        PNG bytes.
     """
     t = (np.arange(size) + 0.5) / size
     gx = extent.x0 + t * (extent.x1 - extent.x0)
@@ -364,9 +338,7 @@ def renderTexture(
     e, n = gridToEnu(scene.geometry, gxm, gym)
     toGeo = _orthoToGeographic(scene.geometry.orthoCrs().to_wkt())
     lon, lat = (np.asarray(v) for v in toGeo.transform(e, n))
-    if imagery is not None:
-        return _encode(imagery.sampleRgb(lat, lon), "JPEG")
-    return _encode(_conceptTexture(scene, extent, size, lat, lon), "PNG")
+    return _encode(_conceptTexture(scene, extent, size, lat, lon, appearance))
 
 
 _SUPERSAMPLE = 2  # crisp overlays are sampled 2x per axis and averaged (anti-aliased edges)
@@ -400,7 +372,12 @@ def _softLandCover(scene: Scene, lat: FloatArray, lon: FloatArray) -> FloatArray
 
 
 def _conceptTexture(
-    scene: Scene, extent: TileExtent, size: int, lat: FloatArray, lon: FloatArray
+    scene: Scene,
+    extent: TileExtent,
+    size: int,
+    lat: FloatArray,
+    lon: FloatArray,
+    appearance: BuildingAppearance | None,
 ) -> npt.NDArray[np.uint8]:
     k = _SUPERSAMPLE
     t = (np.arange(size * k) + 0.5) / (size * k)
@@ -419,6 +396,14 @@ def _conceptTexture(
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
+    if appearance is not None:
+        featureIds = np.asarray(scene.layers["featureId"])[row, col]
+        buildingRoof = (
+            (classes == CLASS_BUILDING)
+            & (featureIds > 0)
+            & (featureIds <= appearance.roofColors.shape[0])
+        )
+        rgb[buildingRoof] = appearance.roofColors[featureIds[buildingRoof] - 1]
     underTrees = (canopy >= MIN_TREE_HEIGHT_m) & ~overlay  # roads under trees stay roads
     rgb[underTrees] = CONCEPT_COLORS["underTrees"]
     averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
@@ -426,14 +411,11 @@ def _conceptTexture(
     return out
 
 
-def _encode(rgb: npt.NDArray[np.uint8], driver: str) -> bytes:
+def _encode(rgb: npt.NDArray[np.uint8]) -> bytes:
     height, width, _ = rgb.shape
-    options = {"quality": 85} if driver == "JPEG" else {}
     with warnings.catch_warnings(), MemoryFile() as mem:
         warnings.simplefilter("ignore", NotGeoreferencedWarning)  # textures are not georeferenced
-        with mem.open(
-            driver=driver, width=width, height=height, count=3, dtype="uint8", **options
-        ) as dst:
+        with mem.open(driver="PNG", width=width, height=height, count=3, dtype="uint8") as dst:
             dst.write(np.moveaxis(rgb, -1, 0))
         return bytes(mem.read())
 
@@ -479,7 +461,7 @@ def _walls(
     geoms: npt.NDArray[np.object_],
     baseEll: FloatArray,
     roofEll: FloatArray,
-    colour: tuple[int, int, int],
+    colors: npt.NDArray[np.uint8],
 ) -> MeshPart:
     rings, ringOwner = shapely.get_rings(geoms, return_index=True)
     coords, coordRing = shapely.get_coordinates(rings, return_index=True)
@@ -490,27 +472,38 @@ def _walls(
         e, n, u = frame.geodeticToEnu(coords[idx, 1], coords[idx, 0], h)
         return np.column_stack([e, n, u])
 
-    return _quads(
-        enu(a, baseEll[owner]),
-        enu(b, baseEll[owner]),
-        enu(b, roofEll[owner]),
-        enu(a, roofEll[owner]),
-        colour,
-    )
+    p0 = enu(a, baseEll[owner])
+    p1 = enu(b, baseEll[owner])
+    p2 = enu(b, roofEll[owner])
+    p3 = enu(a, roofEll[owner])
+    length_m = np.linalg.norm(p1 - p0, axis=1)
+    height_m = np.maximum(roofEll - baseEll, 0.0)[owner]
+    return _quads(p0, p1, p2, p3, colors[owner], facadeUv(length_m, height_m))
 
 
 def _quads(
-    p0: FloatArray, p1: FloatArray, p2: FloatArray, p3: FloatArray, colour: tuple[int, int, int]
+    p0: FloatArray,
+    p1: FloatArray,
+    p2: FloatArray,
+    p3: FloatArray,
+    colour: tuple[int, int, int] | npt.NDArray[np.uint8],
+    uv: npt.NDArray[np.float32] | None = None,
 ) -> MeshPart:
     m = p0.shape[0]
     if m == 0:
-        return MeshPart.empty(withColors=True)
+        return MeshPart.empty(withColors=True, withUv=uv is not None)
     positions = np.stack([p0, p1, p2, p3], axis=1).reshape(-1, 3)
     base = (np.arange(m, dtype=np.uint32) * 4)[:, None]
     tris = np.concatenate(
         [base + np.array([0, 1, 2], dtype=np.uint32), base + np.array([0, 2, 3], dtype=np.uint32)]
     )
-    return MeshPart(positions, tris.astype(np.uint32), colors=_colors(positions.shape[0], colour))
+    quadColors = _colors(m, colour) if isinstance(colour, tuple) else np.asarray(colour)
+    return MeshPart(
+        positions,
+        tris.astype(np.uint32),
+        uv=None if uv is None else uv.reshape(-1, 2),
+        colors=np.repeat(quadColors, 4, axis=0).astype(np.uint8),
+    )
 
 
 def _colors(count: int, colour: tuple[int, int, int]) -> npt.NDArray[np.uint8]:

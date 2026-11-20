@@ -21,7 +21,11 @@ on a short trunk per tree:
    buildings or decks.
 
 Crowns and trunks are written with ``EXT_mesh_gpu_instancing``: one shape per
-tile plus a position and size per tree.
+tile plus a position, size and yaw per tree (the yaw varies which side of the
+crown's fixed lump pattern each tree shows). Crowns are slightly lumpy spheres,
+not smooth ones, so they read as foliage rather than balls; trunks grow with
+both the crown and the tree height, and taller trees carry their crowns higher
+off the ground.
 """
 
 from __future__ import annotations
@@ -73,9 +77,13 @@ _CROWN_RADIUS_BASE_m = 1.0
 _CROWN_RADIUS_PER_HEIGHT = 0.3
 _CROWN_RADIUS_RANGE_m = (2.0, 8.0)
 _MAX_VALID_m = 150.0  # uint8 canopy rasters may use 255 as a fill value
-_CROWN_DEPTH_PER_HEIGHT = 0.45  # crown half-height at most this fraction of the tree
+_CROWN_DEPTH_PER_HEIGHT = 0.4  # crown half-height at most this fraction of the tree
 _CROWN_DEPTH_PER_RADIUS = 0.85  # ... and slightly flattened
 _TRUNK_RADIUS_PER_CROWN = 0.08
+_TRUNK_RADIUS_PER_HEIGHT = 0.02  # trunks grow with the tree, not just the crown
+_TRUNK_RADIUS_MAX_m = 0.7
+_CROWN_LUMPINESS = 0.12  # radial noise amplitude of the crown surface
+_GOLDEN_ANGLE = np.pi * (3.0 - 5.0**0.5)  # per-instance yaw spread
 
 
 @dataclass(frozen=True, eq=False)
@@ -160,6 +168,11 @@ class TreeSet:
         e, n, base = self.e_m[idx], self.n_m[idx], self.baseU_m[idx]
         depth = np.minimum(_CROWN_DEPTH_PER_HEIGHT * h, _CROWN_DEPTH_PER_RADIUS * r)
         centre = base + h - depth
+        yaw = (idx * _GOLDEN_ANGLE) % (2.0 * np.pi)
+        half = 0.5 * yaw
+        yawQuat = np.column_stack(
+            [np.zeros_like(half), np.zeros_like(half), np.sin(half), np.cos(half)]
+        )
         parts: list[InstancedPart] = []
         for k, colour in enumerate(CROWN_COLORS):
             mine = idx % len(CROWN_COLORS) == k
@@ -170,9 +183,12 @@ class TreeSet:
                         colour,
                         np.column_stack([e[mine], n[mine], centre[mine]]),
                         np.column_stack([r[mine], r[mine], depth[mine]]),
+                        yawQuat[mine],
                     )
                 )
-        trunkR = np.clip(_TRUNK_RADIUS_PER_CROWN * r, 0.15, 0.5)
+        trunkR = np.clip(
+            _TRUNK_RADIUS_PER_CROWN * r + _TRUNK_RADIUS_PER_HEIGHT * h, 0.15, _TRUNK_RADIUS_MAX_m
+        )
         parts.append(
             InstancedPart(
                 _TRUNK,
@@ -186,7 +202,7 @@ class TreeSet:
     def extents(self, indices: npt.NDArray[np.int64]) -> tuple[FloatArray, FloatArray]:
         """ENU bounding corners ``(lo, hi)`` of the given trees, ``(k, 3)`` each."""
         idx = np.asarray(indices, dtype=np.int64)
-        r = self.crownRadius_m[idx]
+        r = self.crownRadius_m[idx] * (1.0 + _CROWN_LUMPINESS)  # the lumps stick out
         lo = np.column_stack([self.e_m[idx] - r, self.n_m[idx] - r, self.baseU_m[idx]])
         hi = np.column_stack(
             [self.e_m[idx] + r, self.n_m[idx] + r, self.baseU_m[idx] + self.height_m[idx]]
@@ -324,8 +340,8 @@ def _maxFilter(values: FloatArray, radiusRows: int, radiusCols: int) -> FloatArr
     return out
 
 
-def _icosphere() -> MeshPart:
-    """Unit sphere: an icosahedron subdivided once (42 vertices, 80 triangles)."""
+def _icosphere(subdivisions: int = 1) -> MeshPart:
+    """Unit sphere: an icosahedron subdivided ``subdivisions`` times."""
     t = (1.0 + 5.0**0.5) / 2.0
     verts = [
         [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
@@ -349,10 +365,18 @@ def _icosphere() -> MeshPart:
             cache[key] = len(points) - 1
         return cache[key]
 
-    fine = []
-    for a, b, c in faces:
-        ab, bc, ca = midpoint(a, b), midpoint(b, c), midpoint(c, a)
-        fine += [[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]
+    fine = list(faces)
+    for _ in range(subdivisions):
+        fine = [
+            tri
+            for a, b, c in fine
+            for tri in (
+                (a, midpoint(a, b), midpoint(c, a)),
+                (b, midpoint(b, c), midpoint(a, b)),
+                (c, midpoint(c, a), midpoint(b, c)),
+                (midpoint(a, b), midpoint(b, c), midpoint(c, a)),
+            )
+        ]
     pos = np.array(points)
     tris = np.array(fine, dtype=np.uint32)
     p = pos[tris]
@@ -376,5 +400,31 @@ def _cylinder(sides: int = 6) -> MeshPart:
     return MeshPart(pos, tris)
 
 
-_CROWN = _icosphere()
+def _lumpyCrown() -> MeshPart:
+    """Unit sphere with low-frequency radial bumps, so crowns read as foliage.
+
+    The displacement is a fixed sum of direction-space sine waves (the same for
+    every crown); per-instance yaw rotations (:meth:`TreeSet.select`) spread the
+    pattern, so a wood does not look like rows of identical balls.
+    """
+    sphere = _icosphere(2)
+    pos = sphere.positions_ENU_m
+    waves = [
+        ([0.82, 0.31, -0.24], 3.1, 0.0),
+        ([-0.26, 0.71, 0.42], 4.7, 2.1),
+        ([0.13, -0.47, 0.79], 5.9, 4.4),
+        ([0.55, 0.48, 0.61], 7.3, 1.3),
+    ]  # fmt: skip
+    bump = np.zeros(pos.shape[0])
+    for axis, freq, phase in waves:
+        bump += np.sin(freq * (pos @ np.asarray(axis)) + phase)
+    bump /= len(waves)
+    lumped = pos * (1.0 + _CROWN_LUMPINESS * bump)[:, None]
+    # Keep the top and bottom poles (where the trunk meets the crown) round.
+    polar = np.abs(pos[:, 2]) > 0.92
+    lumped[polar] = pos[polar]
+    return MeshPart(lumped, sphere.triangles)
+
+
+_CROWN = _lumpyCrown()
 _TRUNK = _cylinder()

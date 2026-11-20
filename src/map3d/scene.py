@@ -193,20 +193,19 @@ class Scene:
     def write3dTiles(
         self,
         outDir: str | os.PathLike[str],
-        imageryPath: str | os.PathLike[str] | None = None,
         withViewer: bool = True,
-        style: Style | None = None,
+        style: Style = "conceptual",
+        buildingImageryPath: str | os.PathLike[str] | None = None,
     ) -> Path:
         """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
 
         Args:
             outDir: Output directory.
-            imageryPath: BYO RGB GeoTIFF to drape (default: the request's
-                ``imageryPath``, else the pack's imagery in the satellite style).
             withViewer: Also install the offline viewer (``map3d view``).
-            style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
-                (imagery). Default: satellite when imagery is given (here or in
-                the request), else conceptual.
+            style: ``"conceptual"`` (flat map colours, lit), the default.
+            buildingImageryPath: Optional high-resolution RGB orthophoto for
+                building palettes. Default: the pack's imagery, with neutral
+                fallback. Facade windows and floor bands are procedural.
 
         Returns:
             Path of ``tileset.json``.
@@ -214,8 +213,7 @@ class Scene:
         from map3d.mesh.tileset import write3dTiles
         from map3d.viewer import installViewer
 
-        drape = imageryPath if imageryPath is not None else self.request.imageryPath
-        path = write3dTiles(self, outDir, imageryPath=drape, style=style)
+        path = write3dTiles(self, outDir, style=style, buildingImageryPath=buildingImageryPath)
         if withViewer:
             installViewer(outDir)
         return path
@@ -530,7 +528,6 @@ def _metadata(
             "swathVertical_m": request.swathVertical_m,
             "verticalDatum": request.verticalDatum,
             "maxDeckLevels": request.maxDeckLevels,
-            "imageryPath": None if request.imageryPath is None else str(request.imageryPath),
         },
         "frame": {
             "sceneCenter_deg": [lat0, lon0],

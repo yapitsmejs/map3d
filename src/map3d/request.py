@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -31,7 +30,6 @@ class SceneRequest:
         swathVertical_m: Swath extent along grid y (an in-plane extent, not altitude).
         verticalDatum: ``"msl"`` (EGM2008 geoid) or ``"ellipsoid"`` (WGS84).
         maxDeckLevels: Number of elevated-structure levels stored in the grid.
-        imageryPath: Optional bring-your-own orthophoto for the mesh drape.
         axesTol: Tolerance for the orthonormality / handedness / z-Up checks.
 
     Raises:
@@ -45,7 +43,6 @@ class SceneRequest:
     swathVertical_m: float
     verticalDatum: VerticalDatum = "msl"
     maxDeckLevels: int = 5
-    imageryPath: Path | None = None
     axesTol: float = 1e-6
     nCols: int = field(init=False)
     nRows: int = field(init=False)
@@ -72,8 +69,6 @@ class SceneRequest:
             raise ValueError(
                 f"maxDeckLevels must be a non-negative integer, got {self.maxDeckLevels!r}"
             )
-        if self.imageryPath is not None:
-            object.__setattr__(self, "imageryPath", Path(self.imageryPath))
 
     def _validateCenter(self) -> None:
         if len(self.sceneCenter_deg) != 2:
