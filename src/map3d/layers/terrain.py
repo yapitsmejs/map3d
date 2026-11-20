@@ -20,9 +20,75 @@ from map3d.pack.reader import Pack, RasterWindow
 if TYPE_CHECKING:
     from map3d.layers.groundFix import GroundCorrection
 
-__all__ = ["GroundModel"]
+__all__ = ["DEFAULT_GROUND_SMOOTHING_m", "GroundModel", "smoothWindow"]
 
 FloatArray = npt.NDArray[np.float64]
+
+DEFAULT_GROUND_SMOOTHING_m = 90.0  # FWHM of the ground low-pass in buildScene (3 FABDEM pixels)
+_FWHM_PER_SIGMA = 2.0 * float(np.sqrt(2.0 * np.log(2.0)))
+_TRUNCATE_SIGMAS = 4.0
+_METERS_PER_DEG = 111_320.0
+
+
+def smoothWindow(window: RasterWindow, fwhm_m: float) -> RasterWindow:
+    """Gaussian low-pass of a raster window, lowering its effective resolution.
+
+    The filter is separable and normalised over valid pixels, so no-data (NaN)
+    neither spreads nor drags neighbours toward zero; NaN pixels stay NaN.
+    Linear surfaces are preserved away from the window edge. Pixel sizes of
+    geographic rasters are converted to metres at the window's centre latitude.
+
+    Args:
+        window: Raster window (heights).
+        fwhm_m: Filter full width at half maximum, in metres; 0 returns the window.
+
+    Returns:
+        A new window with smoothed values (same transform and CRS).
+
+    Raises:
+        ValueError: If ``fwhm_m`` is negative.
+    """
+    if fwhm_m < 0:
+        raise ValueError(f"ground smoothing must be >= 0 m, got {fwhm_m}")
+    if fwhm_m == 0:
+        return window
+    t = window.transform
+    pxX, pxY = abs(t.a), abs(t.e)
+    if window.crs is not None and window.crs.is_geographic:
+        lat = t.f + t.e * window.values.shape[0] / 2.0
+        pxX *= _METERS_PER_DEG * np.cos(np.radians(lat))
+        pxY *= _METERS_PER_DEG
+    sigma_m = fwhm_m / _FWHM_PER_SIGMA
+    valid = np.isfinite(window.values)
+    num = np.where(valid, window.values, 0.0)
+    den = valid.astype(np.float64)
+    for axis, px in ((1, pxX), (0, pxY)):
+        kernel = _gaussianKernel(sigma_m / px)
+        num = _convolve(num, kernel, axis)
+        den = _convolve(den, kernel, axis)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        smoothed = np.where(valid & (den > 0), num / den, np.nan)
+    return RasterWindow(smoothed, window.transform, window.crs, window.sourceId)
+
+
+def _gaussianKernel(sigma_px: float) -> FloatArray:
+    radius = max(1, int(np.ceil(_TRUNCATE_SIGMAS * sigma_px)))
+    x = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel: FloatArray = np.exp(-0.5 * (x / sigma_px) ** 2)
+    return kernel / kernel.sum()
+
+
+def _convolve(a: FloatArray, kernel: FloatArray, axis: int) -> FloatArray:
+    """``a`` convolved with a symmetric ``kernel`` along ``axis`` (zero outside)."""
+    r = kernel.size // 2
+    pad = [(0, 0), (0, 0)]
+    pad[axis] = (r, r)
+    padded = np.pad(a, pad)
+    n = a.shape[axis]
+    out = np.zeros_like(a)
+    for i, k in enumerate(kernel):
+        out += k * np.take(padded, np.arange(i, i + n), axis=axis)
+    return out
 
 
 @dataclass(frozen=True, eq=False)
@@ -31,12 +97,14 @@ class GroundModel:
 
     Attributes:
         sourceId: Ground source used.
-        nativeResolution_m: Its nominal resolution.
+        nativeResolution_m: Its effective resolution: the source's nominal
+            resolution, or the smoothing width if coarser.
         verticalReference: Its vertical reference (``"EGM2008"`` or ``"WGS84"``).
-        window: Raster data covering the scene footprint.
+        window: Raster data covering the scene footprint (smoothed, if requested).
         geoid: Geoid grid for datum conversions.
         correction: Optional cap removing building residue under buildings
             (see :mod:`map3d.layers.groundFix`); applied to every query.
+        smoothing_m: Width (FWHM) of the low-pass applied to the source; 0 = none.
     """
 
     sourceId: str
@@ -45,31 +113,42 @@ class GroundModel:
     window: RasterWindow
     geoid: GeoidGrid
     correction: GroundCorrection | None = None
+    smoothing_m: float = 0.0
 
     @classmethod
-    def load(cls, pack: Pack, geometry: GridGeometry) -> GroundModel:
+    def load(cls, pack: Pack, geometry: GridGeometry, smoothing_m: float = 0.0) -> GroundModel:
         """Read the ground source and geoid over the scene footprint.
 
         Args:
             pack: Opened data pack.
             geometry: Scene grid geometry.
+            smoothing_m: Gaussian low-pass width (FWHM) applied to the source,
+                in metres; removes bumps narrower than about this (see
+                :func:`smoothWindow`). 0 keeps the source as is.
 
         Returns:
             The ground model.
 
         Raises:
-            ValueError: If the pack has no ground source.
+            ValueError: If the pack has no ground source, or ``smoothing_m`` < 0.
         """
         entry = pack.primarySource("ground")
         if entry is None:
             raise ValueError("pack has no source for required role 'ground'")
-        bounds = geometry.footprintBounds_deg(margin_m=geometry.gridSpacing_m)
+        if smoothing_m < 0:
+            raise ValueError(f"ground smoothing must be >= 0 m, got {smoothing_m}")
+        # Read beyond the footprint by the filter radius, so the scene is not
+        # affected by the window edge.
+        radius_m = _TRUNCATE_SIGMAS * smoothing_m / _FWHM_PER_SIGMA
+        bounds = geometry.footprintBounds_deg(margin_m=geometry.gridSpacing_m + radius_m)
+        window = smoothWindow(pack.readRaster(entry.sourceId, bounds), smoothing_m)
         return cls(
             sourceId=entry.sourceId,
-            nativeResolution_m=entry.nativeResolution_m,
+            nativeResolution_m=max(entry.nativeResolution_m, smoothing_m),
             verticalReference=entry.verticalReference,
-            window=pack.readRaster(entry.sourceId, bounds),
+            window=window,
             geoid=pack.geoid(),
+            smoothing_m=smoothing_m,
         )
 
     def undulation_m(self, lat_deg: npt.ArrayLike, lon_deg: npt.ArrayLike) -> FloatArray:

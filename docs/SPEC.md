@@ -259,6 +259,24 @@ source. The default height is 3 m (one storey) for footprints under 50 m²
 (sheds, kiosks, shelters) and 9 m otherwise. The winning
 source is recorded per feature and per node.
 
+**Ground smoothing:** FABDEM is a 30 m model with metre-level noise and
+leftover building bumps, so sampling it bilinearly at fine spacing gives a
+faceted, bumpy surface. map3d low-passes the ground source with a Gaussian of
+90 m FWHM (three FABDEM pixels) before anything samples it:
+`buildScene(groundSmoothing_m=90)`, `map3d build --ground-smoothing 90`. 0 turns
+it off. Details:
+- **Edges and no-data:** the window is read beyond the scene by the filter
+  radius, and no-data is excluded from the average, so planes are kept exactly
+  and coastlines are not dragged toward zero.
+- **Effect:** bumps narrower than ~90 m are removed. Everything that uses the
+  ground (grid layers, building bases, ground correction, deck ends, mesh)
+  sees the same smoothed surface. The `nativeResolution_m` layer reports 90 m
+  for ground nodes, and `scene.json` records `groundSmoothing_m`.
+- **On Loyang:** 10 m-scale curvature dropped 5× (p95 0.56 → 0.11 m) and the
+  ground moved by 0.77 m RMS. The largest change fills a FABDEM pit (−12.6 →
+  +7.2 m). Narrow genuine features (embankments, small hills under ~90 m) are
+  flattened too; the largest drop was 8.6 m.
+
 **Ground under buildings (FABDEM residue):** FABDEM's machine-learned
 building removal sometimes fails for large buildings (depots, warehouses),
 leaving a building-shaped mound in the "ground". It peaks mid-footprint and can
@@ -279,10 +297,12 @@ building bases, deck ends and the 3D Tiles terrain. `scene.json`
 `groundCorrection` reports how many buildings were corrected, the largest
 lowering and the zone area.
 
-On the Loyang 4.5 km scene:
-- **Corrected:** 833 buildings. Ground was lowered by > 0.5 m over 2.4 km²,
-  1.6 km² of it outside footprints (median 1.35 m, p99 10.8 m).
-- **The depot:** exposed again, at 10.8 m.
+On the Loyang 4.5 km scene, with the default 90 m ground smoothing applied
+first (smoothing already absorbs most small residue):
+- **Corrected:** 108 buildings (833 without smoothing), lowered by up to
+  17.5 m; correction zones cover 2.1 km².
+- **The depot:** stands 12.6 m (median) of its 13.3 m height; 10.8 m without
+  smoothing.
 - **Cost:** about 16 s of build time.
 - **Caveat:** without open LiDAR, genuine raised ground near buildings
   (embankments, landscaped mounds) can't be told apart from residue, so it
@@ -393,7 +413,8 @@ scene.write3dTiles("out/tiles", imageryPath=None)
 ```
 map3d build   --lat 1.2834 --lon 103.8607 --spacing 0.5 --axes axes.json \
               --swath 5000 5000 --datum msl --decks 5 --pack sg.pack \
-              --out out/ --format npz,geotiff,3dtiles [--imagery ortho.tif]
+              --out out/ --format npz,geotiff,3dtiles [--imagery ortho.tif] \
+              [--ground-smoothing 90]
 map3d prepare --bbox 103.5 1.1 104.2 1.5 --out sg.pack
 map3d ingest  --pack sg.pack --source overtureBuildings ./buildings.parquet
 map3d view    out/tiles

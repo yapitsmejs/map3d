@@ -125,3 +125,82 @@ def testLoad_missingGroundRaises(tmp_path: Path, writeRaster):
     geom = GridGeometry.fromRequest(SceneRequest((1.5, 103.5), 10.0, np.eye(3), 100.0, 100.0))
     with pytest.raises(ValueError, match="ground"):
         GroundModel.load(Pack.open(root), geom)
+
+
+def testSmoothing_zeroLeavesWindowUntouched(plane: SyntheticScene):
+    geom = _geometry(plane, 0.0, 400.0, 20.0)
+    raw = GroundModel.load(Pack.open(plane.packDir), geom)
+    same = GroundModel.load(Pack.open(plane.packDir), geom, smoothing_m=0.0)
+    np.testing.assert_array_equal(same.window.values, raw.window.values)
+    assert same.smoothing_m == 0.0 and same.nativeResolution_m == raw.nativeResolution_m
+
+
+@pytest.mark.parametrize("heading_deg", [0.0, 30.0])
+def testSmoothing_preservesPlane(plane: SyntheticScene, heading_deg: float):
+    geom = _geometry(plane, heading_deg, 400.0, 20.0)
+    model = GroundModel.load(Pack.open(plane.packDir), geom, smoothing_m=90.0)
+    ground = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)), 20.0)
+    np.testing.assert_allclose(ground, _cornerMax(plane, geom, plane.terrainHeight_m), atol=2e-3)
+
+
+def testSmoothing_hillMatchesConvolvedGaussian(hill: SyntheticScene):
+    # Gaussian hill (sigma 150 m, 30 m tall) * Gaussian filter (FWHM 90 m) is a
+    # wider Gaussian with the same volume: peak 30 * 150^2 / (150^2 + sf^2).
+    geom = _geometry(hill, 0.0, 400.0, 20.0)
+    model = GroundModel.load(Pack.open(hill.packDir), geom, smoothing_m=90.0)
+    sf = 90.0 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+    lat, lon = np.array([hill.frame.lat0_deg]), np.array([hill.frame.lon0_deg])
+    expected = 10.0 + 30.0 * 150.0**2 / (150.0**2 + sf**2)
+    assert float(model.orthometricAt(lat, lon)[0]) == pytest.approx(expected, abs=0.1)
+    assert model.smoothing_m == 90.0
+    assert model.nativeResolution_m == 90.0  # effective resolution after smoothing
+
+
+def testSmoothWindow_ignoresAndKeepsNodata():
+    from rasterio.crs import CRS
+    from rasterio.transform import Affine
+
+    from map3d.layers.terrain import smoothWindow
+    from map3d.pack.reader import RasterWindow
+
+    values = np.full((41, 41), 5.0)
+    values[20, 20] = np.nan  # a hole: stays a hole, neighbours unaffected by it
+    values[:, :3] = np.nan  # a no-data edge: does not drag the edge down
+    window = RasterWindow(values, Affine(10.0, 0, 0, 0, -10.0, 410.0), CRS.from_epsg(3414), "x")
+    out = smoothWindow(window, 60.0)
+    assert np.isnan(out.values[20, 20]) and np.isnan(out.values[:, :3]).all()
+    np.testing.assert_allclose(out.values[np.isfinite(out.values)], 5.0)
+    assert out.transform == window.transform and out.sourceId == "x"
+
+
+def testSmoothWindow_geographicPixelsUseMetres():
+    from rasterio.crs import CRS
+    from rasterio.transform import Affine
+
+    from map3d.layers.terrain import smoothWindow
+    from map3d.pack.reader import RasterWindow
+
+    spike = np.zeros((61, 61))
+    spike[30, 30] = 1.0
+    px_deg = 10.0 / 111_320.0  # ~10 m pixels at the equator
+    geo = RasterWindow(spike, Affine(px_deg, 0, 103.8, 0, -px_deg, 1.3), CRS.from_epsg(4326), "g")
+    proj = RasterWindow(spike, Affine(10.0, 0, 0, 0, -10.0, 0), CRS.from_epsg(3414), "p")
+    np.testing.assert_allclose(
+        smoothWindow(geo, 60.0).values, smoothWindow(proj, 60.0).values, atol=1e-3
+    )
+    # unit volume is conserved, and the FWHM is ~60 m = 6 pixels
+    out = smoothWindow(proj, 60.0).values
+    assert out.sum() == pytest.approx(1.0)
+    assert out[30, 33] == pytest.approx(0.5 * out[30, 30], rel=0.05)
+
+
+def testSmoothWindow_rejectsNegative():
+    from rasterio.crs import CRS
+    from rasterio.transform import Affine
+
+    from map3d.layers.terrain import smoothWindow
+    from map3d.pack.reader import RasterWindow
+
+    window = RasterWindow(np.zeros((3, 3)), Affine(1.0, 0, 0, 0, -1.0, 0), CRS.from_epsg(3414), "x")
+    with pytest.raises(ValueError, match="smoothing"):
+        smoothWindow(window, -1.0)

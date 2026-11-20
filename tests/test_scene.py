@@ -103,7 +103,8 @@ def testOpenGround_surfaceEqualsGround(built: Scene):
     assert np.isnan(built.layers["buildingHeight_m"][r, c])
     assert built.layers["surfaceHeight_datum_m"][r, c] == built.layers["groundHeight_datum_m"][r, c]
     assert built.layers["heightSource"][r, c] == HeightSource.GROUND
-    assert built.layers["nativeResolution_m"][r, c] == 5.0
+    # effective resolution: the 5 m source smoothed at the default 90 m
+    assert built.layers["nativeResolution_m"][r, c] == 90.0
 
 
 def testFeatures_tableMatchesIds(built: Scene):
@@ -254,3 +255,13 @@ def testMemoryStorage_byDefaultForSmallScenes(built: Scene):
     assert built.metadata["storage"] == "memory"
     assert built.storageDir is None
     built.close()  # no-op for in-memory scenes
+
+
+def testGroundSmoothing_defaultRecordedAndOverridable(plane: SyntheticScene, built: Scene):
+    from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
+
+    assert built.metadata["groundSmoothing_m"] == DEFAULT_GROUND_SMOOTHING_m == 90.0
+    assert built.models.ground.smoothing_m == 90.0
+    raw = buildScene(_request(plane, swath_m=200.0, s=10.0), plane.packDir, groundSmoothing_m=0.0)
+    assert raw.metadata["groundSmoothing_m"] == 0.0
+    assert raw.models.ground.smoothing_m == 0.0

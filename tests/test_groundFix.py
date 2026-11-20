@@ -22,6 +22,7 @@ from map3d.scene import buildScene
 
 MOUND_m = 20.0  # peak of the residual mound, taller than B1 (12 m) like the depot
 B1 = (50.0, 50.0, 150.0, 90.0)  # synthetic building B1 footprint (ENU), 12 m tall
+_RAW = {"groundSmoothing_m": 0.0}  # exact expectations below assume the unsmoothed source
 
 
 def _plane(e, n):
@@ -93,8 +94,10 @@ def testCorrectPoints_lowersOnlyInsideTriggeredZones(mound: SyntheticScene):
 
 
 def testScene_groundCorrectedBuildingExposedAndMetadata(mound: SyntheticScene):
-    fixed = buildScene(_request(mound, heading_deg=25.0), mound.packDir, chunkSize=97, workers=4)
-    raw = buildScene(_request(mound, heading_deg=25.0), mound.packDir, correctGround=False)
+    fixed = buildScene(
+        _request(mound, heading_deg=25.0), mound.packDir, chunkSize=97, workers=4, **_RAW
+    )
+    raw = buildScene(_request(mound, heading_deg=25.0), mound.packDir, correctGround=False, **_RAW)
     e, n = fixed.geometry.nodesEnu()
     centre = np.unravel_index(np.argmin((e - 100) ** 2 + (n - 70) ** 2), e.shape)
     assert fixed.layers["groundHeight_datum_m"][centre] == pytest.approx(
@@ -118,8 +121,24 @@ def testScene_groundCorrectedBuildingExposedAndMetadata(mound: SyntheticScene):
     )
 
 
+def testScene_correctionStillWorksOnSmoothedGround(mound: SyntheticScene):
+    # Default 90 m smoothing spreads the 20 m mound into a ~3 m swell; the
+    # correction still triggers on what is left, and B1 stands ~11 of its 12 m.
+    raw = buildScene(_request(mound), mound.packDir, correctGround=False)
+    fixed = buildScene(_request(mound), mound.packDir)
+    assert fixed.metadata["groundSmoothing_m"] == 90.0
+    assert fixed.metadata["groundCorrection"]["buildingsCorrected"] == 1
+    e, n = fixed.geometry.nodesEnu()
+    centre = np.unravel_index(np.argmin((e - 100) ** 2 + (n - 70) ** 2), e.shape)
+    plane = _plane(e[centre], n[centre])
+    assert raw.layers["groundHeight_datum_m"][centre] > plane + 2.5
+    assert fixed.layers["groundHeight_datum_m"][centre] < plane + 1.0
+    assert fixed.layers["buildingHeight_m"][centre] > raw.layers["buildingHeight_m"][centre] + 1.5
+    assert fixed.layers["buildingHeight_m"][centre] > 10.5
+
+
 def testMesh_terrainUsesCorrectedGround(mound: SyntheticScene):
-    scene = buildScene(_request(mound), mound.packDir)
+    scene = buildScene(_request(mound), mound.packDir, **_RAW)
     part = scenery.terrainPart(
         scene, scenery.TileExtent(50.0, 150.0, 30.0, 110.0), gridSize=33, maxError_m=0.0
     )
@@ -212,8 +231,8 @@ def _groundAt(scene, layers, e0: float, n0: float) -> float:
 
 
 def testAdaptiveZone_flattensConnectedSpillWithinReachOnly(wideMound: SyntheticScene):
-    fixed = buildScene(_request(wideMound), wideMound.packDir)
-    raw = buildScene(_request(wideMound), wideMound.packDir, correctGround=False)
+    fixed = buildScene(_request(wideMound), wideMound.packDir, **_RAW)
+    raw = buildScene(_request(wideMound), wideMound.packDir, correctGround=False, **_RAW)
     # 25 m past the wall: residue (~7 m) removed down to the plane (growth stops at 0.5 m excess).
     assert _groundAt(fixed, fixed.layers, 175.0, 70.0) == pytest.approx(
         _plane(175.0, 70.0), abs=0.6
@@ -231,7 +250,7 @@ def testAdaptiveZone_flattensConnectedSpillWithinReachOnly(wideMound: SyntheticS
 
 
 def testAdaptiveZone_edgeStepIsSmall(wideMound: SyntheticScene):
-    fixed = buildScene(_request(wideMound), wideMound.packDir)
+    fixed = buildScene(_request(wideMound), wideMound.packDir, **_RAW)
     e, n = fixed.geometry.nodesEnu()
     row = np.argmin(np.abs(n[:, 0] - 70.0))
     g = fixed.layers["groundHeight_datum_m"][row].astype(float)

@@ -32,7 +32,7 @@ from map3d.layers.columns import ChunkColumns
 from map3d.layers.decks import DeckSet, loadDecks, rasterizeDecks
 from map3d.layers.landCover import CLASS_BUILDING, CLASS_DECK, LandCoverModel, classTable
 from map3d.layers.provenance import HeightSource, heightSourceTable
-from map3d.layers.terrain import GroundModel
+from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m, GroundModel
 from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
 from map3d.pack.reader import Pack
 from map3d.pack.registry import sourcesForRole
@@ -233,6 +233,7 @@ def buildScene(
     workDir: str | os.PathLike[str] | None = None,
     memoryBudget_GB: float = 2.0,
     correctGround: bool = True,
+    groundSmoothing_m: float = DEFAULT_GROUND_SMOOTHING_m,
 ) -> Scene:
     """Build the scene grid for a request from an offline pack.
 
@@ -251,6 +252,9 @@ def buildScene(
         correctGround: Remove building residue (failed building removal in
             FABDEM) from the ground under footprints; see
             :mod:`map3d.layers.groundFix`.
+        groundSmoothing_m: Gaussian low-pass width (FWHM) applied to the
+            ground source before anything samples it, removing bumps narrower
+            than about this (FABDEM noise and building residue). 0 disables.
 
     Returns:
         The scene.
@@ -262,7 +266,7 @@ def buildScene(
     opened = pack if isinstance(pack, Pack) else Pack.open(pack)
     geometry = GridGeometry.fromRequest(request)
     warnings = opened.checkCoverage(geometry.footprintBounds_deg())
-    ground = GroundModel.load(opened, geometry)
+    ground = GroundModel.load(opened, geometry, smoothing_m=groundSmoothing_m)
     buildings = loadBuildings(opened, geometry, ground, correctGround=correctGround)
     if buildings.groundCorrection is not None:
         ground = dataclasses.replace(ground, correction=buildings.groundCorrection)
@@ -306,6 +310,7 @@ def buildScene(
     )
     metadata = _metadata(request, geometry, ground, opened, warnings, layers)
     metadata["storage"] = "memory" if storageDir is None else "memmap"
+    metadata["groundSmoothing_m"] = float(groundSmoothing_m)
     metadata["groundCorrection"] = (
         buildings.groundCorrection.summary()
         if buildings.groundCorrection is not None

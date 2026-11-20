@@ -70,6 +70,8 @@ Other options:
 - `map3d build --datum ellipsoid` switches heights to the WGS84 ellipsoid.
 - `--decks K` sets the number of stacked deck levels.
 - `--imagery ortho.tif` drapes your own orthophoto.
+- `--ground-smoothing M` sets the ground low-pass width in metres (default 90;
+  0 keeps FABDEM's raw 30 m bumps).
 - `map3d ingest` adds files you obtained yourself to a pack (see the spec,
   §9).
 

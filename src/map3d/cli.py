@@ -14,6 +14,7 @@ import numpy as np
 import typer
 
 from map3d import __version__
+from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
 from map3d.pack.ingest import ingestFiles
 from map3d.pack.reader import Pack
 from map3d.request import SceneRequest
@@ -150,6 +151,13 @@ def build(
         str, typer.Option("--format", help="Comma list: npz, geotiff, 3dtiles.")
     ] = "npz",
     imagery: Annotated[Path | None, typer.Option("--imagery", help="BYO orthophoto.")] = None,
+    groundSmoothing: Annotated[
+        float,
+        typer.Option(
+            "--ground-smoothing",
+            help="Ground low-pass width (m, FWHM): removes terrain bumps narrower than this. 0 = off.",
+        ),
+    ] = DEFAULT_GROUND_SMOOTHING_m,
 ) -> None:
     """Build a scene (grid layers and/or 3D Tiles) from an offline pack."""
     try:
@@ -167,7 +175,7 @@ def build(
             maxDeckLevels=decks,
             imageryPath=imagery,
         )
-        scene = buildScene(request, pack)
+        scene = buildScene(request, pack, groundSmoothing_m=groundSmoothing)
     except ValueError as exc:
         _fail(exc)
     for message in scene.warnings:

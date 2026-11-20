@@ -351,3 +351,15 @@ def testCliPrepare_missingExtraIsExplained(tmp_path, monkeypatch):
     )
     assert result.exit_code == 1
     assert "prepare" in result.output and "extra" in result.output
+
+
+def testCliBuild_groundSmoothingFlag(tmp_path, synPack):
+    import json
+
+    result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "a", "--ground-smoothing", "0"))
+    assert result.exit_code == 0, result.output
+    assert json.loads((tmp_path / "a" / "scene.json").read_text())["groundSmoothing_m"] == 0.0
+    result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "b"))
+    assert json.loads((tmp_path / "b" / "scene.json").read_text())["groundSmoothing_m"] == 90.0
+    result = runner.invoke(cli.app, _buildArgs(synPack, tmp_path / "c", "--ground-smoothing", "-5"))
+    assert result.exit_code == 1 and "smoothing" in result.output
