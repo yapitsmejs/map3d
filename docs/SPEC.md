@@ -17,9 +17,6 @@ the surrounding region (Johor, Riau). The data stack mirrors geosg.app
 (Copernicus DEM, Overture, Google Open Buildings 2.5D, Meta/WRI canopy, ESA
 WorldCover / Impact Observatory, OSM, data.gov.sg).
 
-**Primary consumers:** simulation/analysis code (RF, radar/sensor, line of
-sight) and human visualization.
-
 ## 2. Non-goals (v1)
 
 - Tilted grids (grid z must be ≈ Up). The API accepts a full 3×3 axis matrix

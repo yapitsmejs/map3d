@@ -12,21 +12,19 @@ carries a unit, coordinate frame, or other aspect; the camelCase part carries
 the quantity's name.
 
 - **Variables:** `camelCase` + `_aspect` suffix.
-  - Units: `heightOfX_m`, `targetBeamAngle_rad`, `radarCenterFrequency_Hz`,
-    `aperturePowerBound_dB`, `fastTimeAxis_s`, `wavePropogationSpeed_mPerSec`,
-    `pulseRepFreq_Hz`.
-  - Coordinate frames as a composite suffix: `apcStartPos_XYZ_m`,
-    `apcVelVec_XYZ_mPerSec`, `sceneCenter_ENU_m`.
-  - Unitless quantities are plain camelCase: `pixelWiseDelay`, `interpValues`,
-    `phaseCorrection`.
-- **Modules / files & the import package:** camelCase — `normalizeSignal.py`,
-  `computeStats.py`, the package `map3d/`. Private modules lead with an
-  underscore: `_chunking.py`, `_phaseCorrelationCore.py`.
-- **Functions:** camelCase public — `formImage`, `computeFbr`, `getTxPos`.
-  Private helpers are `_camelCase` — `_robustMode`, `_selfcheck`. Backend-dispatch
+  - Units: `gridSpacing_m`, `swathHorizontal_m`, `lat_deg`,
+    `maxLowering_m`, `memoryBudget_GB`.
+  - Coordinate frames as a composite suffix: `gridAxes_ENU`,
+    `positions_ENU_m`, `translations_ENU_m`.
+  - Unitless quantities are plain camelCase: `featureId`, `landClass`,
+    `heightSource`.
+- **Modules / files & the import package:** camelCase — `gridGeometry.py`,
+  `groundFix.py`, the package `map3d/`. Private modules lead with an
+  underscore: `_kernels.py`.
+- **Functions:** camelCase public — `buildScene`, `loadBuildings`, `write3dTiles`.
+  Private helpers are `_camelCase` — `_robustPlane`, `_growZones`. Backend-dispatch
   compute cores use the `_<func>_core(..., xp)` pattern (one code path for
-  numpy/cupy, no mirrored `_<func>_cupy` duplicates): `_formImage_core`,
-  `_computeFbr_core`.
+  numpy/cupy, no mirrored `_<func>_cupy` duplicates).
 - **Classes:** PascalCase — `Transaction`, `Statement`, `Level`.
 - **Constants:** UPPER_SNAKE. Private constants keep a single leading underscore
   — `_HAVE_CUPY_GPU`, `_STMT_DATE_RE`, `_SKIP`.
@@ -44,15 +42,15 @@ the quantity's name.
   blank line between groups. Let `ruff` (rule `I`) own the ordering.
 - **Google-style docstrings** on every public function:
   ```python
-  def formImage(signal, rangeAxis_m):
-      """Form a focused image.
+  def sampleGround(lat_deg, lon_deg):
+      """Sample ground height at geographic positions.
 
       Args:
-          signal: Range-compressed signal, shape (nRange, nPulse).
-          rangeAxis_m: Output range axis, in meters.
+          lat_deg: Latitude, in degrees.
+          lon_deg: Longitude, in degrees.
 
       Returns:
-          Focused image as a 2-D array.
+          Ground height above MSL, in meters (NaN outside the source).
       """
   ```
 - Declare the public API with `__all__` in `__init__.py` and in tool modules
