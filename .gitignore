@@ -6,6 +6,8 @@ __pycache__/
 
 # Build / packaging artifacts
 build/
+# ...but not the vendored three.js build shipped with the offline viewer
+!src/map3d/viewer/static/vendor/three/build/
 dist/
 *.egg-info/
 .eggs/

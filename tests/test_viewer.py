@@ -62,3 +62,18 @@ def testServe_opensBrowserWhenAsked(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def testServe_requiresTileset(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="tileset.json"):
         viewer.serve(tmp_path, port=0, openBrowser=False)
+
+
+def testVendoredViewerFiles_areNotGitIgnored():
+    # A blanket `build/` ignore once excluded vendor/three/build/, silently dropping
+    # three.module.min.js from git and from wheels (hatchling honours .gitignore).
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git not available")
+    repo = Path(__file__).resolve().parents[1]
+    files = [str(p.relative_to(repo)) for p in viewer.STATIC_DIR.rglob("*") if p.is_file()]
+    result = subprocess.run([git, "check-ignore", *files], cwd=repo, capture_output=True, text=True)
+    assert result.stdout.strip() == "", f"git-ignored viewer files: {result.stdout}"
