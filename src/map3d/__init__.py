@@ -1,4 +1,4 @@
-"""<one-line project description>."""
+"""Build offline, georeferenced 3D scene grids and 3D Tiles meshes from open data."""
 
 from __future__ import annotations
 

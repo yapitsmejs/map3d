@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import myProject
+import map3d
 
 
 def testVersionIsSet():
-    assert isinstance(myProject.__version__, str)
-    assert myProject.__version__
+    assert isinstance(map3d.__version__, str)
+    assert map3d.__version__

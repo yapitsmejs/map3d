@@ -1,23 +1,67 @@
-# myProject
+# map3d
 
-<One-line project description.>
+Build offline, georeferenced 3D scene grids and 3D Tiles meshes from open data.
+
+## Purpose
+
+Given a scene center (lat/lon), grid spacing, grid orientation (a 3×3 matrix of
+grid axes expressed in ENU) and swath size, `map3d` produces:
+
+- a **multi-layer grid** for simulation and analysis: ground and top-surface
+  heights (both height-above-datum and curvature-aware ENU z), building and
+  canopy heights, up to K elevated-deck levels, land class, feature IDs and
+  per-node provenance. It is written as `.npz` + JSON and as GeoTIFF.
+- a **3D Tiles mesh** for visualization, with imagery-draped terrain,
+  buildings and true 3D bridges, plus a bundled offline viewer.
+
+It runs fully offline from portable **data packs** built from open data
+(Copernicus/FABDEM, Overture, Google Open Buildings 2.5D, Meta/WRI canopy,
+ESA WorldCover, OSM, data.gov.sg). Packs are prepared on an
+internet-connected machine and copied over.
+
+- Specification: [`docs/SPEC.md`](docs/SPEC.md)
+- Roadmap: [`plans/developmentPlan.md`](plans/developmentPlan.md)
+
+> **Status:** M0 (project bootstrap). Only `map3d --version` works so far.
+> The API below is the target interface from the spec.
 
 ## Install
 
 This project is managed with [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync --extra dev          # create .venv and install dev dependencies (pytest, ruff)
+uv sync --extra dev          # create .venv and install runtime + dev dependencies
+uv sync --extra prepare      # (online machine only) extras for `map3d prepare`
 ```
 
 ## Usage
 
-<Describe how to run the project.>
+```bash
+uv run map3d --version
+```
+
+Target interface (see the spec, §10):
 
 ```python
-import myProject
+from map3d import SceneRequest, buildScene
 
-print(myProject.__version__)
+request = SceneRequest(
+    sceneCenter_deg=(1.2834, 103.8607),
+    gridSpacing_m=0.5,
+    gridAxes_ENU=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],  # rows: grid x, y, z in ENU
+    swathHorizontal_m=5000.0,
+    swathVertical_m=5000.0,
+)
+scene = buildScene(request, pack="sg.pack")
+scene.writeNpz("out/scene")
+scene.write3dTiles("out/tiles")
+```
+
+```bash
+map3d prepare --bbox 103.5 1.1 104.2 1.5 --out sg.pack     # online machine
+map3d build --lat 1.2834 --lon 103.8607 --spacing 0.5 --axes axes.json \
+            --swath 5000 5000 --pack sg.pack --out out/ --format npz,geotiff,3dtiles
+map3d view out/tiles
 ```
 
 ## Development
@@ -26,11 +70,11 @@ print(myProject.__version__)
 uv run pytest                 # run tests (dev loop, no coverage gate)
 uv run ruff check .           # lint
 uv run ruff format .          # format
-uv run mypy src/myProject     # type check
+uv run mypy src/map3d         # type check
 uv run python scripts/check.py   # GATE: lint + format + types + tests + branch coverage ≥ 90%
 ```
 
-Run `scripts/check.py` before pushing or opening a PR — it fails if ruff is
+Run `scripts/check.py` before pushing or opening a PR. It fails if ruff is
 unhappy, formatting would change, **mypy** finds a type error, or branch coverage
 on the package drops below 90%. See [`CONVENTIONS.md`](CONVENTIONS.md) for the
 full naming, code-style, and test-driven conventions.
@@ -40,7 +84,7 @@ full naming, code-style, and test-driven conventions.
 These run the same gate as you do locally, so a red PR cannot merge:
 
 - **CI** (`.github/workflows/ci.yml`) runs `scripts/check.py` on every push and PR.
-- **Git hooks** (`.githooks/`) are opt-in per clone — fast `ruff` checks on
+- **Git hooks** (`.githooks/`) are opt-in per clone: fast `ruff` checks on
   commit, the full gate on push. One-time setup:
   ```bash
   git config core.hooksPath .githooks
@@ -52,28 +96,3 @@ These run the same gate as you do locally, so a red PR cannot merge:
   GitHub Actions) that must pass the gate like any other.
 - **PR template** (`.github/PULL_REQUEST_TEMPLATE.md`) prompts contributors for
   the red-green workflow and the gate checklist.
-
-## Starting a new project from this template
-
-Copy this directory, rename the folder to your project's name, `git init` it,
-and hand the following prompt to your agent (any framework — Claude, Cursor,
-Codex, or other). Rename the **root folder yourself before invoking the
-agent** — the agent renames everything inside the project (the package
-directory and every file), but it cannot reliably rename the folder it is
-running inside. The folder name is cosmetic here: no file references it, so it
-does not affect the gate.
-
-```
-Set up a new project from this template. Read `agenticProjectSetup.md` and
-follow every step in order: ask me the intake questions first, then do the
-mechanical rename and find-replace, propose dependencies to add, rewrite this
-README and create `plans/developmentPlan.md`, delete the example files and
-`agenticProjectSetup.md`, run a placeholder sweep, and run the gate
-(`uv run python scripts/check.py`). Report what you did and paste the gate
-output.
-```
-
-The agent reads `agenticProjectSetup.md` for the full runbook (intake question
-set, exact substitutions, prose to write, cleanup, and the gate). That file is
-a throwaway setup guide — it is deleted as part of setup and is not part of the
-shipped project.
