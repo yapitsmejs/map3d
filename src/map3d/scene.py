@@ -434,7 +434,7 @@ def _buildChunk(
         # max of its embankment and roadside vegetation.
         groundH = np.where(corridor, ground.orthometricAt(*columns.nodeLatLon()), groundH)
     canopy = models.canopy.cellMax(columns)
-    ids = rasterizeBuildings(buildings, geometry, rows, cols)
+    ids = rasterizeBuildings(buildings, columns)
     decks = rasterizeDecks(models.decks, columns, ground, request.maxDeckLevels)
 
     hasBuilding = ids > 0

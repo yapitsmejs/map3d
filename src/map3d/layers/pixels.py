@@ -1,9 +1,9 @@
-"""Lon/lat geometries -> grid pixel coordinates ``(col, row)``.
+"""Lon/lat geometries -> grid pixel coordinates ``(col, row)``, and burning them.
 
 Pixel space is defined in :mod:`map3d.gridGeometry`. It is isotropic (1 unit =
-one grid spacing), so buffers by metres are exact.
-Points are converted at a given ellipsoidal height, so raised features (roofs,
-decks) sit exactly in the node columns they occupy.
+one grid spacing), so buffers by metres are exact. Points are converted at a
+given ellipsoidal height, so raised features (roofs, decks) sit exactly in the
+node columns they occupy.
 """
 
 from __future__ import annotations
@@ -19,8 +19,9 @@ from rasterio.features import rasterize
 from rasterio.transform import Affine
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers.columns import ChunkColumns
 
-__all__ = ["rasterizePixels", "toPixelGeometries"]
+__all__ = ["burnChunk", "chunkBox", "rasterizePixels", "toPixelGeometries"]
 
 _RASTERIZE_LOCK = threading.Lock()
 
@@ -52,6 +53,49 @@ def toPixelGeometries(
     )
 
 
+def chunkBox(columns: ChunkColumns) -> shapely.Polygon:
+    """Pixel-space box covering a chunk's cells."""
+    r0, c0 = columns.rows.start, columns.cols.start
+    nr, nc = columns.shape
+    return shapely.box(c0, r0, c0 + nc, r0 + nr)
+
+
+def burnChunk(
+    shapes: npt.NDArray[np.object_],
+    values: npt.NDArray[Any],
+    columns: ChunkColumns,
+    allTouched: bool,
+    dtype: str,
+    priority: npt.NDArray[Any] | None = None,
+) -> npt.NDArray[Any]:
+    """Burn the pixel-space shapes that touch a chunk; the highest priority wins.
+
+    Args:
+        shapes: Geometries in grid pixel space.
+        values: Value burned for each shape.
+        columns: The chunk.
+        allTouched: Burn every touched cell (conservative), not just centres.
+        dtype: Output dtype name.
+        priority: Draw order key per shape (ascending, stable); defaults to ``values``.
+
+    Returns:
+        The burned chunk, 0 where no shape lands.
+    """
+    hits = np.flatnonzero(shapely.intersects(shapes, chunkBox(columns)))
+    if hits.size == 0:
+        return np.zeros(columns.shape, dtype=dtype)
+    key = values if priority is None else priority
+    order = hits[np.argsort(key[hits], kind="stable")]
+    return rasterizePixels(
+        zip(shapes[order], values[order].tolist(), strict=True),
+        columns.shape,
+        columns.rows.start,
+        columns.cols.start,
+        allTouched=allTouched,
+        dtype=dtype,
+    )
+
+
 def rasterizePixels(
     shapes: Iterable[tuple[Any, float]],
     outShape: tuple[int, int],
@@ -59,7 +103,6 @@ def rasterizePixels(
     col0: int,
     allTouched: bool,
     dtype: str,
-    fill: float = 0,
 ) -> npt.NDArray[Any]:
     """Burn pixel-space shapes into a chunk whose top-left node is ``(row0, col0)``.
 
@@ -72,10 +115,9 @@ def rasterizePixels(
         col0: Chunk's first column.
         allTouched: Burn every touched cell (conservative), not just centres.
         dtype: Output dtype name.
-        fill: Background value.
 
     Returns:
-        The burned chunk.
+        The burned chunk (0 where nothing is burned).
     """
     # rasterio's in-memory dataset wraps its open in warnings.catch_warnings(),
     # which is not thread-safe: concurrent calls leak warnings and can leave the
@@ -85,7 +127,7 @@ def rasterizePixels(
             shapes,
             out_shape=outShape,
             transform=Affine.translation(col0, row0),
-            fill=fill,
+            fill=0,
             all_touched=allTouched,
             dtype=dtype,
         )

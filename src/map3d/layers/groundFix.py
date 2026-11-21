@@ -38,9 +38,10 @@ from rasterio.transform import Affine
 
 from map3d.frames import LocalFrame
 from map3d.gridGeometry import GridGeometry
-from map3d.layers.pixels import rasterizePixels
+from map3d.layers.pixels import chunkBox, rasterizePixels
 
 if TYPE_CHECKING:
+    from map3d.layers.columns import ChunkColumns
     from map3d.layers.terrain import GroundModel
 
 __all__ = [
@@ -187,12 +188,11 @@ class GroundCorrection:
                 np.minimum.at(out.reshape(-1), pointIdx, capped)
         return out
 
-    def correctChunk(self, rows: slice, cols: slice, groundH: FloatArray) -> FloatArray:
+    def correctChunk(self, columns: ChunkColumns, groundH: FloatArray) -> FloatArray:
         """Cap a chunk of the ground layer (node centres inside zones).
 
         Args:
-            rows: Row slice of the chunk.
-            cols: Column slice of the chunk.
+            columns: The chunk.
             groundH: Chunk-shaped orthometric ground.
 
         Returns:
@@ -201,12 +201,11 @@ class GroundCorrection:
         out = np.array(groundH, dtype=np.float64, copy=True)
         if self.zones.size == 0:
             return out
-        r0, r1 = rows.start, rows.start + out.shape[0]
-        c0, c1 = cols.start, cols.start + out.shape[1]
-        hits = np.flatnonzero(shapely.intersects(self.pixelZones, shapely.box(c0, r0, c1, r1)))
+        hits = np.flatnonzero(shapely.intersects(self.pixelZones, chunkBox(columns)))
         if hits.size == 0:
             return out
-        e, n = self.geometry.nodesEnu(slice(r0, r1), slice(c0, c1))
+        r0, c0 = columns.rows.start, columns.cols.start
+        e, n = self.geometry.nodesEnu(columns.rows, columns.cols)
         for z in hits:
             mask = (
                 rasterizePixels(
@@ -239,12 +238,7 @@ class GroundCorrection:
 
 
 def _taperedCap(heights: FloatArray, plane: FloatArray, dist_m: FloatArray) -> FloatArray:
-    """Ground after correction: the plane up to the taper, then blending back to the raw ground.
-
-    ``plane + w * (h - plane)`` where it lies above the plane; ``w`` rises 0 -> 1 over
-    the last :data:`TAPER_m` of the :data:`MAX_GROW_m` reach. Ground below the plane
-    is kept.
-    """
+    """Step 4 of the module docstring: ``plane + w * (h - plane)`` above the plane."""
     w = np.clip((dist_m - (MAX_GROW_m - TAPER_m)) / TAPER_m, 0.0, 1.0)
     with np.errstate(invalid="ignore"):
         result: FloatArray = np.where(heights > plane, plane + w * (heights - plane), heights)
@@ -254,14 +248,7 @@ def _taperedCap(heights: FloatArray, plane: FloatArray, dist_m: FloatArray) -> F
 def _growZones(
     frame: LocalFrame, ground: GroundModel, footprints: npt.NDArray[np.object_], coeffs: FloatArray
 ) -> npt.NDArray[np.object_]:
-    """Grow each zone from footprint + buffer across connected residue, within reach.
-
-    On a :data:`_GROW_STEP_m` lattice around each footprint, cells whose ground
-    stands more than :data:`GROW_EXCESS_m` above the building's plane and lie
-    within :data:`MAX_GROW_m` of it are added when 4-connected to the seed
-    (footprint + :data:`ZONE_BUFFER_m`). The zone edge therefore sits where the
-    residue falls to ~0.5 m, so capping leaves no cliff.
-    """
+    """Step 3 of the module docstring, on a :data:`_GROW_STEP_m` lattice (4-connected)."""
     grids: list[tuple[FloatArray, FloatArray]] = []
     pts: list[FloatArray] = []
     for poly in footprints:

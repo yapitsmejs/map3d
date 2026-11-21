@@ -423,3 +423,9 @@ def testLoad_joinedToElevatedWayKeepsFullHeight(plane: SyntheticScene, tmp_path:
     taper = (dk.ROAD_LEVEL_HEIGHT_m - dk.END_RESIDUAL_m) / dk.END_TAPER_GRADE
     assert decks.taperStart_m.tolist() == [pytest.approx(taper)]  # free start tapers
     assert decks.taperEnd_m.tolist() == [0.0]  # joined to the elevated way
+
+
+def testCorridorWidths_mappedWidthElsePerKindDefault():
+    kinds = np.array(["road", "rail", "footway", "cycleway", None], dtype=object)
+    widths = np.array([None, None, None, None, 12.5], dtype=object)
+    assert dk.corridorWidths_m(kinds, widths).tolist() == [8.0, 8.0, 3.0, 8.0, 12.5]

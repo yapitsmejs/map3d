@@ -172,13 +172,8 @@ class GroundModel:
             ValueError: If the source's vertical reference is unsupported.
         """
         values = self.window.sample(lat_deg, lon_deg)
-        if self.verticalReference == "WGS84":
+        if self._isEllipsoidal():
             values = values - self.undulation_m(lat_deg, lon_deg)
-        elif self.verticalReference != "EGM2008":
-            raise ValueError(
-                f"ground source {self.sourceId!r} has unsupported vertical reference "
-                f"{self.verticalReference!r}"
-            )
         if self.correction is not None:
             values = self.correction.correctPoints(lat_deg, lon_deg, values)
         return values
@@ -198,15 +193,18 @@ class GroundModel:
         ss = supersampleFactor(columns.geometry.gridSpacing_m, self.nativeResolution_m)
         col, row = columns.mapLattice(ss, self.window.pixelCoords)
         values = self.window.sampleAtPixels(col, row)
-        if self.verticalReference == "WGS84":
-            lat, lon = columns.latticeLatLon(ss)
-            values = values - self.undulation_m(lat, lon)
-        elif self.verticalReference != "EGM2008":
+        if self._isEllipsoidal():
+            values = values - self.undulation_m(*columns.latticeLatLon(ss))
+        ground = cellMax(values, ss)
+        if self.correction is not None:
+            ground = self.correction.correctChunk(columns, ground)
+        return ground
+
+    def _isEllipsoidal(self) -> bool:
+        """Whether source heights are ellipsoidal (else EGM2008); raises if unsupported."""
+        if self.verticalReference not in ("EGM2008", "WGS84"):
             raise ValueError(
                 f"ground source {self.sourceId!r} has unsupported vertical reference "
                 f"{self.verticalReference!r}"
             )
-        ground = cellMax(values, ss)
-        if self.correction is not None:
-            ground = self.correction.correctChunk(columns.rows, columns.cols, ground)
-        return ground
+        return self.verticalReference == "WGS84"

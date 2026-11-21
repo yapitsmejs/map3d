@@ -17,8 +17,9 @@ import numpy.typing as npt
 import shapely
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers._vectors import floatColumn
 from map3d.layers.columns import ChunkColumns, cellMax, supersampleFactor
-from map3d.layers.pixels import rasterizePixels, toPixelGeometries
+from map3d.layers.pixels import burnChunk, toPixelGeometries
 from map3d.pack.reader import Pack, RasterWindow
 
 __all__ = ["CanopyModel", "treeRadius_m"]
@@ -74,12 +75,7 @@ class CanopyModel:
         heights = np.array([], dtype=np.float64)
         if trees is not None:
             selection = pack.readVectors(trees.sourceId, bounds, columns=["height_m"])
-            heights = np.array(
-                [
-                    np.nan if v is None else float(v)
-                    for v in selection.table.column("height_m").to_pylist()
-                ]
-            )
+            heights = floatColumn(selection.table, "height_m")
             keep = np.isfinite(heights) & (heights > 0)
             points = toPixelGeometries(selection.geometries[keep], 0.0, geometry)
             heights = heights[keep]
@@ -115,24 +111,8 @@ class CanopyModel:
         else:
             return np.full(shape, np.nan)
         if self.treeDiscs.size:
-            canopy = np.fmax(canopy, self._rasterizeTrees(columns))
+            trees = burnChunk(
+                self.treeDiscs, self.treeHeights_m, columns, allTouched=True, dtype="float64"
+            )
+            canopy = np.fmax(canopy, trees)
         return canopy
-
-    def _rasterizeTrees(self, columns: ChunkColumns) -> FloatArray:
-        r0, c0 = columns.rows.start, columns.cols.start
-        nr, nc = columns.shape
-        box = shapely.box(c0, r0, c0 + nc, r0 + nr)
-        hits = np.flatnonzero(shapely.intersects(self.treeDiscs, box))
-        if hits.size == 0:
-            return np.zeros((nr, nc))
-        order = hits[np.argsort(self.treeHeights_m[hits], kind="stable")]
-        burned = rasterizePixels(
-            ((self.treeDiscs[i], float(self.treeHeights_m[i])) for i in order),
-            (nr, nc),
-            r0,
-            c0,
-            allTouched=True,
-            dtype="float64",
-            fill=0.0,
-        )
-        return np.asarray(burned, dtype=np.float64)

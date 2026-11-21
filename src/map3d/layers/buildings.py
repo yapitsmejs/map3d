@@ -27,8 +27,10 @@ import shapely
 from rasterio.features import rasterize
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers._vectors import floatColumn, mostlyCovered, outlineGround, textColumn
+from map3d.layers.columns import ChunkColumns
 from map3d.layers.groundFix import GroundCorrection
-from map3d.layers.pixels import rasterizePixels, toPixelGeometries
+from map3d.layers.pixels import burnChunk, toPixelGeometries
 from map3d.layers.provenance import HeightSource
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack, RasterWindow
@@ -36,7 +38,6 @@ from map3d.pack.registry import getSource, sourcesForRole
 
 __all__ = [
     "DEFAULT_BUILDING_HEIGHT_m",
-    "DUPLICATE_OVERLAP",
     "MIN_RASTER_HEIGHT_m",
     "SMALL_DEFAULT_HEIGHT_m",
     "SMALL_FOOTPRINT_m2",
@@ -53,8 +54,6 @@ DEFAULT_BUILDING_HEIGHT_m = 9.0
 SMALL_DEFAULT_HEIGHT_m = 3.0  # one storey: the default for sheds, kiosks, shelters
 SMALL_FOOTPRINT_m2 = 50.0  # footprints under this get SMALL_DEFAULT_HEIGHT_m
 MIN_RASTER_HEIGHT_m = 2.0  # raster heights below this are treated as missing
-DUPLICATE_OVERLAP = 0.5
-_OUTLINE_STEP_deg = 5e-5  # ~5.5 m: outline densification for the base-height search
 
 
 @dataclass(frozen=True, eq=False)
@@ -154,39 +153,24 @@ def loadBuildings(
     )
 
 
-def rasterizeBuildings(
-    buildings: BuildingSet, geometry: GridGeometry, rows: slice, cols: slice
-) -> npt.NDArray[np.int64]:
+def rasterizeBuildings(buildings: BuildingSet, columns: ChunkColumns) -> npt.NDArray[np.int64]:
     """Feature ids (``index + 1``, 0 = none) of the tallest building touching each cell.
 
     Args:
         buildings: Placed buildings.
-        geometry: Scene grid geometry.
-        rows: Row slice of the chunk.
-        cols: Column slice of the chunk.
+        columns: The chunk.
 
     Returns:
         Chunk-shaped int64 array.
     """
-    r0, r1 = rows.indices(geometry.nRows)[:2]
-    c0, c1 = cols.indices(geometry.nCols)[:2]
-    out = np.zeros((r1 - r0, c1 - c0), dtype=np.int64)
-    if len(buildings) == 0:
-        return out
-    chunkBox = shapely.box(c0, r0, c1, r1)
-    hits = np.flatnonzero(shapely.intersects(buildings.pixelGeometries, chunkBox))
-    if hits.size == 0:
-        return out
-    order = hits[np.argsort(buildings.roofOrthometric_m[hits], kind="stable")]
-    shapes = ((buildings.pixelGeometries[i], int(i) + 1) for i in order)
-    burned = rasterizePixels(
-        shapes,
-        out.shape,
-        r0,
-        c0,
+    ids = np.arange(1, len(buildings) + 1, dtype=np.int64)
+    burned = burnChunk(
+        buildings.pixelGeometries,
+        ids,
+        columns,
         allTouched=True,
         dtype="int32",
-        fill=0,
+        priority=buildings.roofOrthometric_m,
     )
     result: npt.NDArray[np.int64] = np.asarray(burned, dtype=np.int64)
     return result
@@ -217,17 +201,14 @@ def _fuse(
         candidates = shapely.make_valid(selection.geometries)
         keep = shapely.area(candidates) > 0
         if geoms:
-            keep &= ~_duplicates(candidates, np.array(geoms, dtype=object))
+            keep &= ~mostlyCovered(candidates, np.array(geoms, dtype=object))
         idx = np.flatnonzero(keep)
         table = selection.table
         geoms.extend(candidates[idx])
         sourceIds.extend([sourceId] * idx.size)
-        featureIds.extend(
-            str(v)
-            for v in np.asarray(table.column("sourceFeatureId").to_pylist(), dtype=object)[idx]
-        )
-        heights.extend(_floatColumn(table, "height_m")[idx])
-        floors.extend(_floatColumn(table, "numFloors")[idx])
+        featureIds.extend(textColumn(table, "sourceFeatureId")[idx])
+        heights.extend(floatColumn(table, "height_m")[idx])
+        floors.extend(floatColumn(table, "numFloors")[idx])
         authoritative.extend([getSource(sourceId).authoritative] * idx.size)
     return (
         np.array(geoms, dtype=object),
@@ -237,26 +218,6 @@ def _fuse(
         np.array(floors, dtype=np.float64),
         np.array(authoritative, dtype=bool),
     )
-
-
-def _floatColumn(table: Any, name: str) -> FloatArray:
-    return np.array(
-        [np.nan if v is None else float(v) for v in table.column(name).to_pylist()],
-        dtype=np.float64,
-    )
-
-
-def _duplicates(
-    candidates: npt.NDArray[np.object_], accepted: npt.NDArray[np.object_]
-) -> npt.NDArray[np.bool_]:
-    tree = shapely.STRtree(accepted)
-    candIdx, accIdx = tree.query(candidates, predicate="intersects")
-    overlap = np.zeros(candidates.size)
-    if candIdx.size:
-        areas = shapely.area(shapely.intersection(candidates[candIdx], accepted[accIdx]))
-        np.add.at(overlap, candIdx, areas)
-    isDuplicate: npt.NDArray[np.bool_] = overlap > DUPLICATE_OVERLAP * shapely.area(candidates)
-    return isDuplicate
 
 
 def _rasterHeights(
@@ -348,10 +309,6 @@ def _resolveHeights(
 
 def _baseHeights(geoms: npt.NDArray[np.object_], ground: GroundModel) -> FloatArray:
     base = np.full(geoms.size, np.inf)
-    if geoms.size == 0:
-        return base
-    outline = shapely.segmentize(shapely.boundary(geoms), _OUTLINE_STEP_deg)
-    coords, owner = shapely.get_coordinates(outline, return_index=True)
-    values = ground.orthometricAt(coords[:, 1], coords[:, 0])
+    values, owner = outlineGround(geoms, ground)
     np.fmin.at(base, owner, np.where(np.isfinite(values), values, np.inf))
     return np.where(np.isfinite(base), base, np.nan)

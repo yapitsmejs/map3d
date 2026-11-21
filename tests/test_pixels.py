@@ -61,3 +61,19 @@ def testRasterizePixels_chunkOffsetsAndNoIdentityTransformWarning():
             rows, cols = np.mgrid[r0 : r0 + 4, c0 : c0 + 4]
             expected[(rows == 1) & (cols >= 1) & (cols < 3)] = 7
             np.testing.assert_array_equal(out, expected)
+
+
+def testBurnChunk_priorityOrderAndChunkOffset():
+    from map3d.layers.columns import ChunkColumns
+    from map3d.layers.pixels import burnChunk
+
+    geom = _geom()
+    shapes = np.array([shapely.box(10, 10, 14, 14), shapely.box(12, 12, 16, 16)], dtype=object)
+    values = np.array([5, 9])
+    chunk = ChunkColumns(geom, slice(8, 16), slice(8, 16))
+    out = burnChunk(shapes, values, chunk, allTouched=False, dtype="uint8")
+    assert out[4, 4] == 9 and out[2, 2] == 5 and out[0, 0] == 0  # higher value drawn last
+    low = burnChunk(shapes, values, chunk, allTouched=False, dtype="uint8", priority=-values)
+    assert low[4, 4] == 5  # an explicit priority overrides the value order
+    far = ChunkColumns(geom, slice(100, 110), slice(100, 110))
+    assert not burnChunk(shapes, values, far, allTouched=False, dtype="uint8").any()
