@@ -42,21 +42,18 @@ class CanopyModel:
     """Canopy sources for a scene.
 
     Attributes:
-        sourceId: Raster canopy source used, if any.
-        nativeResolution_m: Its resolution (0 if none).
-        window: Raster data over the scene, if any.
+        nativeResolution_m: Resolution of the raster canopy source (0 if none).
+        window: Raster canopy over the scene, if any.
         treeDiscs: Crown discs in grid pixel space.
         treeHeights_m: Height of each disc.
         treeSourceId: Tree-point source used, if any.
     """
 
-    sourceId: str | None
     nativeResolution_m: float
     window: RasterWindow | None
     treeDiscs: npt.NDArray[np.object_]
     treeHeights_m: FloatArray
     treeSourceId: str | None
-    gridSpacing_m: float
 
     @classmethod
     def load(cls, pack: Pack, geometry: GridGeometry) -> CanopyModel:
@@ -90,13 +87,11 @@ class CanopyModel:
                 shapely.buffer(points, treeRadius_m(heights) / geometry.gridSpacing_m), dtype=object
             )
         return cls(
-            sourceId=None if raster is None else raster.sourceId,
             nativeResolution_m=0.0 if raster is None else raster.nativeResolution_m,
             window=window,
             treeDiscs=discs,
             treeHeights_m=heights,
             treeSourceId=None if trees is None else trees.sourceId,
-            gridSpacing_m=geometry.gridSpacing_m,
         )
 
     def cellMax(self, columns: ChunkColumns) -> FloatArray:
@@ -110,7 +105,7 @@ class CanopyModel:
         """
         shape = columns.shape
         if self.window is not None:
-            ss = supersampleFactor(self.gridSpacing_m, self.nativeResolution_m)
+            ss = supersampleFactor(columns.geometry.gridSpacing_m, self.nativeResolution_m)
             col, row = columns.mapLattice(ss, self.window.pixelCoords)
             values = self.window.sampleAtPixels(col, row)
             values[(values < 0) | (values > _MAX_VALID_m)] = np.nan

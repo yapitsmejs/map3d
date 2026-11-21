@@ -392,10 +392,10 @@ def testGroundSmoothing_defaultRecordedAndOverridable(plane: SyntheticScene, bui
     from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
 
     assert built.metadata["groundSmoothing_m"] == DEFAULT_GROUND_SMOOTHING_m == 90.0
-    assert built.models.ground.smoothing_m == 90.0
+    assert built.models.ground.nativeResolution_m == 90.0  # source 5 m, smoothed to 90 m
     raw = buildScene(_request(plane, swath_m=200.0, s=10.0), plane.packDir, groundSmoothing_m=0.0)
     assert raw.metadata["groundSmoothing_m"] == 0.0
-    assert raw.models.ground.smoothing_m == 0.0
+    assert raw.models.ground.nativeResolution_m == 5.0  # the unsmoothed source
 
 
 def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):

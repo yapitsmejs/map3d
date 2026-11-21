@@ -253,17 +253,17 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         pixelLines = toPixelGeometries(geoms, 0.0, geometry)
         start = shapely.get_point(geoms, 0)
         end = shapely.get_point(geoms, -1)
-        g0B = ground.orthometricAt(shapely.get_y(start), shapely.get_x(start))
-        g1B = ground.orthometricAt(shapely.get_y(end), shapely.get_x(end))
-        for k in range(geoms.size):
-            shapes.append(shapely.buffer(pixelLines[k], 0.5 * widths[k] / s, cap_style="flat"))
-            lines.append(pixelLines[k])
-            g0.append(float(g0B[k]))
-            g1.append(float(g1B[k]))
-            heights.append(lvls[k] * LEVEL_HEIGHT_m.get(kinds[k], ROAD_LEVEL_HEIGHT_m))
-            levels.append(lvls[k])
-            sources.append(sourceId)
-            ids.append(featureIds[k])
+        shapes += list(shapely.buffer(pixelLines, 0.5 * np.array(widths) / s, cap_style="flat"))
+        lines += list(pixelLines)
+        g0 += ground.orthometricAt(shapely.get_y(start), shapely.get_x(start)).tolist()
+        g1 += ground.orthometricAt(shapely.get_y(end), shapely.get_x(end)).tolist()
+        heights += [
+            lv * LEVEL_HEIGHT_m.get(k, ROAD_LEVEL_HEIGHT_m)
+            for lv, k in zip(lvls, kinds, strict=True)
+        ]
+        levels += lvls
+        sources += [sourceId] * geoms.size
+        ids += featureIds
 
     bridgeShapes = np.array(shapes, dtype=object)
     outlineShapes: list[Any] = []
@@ -300,23 +300,16 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     allShapes = np.array(shapes, dtype=object)
     gs, ge = np.array(g0, dtype=np.float64), np.array(g1, dtype=np.float64)
     gridBox = shapely.box(0.0, 0.0, geometry.nCols, geometry.nRows)
-    keep = (
-        np.isfinite(gs) & np.isfinite(ge) & shapely.intersects(allShapes, gridBox)
-        if allShapes.size
-        else np.zeros(0, dtype=bool)
-    )
-    taperStart, taperEnd = _endTapers(
-        np.array(lines, dtype=object)[keep] if lines else np.array([], dtype=object),
-        np.array(heights, dtype=np.float64)[keep],
-        geometry.gridSpacing_m,
-        elevatedWayJoins,
-    )
+    keep = np.isfinite(gs) & np.isfinite(ge) & shapely.intersects(allShapes, gridBox)
+    centerlines = np.array(lines, dtype=object)[keep]
+    levelHeight_m = np.array(heights, dtype=np.float64)[keep]
+    taperStart, taperEnd = _endTapers(centerlines, levelHeight_m, s, elevatedWayJoins)
     return DeckSet(
         pixelShapes=allShapes[keep],
-        centerlines=np.array(lines, dtype=object)[keep] if lines else np.array([], dtype=object),
+        centerlines=centerlines,
         groundStart_m=gs[keep],
         groundEnd_m=ge[keep],
-        levelHeight_m=np.array(heights, dtype=np.float64)[keep],
+        levelHeight_m=levelHeight_m,
         taperStart_m=taperStart,
         taperEnd_m=taperEnd,
         levels=np.array(levels, dtype=np.int64)[keep],
@@ -371,17 +364,12 @@ def _endTapers(
 
 
 def rasterizeDecks(
-    decks: DeckSet,
-    geometry: GridGeometry,
-    columns: ChunkColumns,
-    ground: GroundModel,
-    maxLevels: int,
+    decks: DeckSet, columns: ChunkColumns, ground: GroundModel, maxLevels: int
 ) -> DeckChunk:
     """Rasterize decks into up to ``maxLevels`` stacked levels for a chunk.
 
     Args:
         decks: Placed decks.
-        geometry: Scene grid geometry.
         columns: Chunk column geometry.
         ground: Ground model; centerline decks follow the ground it samples
             at each node (plus :func:`deckTopAboveGround_m`).
@@ -426,7 +414,7 @@ def rasterizeDecks(
             frac = shapely.line_locate_point(
                 line, shapely.points(c0 + cc + 0.5, r0 + rr + 0.5), normalized=True
             )
-            length_m = shapely.length(line) * geometry.gridSpacing_m
+            length_m = shapely.length(line) * columns.geometry.gridSpacing_m
             top = nodeGround[rr, cc] + deckTopAboveGround_m(
                 frac, length_m, decks.levelHeight_m[i], decks.taperStart_m[i], decks.taperEnd_m[i]
             )

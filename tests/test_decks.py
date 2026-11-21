@@ -58,7 +58,6 @@ def _raster(
 ) -> dk.DeckChunk:
     return dk.rasterizeDecks(
         decks,
-        geom,
         ChunkColumns(
             geom,
             rows if rows is not None else slice(None),

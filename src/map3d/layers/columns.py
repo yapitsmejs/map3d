@@ -20,7 +20,7 @@ from map3d.frames import WGS84_A_m
 from map3d.gridGeometry import GridGeometry
 from map3d.layers import _kernels
 
-__all__ = ["COARSE_STEP_m", "ChunkColumns", "SmoothMap", "cellMax", "supersampleFactor"]
+__all__ = ["ChunkColumns", "cellMax", "supersampleFactor"]
 
 FloatArray = npt.NDArray[np.float64]
 SmoothMap = Callable[[FloatArray, FloatArray], tuple[FloatArray, ...]]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, get_args
 
 import numpy as np
 import numpy.typing as npt
@@ -13,7 +13,7 @@ __all__ = ["SceneRequest", "VerticalDatum"]
 
 VerticalDatum = Literal["msl", "ellipsoid"]
 
-_VERTICAL_DATUMS: tuple[str, ...] = ("msl", "ellipsoid")
+_VERTICAL_DATUMS: tuple[str, ...] = get_args(VerticalDatum)
 _RATIO_REL_TOL = 1e-9
 
 
@@ -49,8 +49,7 @@ class SceneRequest:
 
     def __post_init__(self) -> None:
         self._validateCenter()
-        if not (math.isfinite(self.axesTol) and self.axesTol > 0):
-            raise ValueError(f"axesTol must be a positive finite number, got {self.axesTol!r}")
+        _requirePositiveFinite("axesTol", self.axesTol)
         object.__setattr__(self, "gridAxes_ENU", _validateAxes(self.gridAxes_ENU, self.axesTol))
         _requirePositiveFinite("gridSpacing_m", self.gridSpacing_m)
         nCols = _nodeCount("swathHorizontal_m", self.swathHorizontal_m, self.gridSpacing_m)

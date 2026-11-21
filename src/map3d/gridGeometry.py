@@ -22,6 +22,8 @@ __all__ = ["GridGeometry"]
 
 FloatArray = npt.NDArray[np.float64]
 
+_FOOTPRINT_SAMPLES_PER_EDGE = 33
+
 
 @dataclass(frozen=True, eq=False)
 class GridGeometry:
@@ -118,9 +120,7 @@ class GridGeometry:
         """Ellipsoidal orthographic CRS centered on the scene center."""
         return self.frame.orthoCrs()
 
-    def footprintBounds_deg(
-        self, margin_m: float = 0.0, samplesPerEdge: int = 33
-    ) -> tuple[float, float, float, float]:
+    def footprintBounds_deg(self, margin_m: float = 0.0) -> tuple[float, float, float, float]:
         """Lon/lat bounding box of the swath rectangle's footprint on the ellipsoid.
 
         The rectangle covers all cells (not just node centers), optionally grown
@@ -129,7 +129,6 @@ class GridGeometry:
 
         Args:
             margin_m: Extra distance added on every side, in meters.
-            samplesPerEdge: Perimeter samples per edge.
 
         Returns:
             ``(minLon, minLat, maxLon, maxLat)`` in degrees.
@@ -141,7 +140,7 @@ class GridGeometry:
             raise ValueError(f"margin_m must be non-negative, got {margin_m}")
         halfX_m = 0.5 * self.nCols * self.gridSpacing_m + margin_m
         halfY_m = 0.5 * self.nRows * self.gridSpacing_m + margin_m
-        t = np.linspace(-1.0, 1.0, samplesPerEdge)
+        t = np.linspace(-1.0, 1.0, _FOOTPRINT_SAMPLES_PER_EDGE)
         ones = np.ones_like(t)
         gx_m = np.concatenate([t * halfX_m, ones * halfX_m, -t * halfX_m, -ones * halfX_m])
         gy_m = np.concatenate([-ones * halfY_m, t * halfY_m, ones * halfY_m, -t * halfY_m])

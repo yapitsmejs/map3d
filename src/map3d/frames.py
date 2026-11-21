@@ -14,7 +14,6 @@ import pyproj
 
 __all__ = [
     "WGS84_A_m",
-    "WGS84_F",
     "LocalFrame",
     "ecefToGeodetic",
     "enuRotation",

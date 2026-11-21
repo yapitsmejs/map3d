@@ -71,7 +71,8 @@ def _correction(scene: SyntheticScene) -> GroundCorrection:
 
 def testBuild_triggersOnlyOnTheMoundedBuildingAndFitsTheTruePlane(mound: SyntheticScene):
     corr = _correction(mound)
-    assert corr.buildingIndex.tolist() == [1]  # B1 only
+    assert corr.footprints.size == 1  # B1 only
+    assert corr.footprints[0].bounds == pytest.approx(B1, abs=1e-6)
     a, b, c = corr.coeffs[0]
     assert a == pytest.approx(10.0, abs=0.05)
     assert b == pytest.approx(0.02, abs=2e-4) and c == pytest.approx(-0.01, abs=2e-4)

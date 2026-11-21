@@ -75,23 +75,19 @@ class GroundCorrection:
     """Per-building ground planes that cap the ground model under buildings.
 
     Attributes:
-        frame: Scene ENU frame.
-        geometry: Scene grid geometry.
+        geometry: Scene grid geometry (its frame is the ENU frame used here).
         zones: Corrected zones (grown from footprint + buffer) as ENU polygons.
         footprints: The triggering buildings' footprints as ENU polygons (taper distance).
         pixelZones: The same zones in grid pixel space.
         coeffs: Plane ``H = a + b*e + c*n`` per zone, shape ``(Z, 3)``.
-        buildingIndex: Index of each zone's building in the input array.
         maxLowering_m: Largest interior excess removed per zone.
     """
 
-    frame: LocalFrame
     geometry: GridGeometry
     zones: npt.NDArray[np.object_]
     footprints: npt.NDArray[np.object_]
     pixelZones: npt.NDArray[np.object_]
     coeffs: FloatArray
-    buildingIndex: npt.NDArray[np.int64]
     maxLowering_m: FloatArray
 
     @classmethod
@@ -110,13 +106,11 @@ class GroundCorrection:
         """
         frame = geometry.frame
         empty = cls(
-            frame,
             geometry,
             np.array([], dtype=object),
             np.array([], dtype=object),
             np.array([], dtype=object),
             np.zeros((0, 3)),
-            np.zeros(0, dtype=np.int64),
             np.zeros(0),
         )
         if footprints_deg.size == 0:
@@ -129,7 +123,6 @@ class GroundCorrection:
 
         zones: list[Any] = []
         coeffs: list[FloatArray] = []
-        index: list[int] = []
         lowering: list[float] = []
         ringSlices = _groupSlices(ringOwner, enu.size)
         inSlices = _groupSlices(inOwner, enu.size)
@@ -148,20 +141,17 @@ class GroundCorrection:
                 continue
             zones.append(enu[i])  # grown into the final zone below
             coeffs.append(plane)
-            index.append(i)
             lowering.append(float(excess.max()))
         if not zones:
             return empty
         footprintArray = np.array(zones, dtype=object)
         zoneArray = _growZones(frame, ground, footprintArray, np.array(coeffs))
         return cls(
-            frame,
             geometry,
             zoneArray,
             footprintArray,
             _enuToPixel(geometry, zoneArray),
             np.array(coeffs),
-            np.array(index, dtype=np.int64),
             np.array(lowering),
         )
 
@@ -181,7 +171,7 @@ class GroundCorrection:
         out = np.array(heights, dtype=np.float64, copy=True)
         if self.zones.size == 0:
             return out
-        e, n, _ = self.frame.geodeticToEnu(lat_deg, lon_deg, 0.0)
+        e, n, _ = self.geometry.frame.geodeticToEnu(lat_deg, lon_deg, 0.0)
         e, n = np.ravel(e), np.ravel(n)
         pointIdx, zoneIdx = shapely.STRtree(self.zones).query(
             shapely.points(e, n), predicate="intersects"
