@@ -3,7 +3,12 @@
 1. **Fusion:** every building source in the pack is read in priority order
    (authoritative first). A feature is dropped as a duplicate when more than
    half of its area overlaps features already accepted from higher-priority
-   sources. Overlaps within one source are kept (building parts).
+   sources. Overlaps within one source are kept (building parts). A dropped
+   duplicate that is the same building as the accepted feature it overlaps
+   most (each covers at least :data:`INHERIT_OVERLAP` of the other) hands it
+   the appearance attributes it lacks: roof shape (with its height, direction
+   and orientation), colours and materials. Heights and min heights stay with
+   the accepted, higher-priority source.
 2. **Height precedence:** authoritative height, then authoritative floors x
    storey height, then explicit height, then the building-height raster (median
    inside the footprint), then floors x storey height, then a default.
@@ -54,6 +59,7 @@ from map3d.pack.registry import getSource
 __all__ = [
     "DEFAULT_BUILDING_HEIGHT_m",
     "FLOATING_GAP_m",
+    "INHERIT_OVERLAP",
     "MIN_RASTER_HEIGHT_m",
     "SMALL_DEFAULT_HEIGHT_m",
     "SMALL_FOOTPRINT_m2",
@@ -72,6 +78,7 @@ SMALL_DEFAULT_HEIGHT_m = 3.0  # one storey: the default for sheds, kiosks, shelt
 SMALL_FOOTPRINT_m2 = 50.0  # footprints under this get SMALL_DEFAULT_HEIGHT_m
 MIN_RASTER_HEIGHT_m = 2.0  # raster heights below this are treated as missing
 FLOATING_GAP_m = 2.0  # a raised part this close above what is under it rests on it
+INHERIT_OVERLAP = 0.5  # mutual coverage for a dropped duplicate to hand over attributes
 _NO_SURFACE_m = -1.0e4  # stands in for "nothing below" when stacking parts
 
 
@@ -433,10 +440,13 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         selection = pack.readVectors(sourceId, bounds)
         candidates = shapely.make_valid(selection.geometries)
         keep = shapely.area(candidates) > 0
-        if geoms:
-            keep &= ~mostlyCovered(candidates, np.array(geoms, dtype=object))
-        idx = np.flatnonzero(keep)
         table = selection.table
+        if geoms:
+            accepted = np.array(geoms, dtype=object)
+            duplicate = keep & mostlyCovered(candidates, accepted)
+            keep &= ~duplicate
+            _inherit(cols, accepted, candidates, np.flatnonzero(duplicate), table)
+        idx = np.flatnonzero(keep)
         geoms.extend(candidates[idx])
         cols["sourceIds"].extend([sourceId] * idx.size)
         cols["featureIds"].extend(textColumn(table, "sourceFeatureId")[idx])
@@ -471,6 +481,75 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         facadeMaterial=np.array(cols["facadeMaterial"], dtype=object),
         roofMaterial=np.array(cols["roofMaterial"], dtype=object),
     )
+
+
+# _Fused columns handed from a dropped duplicate to the feature that replaced it,
+# as groups that travel together: (columns, the table column that holds the first).
+_INHERITED = (
+    (("roofShape", "roofHeights", "roofDirections", "roofOrientations"), "roofShape"),
+    (("facadeColor",), "facadeColor"),
+    (("roofColor",), "roofColor"),
+    (("facadeMaterial",), "facadeMaterial"),
+    (("roofMaterial",), "roofMaterial"),
+)
+_SOURCE_COLUMN = {
+    "roofShape": "roofShape",
+    "roofHeights": "roofHeight_m",
+    "roofDirections": "roofDirection_deg",
+    "roofOrientations": "roofOrientation",
+    "facadeColor": "facadeColor",
+    "roofColor": "roofColor",
+    "facadeMaterial": "facadeMaterial",
+    "roofMaterial": "roofMaterial",
+}
+
+
+def _inherit(
+    cols: dict[str, list[Any]],
+    accepted: npt.NDArray[np.object_],
+    candidates: npt.NDArray[np.object_],
+    dropped: npt.NDArray[np.int64],
+    table: Any,
+) -> None:
+    """Hand appearance attributes from dropped duplicates to the features that replaced them."""
+    if dropped.size == 0:
+        return
+    cand, acc = shapely.STRtree(accepted).query(candidates[dropped], predicate="intersects")
+    if cand.size == 0:
+        return
+    overlap = shapely.area(shapely.intersection(candidates[dropped[cand]], accepted[acc]))
+    order = np.lexsort((overlap, cand))
+    last = np.append(cand[order][1:] != cand[order][:-1], True)
+    best = order[last]  # each dropped feature's largest overlap
+    k, target, area = dropped[cand[best]], acc[best], overlap[best]
+    same = (area >= INHERIT_OVERLAP * shapely.area(candidates[k])) & (
+        area >= INHERIT_OVERLAP * shapely.area(accepted[target])
+    )
+    values: dict[str, npt.NDArray[Any]] = {
+        name: _optionalObject(table, column) for name, column in _SOURCE_COLUMN.items()
+    }
+    values["roofShape"] = roofShapeCodes(values["roofShape"])
+    for columns, lead in _INHERITED:
+        for i, j in zip(k[same], target[same], strict=True):
+            if _present(values[lead][i]) and not _present(cols[lead][j]):
+                for name in columns:
+                    cols[name][j] = _converted(name, values[name][i])
+
+
+def _present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float | np.floating):
+        return bool(np.isfinite(value))
+    if isinstance(value, int | np.integer):
+        return int(value) != RoofShape.FLAT
+    return bool(str(value).strip())
+
+
+def _converted(name: str, value: Any) -> Any:
+    if name in ("roofHeights", "roofDirections"):
+        return np.nan if value is None else float(value)
+    return value
 
 
 def _optionalFloat(table: Any, name: str) -> FloatArray:

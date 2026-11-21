@@ -382,6 +382,15 @@ Overture):**
   `facadeMaterial` / `roofMaterial` columns for the mesh palette and facade
   styles (§7).
 
+**Attributes of dropped duplicates:** when fusion drops a feature as a
+duplicate and it is the same building as the accepted feature it overlaps
+most (each covers at least half of the other), it hands that feature the
+appearance attributes it lacks: roof shape (with roof height, direction and
+orientation), facade / roof colours and materials. An authoritative HDB or URA
+outline thus keeps its own footprint and height but gains Overture's mapped
+roof and colours (Marina Bay: 111 of 448 authoritative outlines gain a facade
+colour). Heights and min heights are never inherited.
+
 **Building height precedence (authoritative first):** local government data →
 OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` ×
 storey height (default 3.0 m) → default height. Raster heights under 2 m

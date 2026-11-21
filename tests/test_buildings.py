@@ -19,6 +19,7 @@ from map3d.layers.buildings import (
 )
 from map3d.layers.columns import ChunkColumns
 from map3d.layers.provenance import HeightSource
+from map3d.layers.roofs import RoofShape
 from map3d.layers.terrain import GroundModel
 from map3d.pack.geoparquet import writeGeoParquet
 from map3d.pack.ingest import ingestFiles
@@ -277,7 +278,16 @@ def testLoad_smallFootprintWithoutDataGetsOneStorey(plane: SyntheticScene, tmp_p
 
 def _write3d(path: Path, rows: list[dict]) -> Path:
     """Buildings with the optional 3D columns (``geometry`` plus attributes)."""
-    names = ["height_m", "numFloors", "minHeight_m", "minFloor", "roofShape", "roofHeight_m"]
+    names = [
+        "height_m",
+        "numFloors",
+        "minHeight_m",
+        "minFloor",
+        "roofShape",
+        "roofHeight_m",
+        "facadeColor",
+        "roofColor",
+    ]
     writeGeoParquet(
         path,
         np.array([r["geometry"] for r in rows], dtype=object),
@@ -406,3 +416,66 @@ def testRasterize_chunkedEqualsWholeWithRaisedParts(plane: SyntheticScene, skyPa
         ids[rows, cols], top[rows, cols] = part.ids, part.top
     np.testing.assert_array_equal(ids, whole.ids)
     np.testing.assert_allclose(top, whole.top)
+
+
+def testFuse_droppedDuplicateHandsItsAppearanceToTheAuthoritativeOutline(
+    plane: SyntheticScene, tmp_path: Path
+):
+    pack = _copyPack(plane, tmp_path)
+    box = lambda e0, n0, e1, n1: _enuBox(plane, e0, n0, e1, n1)  # noqa: E731
+    block, other = box(-380, 250, -340, 270), box(-300, 250, -260, 270)
+    ingestFiles(
+        pack,
+        "sgHdbBuildings",
+        [
+            _write3d(
+                tmp_path / "hdb.parquet",
+                [
+                    {"id": "blk1", "geometry": block, "numFloors": 12},
+                    {"id": "blk2", "geometry": other, "numFloors": 10, "facadeColor": "#EEEEEE"},
+                ],
+            )
+        ],
+    )
+    ingestFiles(
+        pack,
+        "overtureBuildings",
+        [
+            _write3d(
+                tmp_path / "o.parquet",
+                [
+                    {  # the same block, slightly offset, with a mapped roof and colour
+                        "id": "osmBlk1",
+                        "geometry": box(-379, 251, -341, 271),
+                        "height_m": 20.0,
+                        "roofShape": "hipped",
+                        "roofHeight_m": 3.0,
+                        "facadeColor": "#D2B48C",
+                    },
+                    {  # a kiosk inside the block: a duplicate, but not the same building
+                        "id": "kiosk",
+                        "geometry": box(-365, 255, -360, 260),
+                        "roofColor": "#FF0000",
+                    },
+                    {  # the second block: mapped colour does not replace HDB's own
+                        "id": "osmBlk2",
+                        "geometry": other,
+                        "facadeColor": "#000000",
+                        "roofColor": "#777777",
+                    },
+                ],
+            )
+        ],
+    )
+    buildings = _load(plane, _geometry(plane), pack)
+    ids = list(buildings.sourceFeatureIds)
+    assert "osmBlk1" not in ids and "kiosk" not in ids and "osmBlk2" not in ids
+    blk1, blk2 = ids.index("blk1"), ids.index("blk2")
+    assert buildings.height_m[blk1] == 12 * STOREY_HEIGHT_m  # authoritative height kept
+    assert buildings.roofShape[blk1] == RoofShape.HIPPED
+    assert buildings.roofs[blk1] is not None
+    assert buildings.roofs[blk1].rise_m == pytest.approx(3.0)
+    assert buildings.facadeColor[blk1] == "#D2B48C"
+    assert buildings.roofColor[blk1] is None  # the kiosk is not the same building
+    assert buildings.facadeColor[blk2] == "#EEEEEE"  # own value kept
+    assert buildings.roofColor[blk2] == "#777777"  # missing value inherited
