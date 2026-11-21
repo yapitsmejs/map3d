@@ -17,6 +17,7 @@ from map3d.layers.buildings import (
     loadBuildings,
     rasterizeBuildings,
 )
+from map3d.layers.columns import ChunkColumns
 from map3d.layers.provenance import HeightSource
 from map3d.layers.terrain import GroundModel
 from map3d.pack.geoparquet import writeGeoParquet
@@ -158,7 +159,12 @@ def testLoad_noBuildingSourcesGivesEmptySet(tmp_path: Path):
     manifest.save(pack)
     buildings = _load(scene, _geometry(scene), pack)
     assert len(buildings) == 0
-    assert rasterizeBuildings(buildings, _geometry(scene), slice(None), slice(None)).max() == 0
+    assert (
+        rasterizeBuildings(
+            buildings, ChunkColumns(_geometry(scene), slice(None), slice(None))
+        ).max()
+        == 0
+    )
 
 
 def testLoad_dropsBuildingsOutsideGrid(plane: SyntheticScene):
@@ -170,7 +176,7 @@ def testLoad_dropsBuildingsOutsideGrid(plane: SyntheticScene):
 def testRasterize_interiorAndExterior(plane: SyntheticScene):
     geom = _geometry(plane)
     buildings = _load(plane, geom)
-    ids = rasterizeBuildings(buildings, geom, slice(None), slice(None))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
     s, half = geom.gridSpacing_m, 400.0
     col = lambda e: int((e + half) / s)  # noqa: E731
     row = lambda n: int((n + half) / s)  # noqa: E731
@@ -184,7 +190,7 @@ def testRasterize_conservativeCoverageOfPartialCells(plane: SyntheticScene):
     # 10 m cells; B2 is a 20 x 20 m box at [300, 320] x [-300, -280] offset by 5 m from the cell grid.
     geom = _geometry(plane, swath_m=810.0, s=10.0)
     buildings = _load(plane, geom)
-    ids = rasterizeBuildings(buildings, geom, slice(None), slice(None))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
     b2 = list(buildings.sourceFeatureIds).index("synB2") + 1
     assert (ids == b2).sum() == 9  # 3 x 3 cells touched, not 2 x 2
 
@@ -192,7 +198,7 @@ def testRasterize_conservativeCoverageOfPartialCells(plane: SyntheticScene):
 def testRasterize_rotatedGridHitsBuildingCenter(plane: SyntheticScene):
     geom = _geometry(plane, heading_deg=30.0)
     buildings = _load(plane, geom)
-    ids = rasterizeBuildings(buildings, geom, slice(None), slice(None))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
     e_m, n_m = geom.nodesEnu()
     nearest = np.unravel_index(np.argmin((e_m + 160.0) ** 2 + (n_m + 100.0) ** 2), e_m.shape)
     assert ids[nearest] == 1
@@ -209,7 +215,7 @@ def testRasterize_tallestWinsWhereFootprintsOverlap(plane: SyntheticScene, tmp_p
     )
     geom = _geometry(plane)
     buildings = _load(plane, geom, pack)
-    ids = rasterizeBuildings(buildings, geom, slice(None), slice(None))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
     iHigh = list(buildings.sourceFeatureIds).index("x1") + 1
     assert ids[int((290.0 + 400) / 2), int((-275.0 + 400) / 2)] == iHigh
 
@@ -217,10 +223,10 @@ def testRasterize_tallestWinsWhereFootprintsOverlap(plane: SyntheticScene, tmp_p
 def testRasterize_chunkedEqualsWhole(plane: SyntheticScene):
     geom = _geometry(plane, heading_deg=30.0, s=4.0)
     buildings = _load(plane, geom)
-    whole = rasterizeBuildings(buildings, geom, slice(None), slice(None))
+    whole = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
     parts = np.zeros_like(whole)
     for rows, cols in geom.iterChunks(37, 53):
-        parts[rows, cols] = rasterizeBuildings(buildings, geom, rows, cols)
+        parts[rows, cols] = rasterizeBuildings(buildings, ChunkColumns(geom, rows, cols))
     np.testing.assert_array_equal(parts, whole)
 
 

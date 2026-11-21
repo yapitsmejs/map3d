@@ -19,17 +19,6 @@ def _geom(heading_deg: float = 0.0, swath_m: float = 7000.0, s: float = 500.0) -
     return GridGeometry.fromRequest(req)
 
 
-def testNodeLatLon_matchesColumnSolver():
-    geom = _geom(30.0)
-    cols = ChunkColumns(geom, slice(2, 9), slice(0, 14))
-    lat, lon = cols.nodeLatLon()
-    e_m, n_m = geom.nodesEnu(slice(2, 9), slice(0, 14))
-    latRef, lonRef, _ = geom.frame.columnPointAtHeight(e_m, n_m, 0.0)
-    np.testing.assert_allclose(lat, latRef, atol=1e-12)
-    np.testing.assert_allclose(lon, lonRef, atol=1e-12)
-    assert lat.shape == (7, 14)
-
-
 @pytest.mark.parametrize("height_m", [-50.0, 0.0, 120.0, 600.0])
 def testToEnuUp_linearInHeightMatchesExactSolver(height_m: float):
     geom = _geom(30.0)
@@ -95,6 +84,7 @@ def testInterpolatedFootprint_matchesExactSolverOverDesignSwath():
     rows, cols = slice(9000, 9400), slice(9300, 9900)
     chunk = ChunkColumns(geom, rows, cols)
     lat, lon = chunk.nodeLatLon()
+    assert lat.shape == (400, 600)
     e_m, n_m = geom.nodesEnu(rows, cols)
     latRef, lonRef, uRef = geom.frame.columnPointAtHeight(e_m, n_m, 0.0)
     np.testing.assert_allclose(lat, latRef, atol=1e-10, rtol=0)  # ~11 um

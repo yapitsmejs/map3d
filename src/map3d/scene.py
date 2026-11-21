@@ -427,15 +427,15 @@ def _buildChunk(
     columns = ChunkColumns(geometry, rows, cols)
     ground, buildings = models.ground, models.buildings
     classes = models.landCover.classes(columns)
-    groundH = ground.cellMaxOrthometric(columns, geometry.gridSpacing_m)
+    groundH = ground.cellMaxOrthometric(columns)
     corridor = np.isin(classes, (CLASS_ROAD, CLASS_RAIL))
     if corridor.any():
         # The ground at a transport node is the graded corridor, not the cell
         # max of its embankment and roadside vegetation.
         groundH = np.where(corridor, ground.orthometricAt(*columns.nodeLatLon()), groundH)
     canopy = models.canopy.cellMax(columns)
-    ids = rasterizeBuildings(buildings, geometry, rows, cols)
-    decks = rasterizeDecks(models.decks, geometry, columns, ground, request.maxDeckLevels)
+    ids = rasterizeBuildings(buildings, columns)
+    decks = rasterizeDecks(models.decks, columns, ground, request.maxDeckLevels)
 
     hasBuilding = ids > 0
     index = np.maximum(ids - 1, 0)
@@ -450,15 +450,15 @@ def _buildChunk(
     hasDeck = decks.maxDeck > 0
     # Canopy never wins a node a road layer owns (road, rail or a deck on top):
     # the corridor renders at its own surface, trees stand beside it as objects.
-    carveCanopy = np.isin(classes, (CLASS_ROAD, CLASS_RAIL)) | hasDeck
-    canopyTop = np.where((canopy > 0) & ~carveCanopy, groundH + canopy, np.nan)
+    canopyTop = np.where((canopy > 0) & ~(corridor | hasDeck), groundH + canopy, np.nan)
 
     # Candidates in tie-break order: building > deck > canopy > ground.
     stack = np.stack([roofH, decks.maxTop, canopyTop, groundH])
     known = np.isfinite(stack)
     anyKnown = known.any(axis=0)
-    winner = np.argmax(np.where(known, stack, -np.inf), axis=0)
-    surfaceH = np.where(anyKnown, np.nanmax(np.where(known, stack, -np.inf), axis=0), np.nan)
+    ranked = np.where(known, stack, -np.inf)
+    winner = np.argmax(ranked, axis=0)
+    surfaceH = np.where(anyKnown, np.nanmax(ranked, axis=0), np.nan)
     sourceByWinner = np.stack(
         [
             bldgSource,
@@ -469,9 +469,7 @@ def _buildChunk(
     )
     heightSource = np.take_along_axis(sourceByWinner, winner[None], axis=0)[0]
     heightSource = np.where(anyKnown, heightSource, np.uint8(HeightSource.NONE)).astype(np.uint8)
-    uncertainty = np.where(anyKnown, heightUncertaintyFor(heightSource), np.float32(np.nan)).astype(
-        np.float32
-    )
+    uncertainty = heightUncertaintyFor(heightSource).astype(np.float32)  # NONE -> NaN
     resByWinner = np.stack(
         [
             bldgRes,

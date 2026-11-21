@@ -299,12 +299,6 @@ def testMetadata_hasClassTableAndDeckModel(built: Scene):
     } <= sources
 
 
-def testChunkSize_doesNotChangeResult(plane: SyntheticScene, built: Scene):
-    other = buildScene(_request(plane, heading_deg=20.0), plane.packDir, chunkSize=37)
-    for name, arr in built.layers.items():
-        np.testing.assert_array_equal(other.layers[name], arr, err_msg=name)
-
-
 def testMetadata_describesFrameDatumSourcesAndWarnings(built: Scene):
     meta = built.metadata
     assert meta["frame"]["nRows"] == 200 and meta["frame"]["nCols"] == 200
@@ -347,14 +341,14 @@ def testBuildScene_withoutBuildingsSource(plane: SyntheticScene, tmp_path: Path)
     assert any("buildings" in w for w in scene.warnings)
 
 
-def testParallelWorkers_identicalToSequential(plane: SyntheticScene, built: Scene):
+def testChunkedParallelBuild_identicalToWholeSequential(plane: SyntheticScene, built: Scene):
     import warnings
 
     before = list(warnings.filters)
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # no leaked warnings from worker threads
         parallel = buildScene(
-            _request(plane, heading_deg=20.0), plane.packDir, chunkSize=64, workers=8
+            _request(plane, heading_deg=20.0), plane.packDir, chunkSize=37, workers=8
         )
     assert warnings.filters == before  # global warning filters left untouched
     for name, arr in built.layers.items():
@@ -392,10 +386,10 @@ def testGroundSmoothing_defaultRecordedAndOverridable(plane: SyntheticScene, bui
     from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
 
     assert built.metadata["groundSmoothing_m"] == DEFAULT_GROUND_SMOOTHING_m == 90.0
-    assert built.models.ground.smoothing_m == 90.0
+    assert built.models.ground.nativeResolution_m == 90.0  # source 5 m, smoothed to 90 m
     raw = buildScene(_request(plane, swath_m=200.0, s=10.0), plane.packDir, groundSmoothing_m=0.0)
     assert raw.metadata["groundSmoothing_m"] == 0.0
-    assert raw.models.ground.smoothing_m == 0.0
+    assert raw.models.ground.nativeResolution_m == 5.0  # the unsmoothed source
 
 
 def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):

@@ -88,7 +88,7 @@ def testCanopy_noSourcesGivesNan(plane: SyntheticScene, tmp_path: Path):
     manifest.save(pack)
     geom = _geometry(plane, s=20.0)
     model = CanopyModel.load(Pack.open(pack), geom)
-    assert model.sourceId is None
+    assert model.window is None
     assert np.isnan(model.cellMax(ChunkColumns(geom, slice(None), slice(None)))).all()
 
 
