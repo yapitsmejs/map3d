@@ -13,10 +13,7 @@ Open data has no deck elevations, so heights are **estimated** (provenance
     roads inside an interchange outline stay at grade.
 - **Height:** deck top = ground sampled along the bridge centerline + level x
   per-level height (road 7 m, rail viaduct 10 m, footbridge 6 m). Levels <= 0
-  or missing count as 1. When the pack has a surface model (``dsmHeight``
-  role), the median DSM-minus-ground residual along the piece's middle
-  replaces the nominal height (provenance ``DECK_RESIDUAL``), and a bridge
-  piece with a near-zero residual is dropped as mis-tagged. Free ends taper
+  or missing count as 1. Free ends taper
   to :data:`END_RESIDUAL_m` above the ground over :data:`END_TAPER_GRADE`
   (ends joined to another bridge piece stay at full height); see
   :func:`deckTopAboveGround_m`. Outline-only decks use the median ground on
@@ -76,11 +73,6 @@ LEVEL_HEIGHT_m = {
 DUPLICATE_OVERLAP = 0.5
 _OUTLINE_STEP_deg = 5e-5
 _JOIN_TOLERANCE_px = 1e-6  # bridge-piece ends closer than this share a vertex
-_DSM_MARGIN_m = 100.0  # DSM read margin around the scene footprint
-_DSM_MIN_CALIBRATED_m = 3.0  # residual at least this means a measurable structure
-_DSM_MISTAG_RESIDUAL_m = 2.0  # residual below this means nothing elevated is there
-_DSM_MIN_LENGTH_m = 60.0  # shorter pieces are not resolvable by a 30 m DSM
-_DSM_MAX_TIMES_NOMINAL = 2.5  # residual above this (trees over the line) is not used
 
 
 @dataclass(frozen=True, eq=False)
@@ -93,7 +85,6 @@ class DeckSet:
         groundStart_m: Orthometric ground at the centerline start (or outline median).
         groundEnd_m: Orthometric ground at the centerline end (or outline median).
         levelHeight_m: Full deck top above the local ground (before end tapers).
-        heightSources: ``DECK_RESIDUAL`` where a DSM calibrated the height.
         taperStart_m: End-taper length at the start, in meters (0 = no taper).
         taperEnd_m: End-taper length at the end, in meters (0 = no taper).
         levels: Nominal level (>= 1).
@@ -106,7 +97,6 @@ class DeckSet:
     groundStart_m: FloatArray
     groundEnd_m: FloatArray
     levelHeight_m: FloatArray
-    heightSources: npt.NDArray[np.str_]
     taperStart_m: FloatArray
     taperEnd_m: FloatArray
     levels: npt.NDArray[np.int64]
@@ -132,7 +122,7 @@ class DeckSet:
             "sourceDataset": self.sourceIds.astype(np.str_),
             "sourceFeatureId": self.sourceFeatureIds.astype(np.str_),
             "height_m": self.levelHeight_m.copy(),
-            "heightSource": self.heightSources.astype(np.str_),
+            "heightSource": np.array(["DECK_ESTIMATED"] * n, dtype=np.str_),
             "deckLevel": self.levels.copy(),
         }
 
@@ -204,13 +194,11 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     """
     bounds = geometry.footprintBounds_deg(margin_m=geometry.gridSpacing_m)
     s = geometry.gridSpacing_m
-    dsm = _dsmWindow(pack, geometry)
     shapes: list[Any] = []
     lines: list[Any] = []
     g0: list[float] = []
     g1: list[float] = []
     heights: list[float] = []
-    heightProvenance: list[str] = []
     levels: list[int] = []
     sources: list[str] = []
     ids: list[str] = []
@@ -259,22 +247,11 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         g0B = ground.orthometricAt(shapely.get_y(start), shapely.get_x(start))
         g1B = ground.orthometricAt(shapely.get_y(end), shapely.get_x(end))
         for k in range(geoms.size):
-            height = lvls[k] * LEVEL_HEIGHT_m.get(kinds[k], ROAD_LEVEL_HEIGHT_m)
-            calibrated = False
-            if dsm is not None:
-                length_m = shapely.length(pixelLines[k]) * s
-                residual = _medianResidual_m(geoms[k], dsm, ground, length_m)
-                if np.isfinite(residual):
-                    if residual < _DSM_MISTAG_RESIDUAL_m and length_m >= _DSM_MIN_LENGTH_m:
-                        continue  # nothing elevated here: a mis-tagged bridge
-                    if _DSM_MIN_CALIBRATED_m <= residual <= _DSM_MAX_TIMES_NOMINAL * height:
-                        height, calibrated = float(residual), True
             shapes.append(shapely.buffer(pixelLines[k], 0.5 * widths[k] / s, cap_style="flat"))
             lines.append(pixelLines[k])
             g0.append(float(g0B[k]))
             g1.append(float(g1B[k]))
-            heights.append(height)
-            heightProvenance.append("DECK_RESIDUAL" if calibrated else "DECK_ESTIMATED")
+            heights.append(lvls[k] * LEVEL_HEIGHT_m.get(kinds[k], ROAD_LEVEL_HEIGHT_m))
             levels.append(lvls[k])
             sources.append(sourceId)
             ids.append(featureIds[k])
@@ -307,7 +284,6 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         g0 += list(median)
         g1 += list(median)
         heights += [ROAD_LEVEL_HEIGHT_m] * idx.size
-        heightProvenance += ["DECK_ESTIMATED"] * idx.size
         levels += [1] * idx.size
         sources += [outlineSources[i] for i in idx]
         ids += [outlineIds[i] for i in idx]
@@ -330,7 +306,6 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         groundStart_m=gs[keep],
         groundEnd_m=ge[keep],
         levelHeight_m=np.array(heights, dtype=np.float64)[keep],
-        heightSources=np.array(heightProvenance, dtype=np.str_)[keep],
         taperStart_m=taperStart,
         taperEnd_m=taperEnd,
         levels=np.array(levels, dtype=np.int64)[keep],
@@ -459,48 +434,6 @@ def rasterizeDecks(
         np.fmin.at(bottoms[k].ravel(), flat[sel], top[sel] - DECK_THICKNESS_m)
     overflow = int(np.unique(flat[level >= maxLevels]).size)
     return DeckChunk(tops, bottoms, maxTop, maxDeck, overflow)
-
-
-def _dsmWindow(pack: Pack, geometry: GridGeometry) -> Any:
-    """Surface-model window over the scene, or ``None`` when the pack lacks one.
-
-    Args:
-        pack: Opened pack.
-        geometry: Scene grid geometry.
-
-    Returns:
-        A :class:`~map3d.pack.reader.RasterWindow` of the ``dsmHeight`` role,
-        or ``None``.
-    """
-    entry = pack.primarySource("dsmHeight")
-    if entry is None:
-        return None
-    return pack.readRaster(entry.sourceId, geometry.footprintBounds_deg(margin_m=_DSM_MARGIN_m))
-
-
-def _medianResidual_m(line: Any, dsm: Any, ground: GroundModel, length_m: float) -> float:
-    """Median surface-model-minus-ground height along a line's middle.
-
-    The middle 60% of the line avoids approach ramps and neighbouring
-    structures at the ends; the median ignores the spikes where another
-    viaduct crosses overhead. At ~10 m spacing along the line.
-
-    Args:
-        line: The centerline, in lon/lat.
-        dsm: Surface-model window (heights above MSL).
-        ground: Ground model (orthometric heights).
-        length_m: Length of the line, in meters.
-
-    Returns:
-        The median residual in meters, or NaN where nothing could be sampled.
-    """
-    n = max(3, min(64, int(length_m / 10.0) + 1))
-    points = shapely.line_interpolate_point(line, np.linspace(0.2, 0.8, n), normalized=True)
-    lat = shapely.get_y(points)
-    lon = shapely.get_x(points)
-    residual = np.asarray(dsm.sample(lat, lon)) - np.asarray(ground.orthometricAt(lat, lon))
-    residual = residual[np.isfinite(residual)]
-    return float(np.median(residual)) if residual.size else np.nan
 
 
 def _coveredBy(
