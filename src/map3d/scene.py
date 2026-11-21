@@ -38,7 +38,12 @@ from map3d.layers.landCover import (
     LandCoverModel,
     classTable,
 )
-from map3d.layers.provenance import HeightSource, heightSourceTable
+from map3d.layers.provenance import (
+    HeightSource,
+    heightSourceTable,
+    heightUncertaintyFor,
+    heightUncertaintyTable,
+)
 from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m, GroundModel
 from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
 from map3d.pack.reader import Pack
@@ -82,6 +87,10 @@ LAYER_INFO: dict[str, dict[str, str]] = {
     "heightSource": {
         "units": "1",
         "description": "Code of the source that set surfaceHeight (see heightSourceCodes).",
+    },
+    "heightUncertainty_m": {
+        "units": "m",
+        "description": "Conservative error of surfaceHeight per its source (see heightUncertainty_m table in scene.json).",
     },
     "nativeResolution_m": {
         "units": "m",
@@ -460,6 +469,9 @@ def _buildChunk(
     )
     heightSource = np.take_along_axis(sourceByWinner, winner[None], axis=0)[0]
     heightSource = np.where(anyKnown, heightSource, np.uint8(HeightSource.NONE)).astype(np.uint8)
+    uncertainty = np.where(anyKnown, heightUncertaintyFor(heightSource), np.float32(np.nan)).astype(
+        np.float32
+    )
     resByWinner = np.stack(
         [
             bldgRes,
@@ -487,6 +499,7 @@ def _buildChunk(
     layers["canopyHeight_m"][rows, cols] = canopy
     layers["featureId"][rows, cols] = featureId
     layers["heightSource"][rows, cols] = heightSource
+    layers["heightUncertainty_m"][rows, cols] = uncertainty
     layers["nativeResolution_m"][rows, cols] = nativeRes
     layers["landClass"][rows, cols] = landClass
     layers["deckTopHeight_datum_m"][:, rows, cols] = decks.tops + offset
@@ -567,6 +580,7 @@ def _metadata(
             for name, arr in layers.items()
         },
         "heightSourceCodes": heightSourceTable(),
+        "heightUncertainty_m": heightUncertaintyTable(),
         "landClassCodes": classTable(),
         "deckModel": {
             "roadLevelHeight_m": deckModel.ROAD_LEVEL_HEIGHT_m,

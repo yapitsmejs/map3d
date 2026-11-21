@@ -235,6 +235,25 @@ def testCanopy_doesNotWinRoadCorridors(plane: SyntheticScene, tmp_path: Path):
     )
 
 
+def testHeightUncertainty_followsTheWinningSource(built: Scene):
+    """The uncertainty layer mirrors each node's height source."""
+    from map3d.layers.provenance import HEIGHT_UNCERTAINTY_m, HeightSource
+
+    known = built.layers["heightSource"] != int(HeightSource.NONE)
+    uncertainty = built.layers["heightUncertainty_m"]
+    src = built.layers["heightSource"]
+    assert uncertainty.shape == src.shape
+    known = src != int(HeightSource.NONE)
+    assert np.isnan(uncertainty[~known]).all()
+    r, c = _rc(built, 0.0, 0.0)  # open ground
+    assert uncertainty[r, c] == pytest.approx(HEIGHT_UNCERTAINTY_m[HeightSource.GROUND])
+    r2, c2 = _rc(built, -350.0, -350.0)  # canopy
+    assert uncertainty[r2, c2] == pytest.approx(HEIGHT_UNCERTAINTY_m[HeightSource.CANOPY])
+    r3, c3 = _rc(built, 0.0, 200.0)  # deck
+    assert uncertainty[r3, c3] == pytest.approx(HEIGHT_UNCERTAINTY_m[HeightSource.DECK_ESTIMATED])
+    assert built.metadata["heightUncertainty_m"]["DECK_ESTIMATED"] == pytest.approx(4.0)
+
+
 def testDeck_setsSurfaceClassFeatureAndLevels(built: Scene, plane: SyntheticScene):
     r, c = _rc(built, 0.0, 200.0)
     top = built.layers["deckTopHeight_datum_m"][0, r, c]

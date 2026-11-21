@@ -147,6 +147,7 @@ node's cell footprint (cell-max):
 | `featureId` | (Ny, Nx) | i8 | ID of the top-most feature (building/deck); 0 = none. Indexes the `features` table. |
 | `heightSource` | (Ny, Nx) | u1 | Enum of the source that set `surfaceHeight` (§8). |
 | `nativeResolution_m` | (Ny, Nx) | f4 | Native resolution of that source (0 for vector-derived). |
+| `heightUncertainty_m` | (Ny, Nx) | f4 | Conservative error of `surfaceHeight` per its source (table in `scene.json`). |
 
 Also included: `features`, a table with one row per feature (`featureId`,
 `kind`, `sourceDataset`, `sourceFeatureId`, `height_m`, `heightSource`,
