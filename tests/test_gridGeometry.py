@@ -7,20 +7,12 @@ import math
 import numpy as np
 import pyproj
 import pytest
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.request import SceneRequest
 
 IDENTITY = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-
-
-def _heading(heading_deg: float) -> list[list[float]]:
-    h_rad = math.radians(heading_deg)
-    return [
-        [math.cos(h_rad), -math.sin(h_rad), 0.0],
-        [math.sin(h_rad), math.cos(h_rad), 0.0],
-        [0.0, 0.0, 1.0],
-    ]
 
 
 def _geom(
@@ -54,7 +46,7 @@ def testNodesEnu_identityAxesRowZeroAtMinusY():
 
 
 def testNodesEnu_heading90PointsGridYEast():
-    geom = _geom(axes=_heading(90.0))
+    geom = _geom(axes=headingAxes(90.0))
     e_m, n_m = geom.nodesEnu()
     gx_m, gy_m = np.meshgrid(geom.gridAxisX_m(), geom.gridAxisY_m())
     np.testing.assert_allclose(e_m, gy_m, atol=1e-12)
@@ -62,7 +54,7 @@ def testNodesEnu_heading90PointsGridYEast():
 
 
 def testNodesEnu_chunkMatchesFullSlice():
-    geom = _geom(axes=_heading(33.0), lx=10.0, ly=7.0)
+    geom = _geom(axes=headingAxes(33.0), lx=10.0, ly=7.0)
     eFull, nFull = geom.nodesEnu()
     rows, cols = slice(3, 9), slice(5, 17)
     eChunk, nChunk = geom.nodesEnu(rows, cols)
@@ -70,8 +62,42 @@ def testNodesEnu_chunkMatchesFullSlice():
     np.testing.assert_array_equal(nChunk, nFull[rows, cols])
 
 
+def testPixelTransforms_nodeCentersAndRoundTrips():
+    geom = _geom(axes=headingAxes(-47.0), lx=10.0, ly=7.0)
+    e_m, n_m = geom.nodesEnu()
+    rowIdx, colIdx = np.mgrid[0 : geom.nRows, 0 : geom.nCols]
+    col, row = geom.enuToPixel(e_m, n_m)
+    np.testing.assert_allclose(col, colIdx + 0.5, atol=1e-12)
+    np.testing.assert_allclose(row, rowIdx + 0.5, atol=1e-12)
+    eBack, nBack = geom.pixelToEnu(col, row)
+    np.testing.assert_allclose(eBack, e_m, atol=1e-12)
+    np.testing.assert_allclose(nBack, n_m, atol=1e-12)
+    gx_m, gy_m = geom.pixelToGrid(colIdx + 0.5, rowIdx + 0.5)
+    np.testing.assert_allclose(gx_m, np.broadcast_to(geom.gridAxisX_m(), gx_m.shape))
+    np.testing.assert_allclose(geom.gridToEnu(gx_m, gy_m), (e_m, n_m), atol=1e-12)
+
+
+def testGridEnuRoundTrip_rotated():
+    geom = _geom(axes=headingAxes(33.0))
+    gx_m, gy_m = np.array([10.0, -200.0]), np.array([30.0, 400.0])
+    np.testing.assert_allclose(geom.enuToGrid(*geom.gridToEnu(gx_m, gy_m)), (gx_m, gy_m), atol=1e-9)
+
+
+def testNodeIndex_findsTheCellAndClipsToTheGrid():
+    geom = _geom(lx=10.0, ly=7.0, s=1.0)  #: x in [-5, 5], y in [-3.5, 3.5]
+    col, row = geom.nodeIndex(np.array([-4.9, 0.2, 99.0]), np.array([-3.4, 0.0, -99.0]))
+    assert col.tolist() == [0, 5, geom.nCols - 1]
+    assert row.tolist() == [0, 3, 0]
+
+
+def testEnuToGrid_upTermOnlyAddsTheAxesUpComponent():
+    geom = _geom()
+    gx_m, gy_m = geom.enuToGrid(np.array([1.0]), np.array([2.0]), np.array([100.0]))
+    assert (gx_m[0], gy_m[0]) == (1.0, 2.0)  # z = Up: no lean
+
+
 def testAffine_pixelCentersAreNodes():
-    geom = _geom(axes=_heading(-47.0), lx=10.0, ly=7.0)
+    geom = _geom(axes=headingAxes(-47.0), lx=10.0, ly=7.0)
     e_m, n_m = geom.nodesEnu()
     rowIdx, colIdx = np.mgrid[0 : geom.nRows, 0 : geom.nCols]
     eAff, nAff = geom.affine() @ (colIdx + 0.5, rowIdx + 0.5)
@@ -80,7 +106,7 @@ def testAffine_pixelCentersAreNodes():
 
 
 def testAffine_originIsMinusXMinusYCorner():
-    geom = _geom(axes=_heading(30.0))
+    geom = _geom(axes=headingAxes(30.0))
     e_m, n_m = geom.affine() @ (0.0, 0.0)
     gx_m, gy_m = -1.0, -0.75
     axes = geom.gridAxes_ENU
@@ -89,7 +115,7 @@ def testAffine_originIsMinusXMinusYCorner():
 
 
 def testOrthoCrsPlusAffine_reproducesNodeEnuExactly():
-    geom = _geom(axes=_heading(30.0), lx=5000.0, ly=5000.0, s=250.0)
+    geom = _geom(axes=headingAxes(30.0), lx=5000.0, ly=5000.0, s=250.0)
     e_m, n_m = geom.nodesEnu()
     rowIdx, colIdx = np.mgrid[0 : geom.nRows, 0 : geom.nCols]
     x_m, y_m = geom.affine() @ (colIdx + 0.5, rowIdx + 0.5)
@@ -126,7 +152,7 @@ def testFromRequest_carriesFrameAtCenter():
 
 
 def testFootprintBounds_containAllNodeFootprints():
-    geom = _geom(axes=_heading(37.0), lx=4000.0, ly=3000.0, s=100.0)
+    geom = _geom(axes=headingAxes(37.0), lx=4000.0, ly=3000.0, s=100.0)
     minLon, minLat, maxLon, maxLat = geom.footprintBounds_deg()
     e_m, n_m = geom.nodesEnu()
     lat_deg, lon_deg, _ = geom.frame.columnPointAtHeight(e_m, n_m, 0.0)
@@ -135,7 +161,7 @@ def testFootprintBounds_containAllNodeFootprints():
 
 
 def testFootprintBounds_matchRotatedCornersViaOrtho():
-    geom = _geom(axes=_heading(45.0), lx=2000.0, ly=2000.0, s=100.0)
+    geom = _geom(axes=headingAxes(45.0), lx=2000.0, ly=2000.0, s=100.0)
     bounds = geom.footprintBounds_deg()
     # 45 deg rotation: extreme E/N extents are at +-sqrt(2) * 1000 m.
     reach_m = 1000.0 * math.sqrt(2.0)

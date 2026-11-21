@@ -3,28 +3,16 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
+from _support import headingAxes
 from hypothesis import given
 from hypothesis import strategies as st
 
 from map3d.request import SceneRequest
 
 IDENTITY = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-
-
-def _headingAxes(heading_deg: float) -> np.ndarray:
-    """Rows: grid x (right), grid y (forward at heading cw from North), z Up."""
-    h_rad = math.radians(heading_deg)
-    return np.array(
-        [
-            [math.cos(h_rad), -math.sin(h_rad), 0.0],
-            [math.sin(h_rad), math.cos(h_rad), 0.0],
-            [0.0, 0.0, 1.0],
-        ]
-    )
 
 
 def _make(**overrides: object) -> SceneRequest:
@@ -43,7 +31,6 @@ def testSceneRequest_validDefaults():
     req = _make()
     assert req.verticalDatum == "msl"
     assert req.maxDeckLevels == 5
-    assert req.imageryPath is None
     assert req.nCols == 4000
     assert req.nRows == 2000
     assert req.gridAxes_ENU.shape == (3, 3)
@@ -62,10 +49,6 @@ def testSceneRequest_acceptsSpecExampleHeading():
     assert req.nCols == 4000
 
 
-def testSceneRequest_imageryPathCoercedToPath():
-    assert _make(imageryPath="ortho.tif").imageryPath == Path("ortho.tif")
-
-
 def testSceneRequest_ellipsoidDatumAndZeroDecksAllowed():
     req = _make(verticalDatum="ellipsoid", maxDeckLevels=0)
     assert req.verticalDatum == "ellipsoid"
@@ -79,7 +62,7 @@ def testSceneRequest_nonIntegerRatioWithinRoundoffAccepted():
 
 @given(heading_deg=st.floats(-360.0, 360.0))
 def testSceneRequest_anyHeadingAccepted(heading_deg: float):
-    assert _make(gridAxes_ENU=_headingAxes(heading_deg)).nRows == 2000
+    assert _make(gridAxes_ENU=headingAxes(heading_deg)).nRows == 2000
 
 
 @pytest.mark.parametrize(

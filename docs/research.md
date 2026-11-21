@@ -136,3 +136,30 @@ heights, no open LiDAR/DEM, and no downloadable tree inventory**.
     Ave) raises that to **98.6%** (634/660 codes).
   - A hard prefix *filter* is worse (89.6%) because Property Information
     abbreviates names (BT = Bukit, etc.).
+
+
+**Deck heights from the DSM (negative result, 2026-11-21):** the plan to
+calibrate deck heights from a Copernicus GLO-30 DSM minus the ground model
+fails on real data, for two compounding reasons. (1) FABDEM removes
+buildings and forest but **keeps road and bridge decks baked in**, so the
+"DTM" along a bridge centerline already sits at deck height and the on-line
+difference is near zero. Measuring the ground laterally (25/40 m offsets,
+per-point low percentile) restores a signal but shows (2) a 30 m DSM pixel
+mixes an 8–20 m deck with the road beneath it: real flyovers read 2–5 m,
+not their true 7–14 m clearance, which is indistinguishable from a
+mis-tagged bridge over a road lined with trees. Neither height calibration
+nor automatic mis-tag dropping is reliable. Together with the building-height
+result below, this left the DSM with no consumer, so the `dsmHeight` role,
+the `copernicusDsm` source and the DSM-residual audit tooling were removed
+(2026-11-21). Copernicus GLO-30 remains only as the ground fallback.
+
+
+**Building-height validation from the DSM (negative result, 2026-11-21):**
+an audit script (since removed) compared recorded building heights with the
+median DSM-minus-ground residual over each footprint. On the Loyang scene it
+reported a 26 m median deviation for *authoritative* HDB floor-derived
+heights - and direct inspection shows the DSM is the wrong side: over a
+600x600 m HDB precinct of ~40 m blocks, GLO-30 tops out at 28 m (reading
+the surrounding trees) while the same tile reads an industrial depot roof
+correctly. Singapore's Copernicus GLO-30 coverage is too patchy to validate
+building heights here.

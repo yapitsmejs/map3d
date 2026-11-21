@@ -27,6 +27,7 @@ import shapely
 from shapely.ops import substring
 
 from map3d.pack.geoparquet import writeGeoParquet
+from map3d.pack.manifest import Bounds
 
 __all__ = [
     "BUCKET",
@@ -35,8 +36,6 @@ __all__ = [
     "latestRelease",
     "s3FileSystem",
 ]
-
-Bounds = tuple[float, float, float, float]
 
 BUCKET = "overturemaps-us-west-2"
 _EPS = 1e-9

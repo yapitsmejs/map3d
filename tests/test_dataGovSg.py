@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 import shapely
+from _support import mockSession
 
 from map3d.pack.geoparquet import readGeoParquet
-from map3d.prepare.http import HttpSession
 from map3d.prepare.sources import dataGovSg as dgs
 
 BOUNDS = (103.6, 1.2, 104.1, 1.5)
@@ -77,12 +77,11 @@ def testAdaptHdb_joinsStoreysAndClips(tmp_path: Path):
         "blk_no,street,max_floor_lvl,year_completed\n101,YISHUN AVE 6,12,1990\n102,YISHUN AVE 6,9,1991\n103,YISHUN AVE 6,4,1992\n",
         encoding="utf-8",
     )
-    out, stats = dgs.adaptHdbBuildings(footprints, csvPath, BOUNDS, tmp_path / "out.parquet")
+    out = dgs.adaptHdbBuildings(footprints, csvPath, BOUNDS, tmp_path / "out.parquet")
     table, geoms = readGeoParquet(out)
     assert table.column("sourceFeatureId").to_pylist() == ["760101", "760102", "000007"]
     assert table.column("numFloors").to_pylist() == [12, 9, None]
     assert table.column("height_m").to_pylist() == [None, None, None]
-    assert stats == {"footprints": 3, "joined": 2}
 
 
 def testAdaptUraBuildings(tmp_path: Path):
@@ -120,11 +119,6 @@ def testAdaptLtaStructures_excludesTunnelsAndUnderpasses(tmp_path: Path):
     assert table.column("structureType").to_pylist() == ["Flyover", "Vehicular Bridge"]
 
 
-def testIntersectsSingapore():
-    assert dgs.intersectsSingapore(BOUNDS)
-    assert not dgs.intersectsSingapore((100.0, 5.0, 101.0, 6.0))
-
-
 def testDownloadDataset_pollsAndCaches(tmp_path: Path):
     calls: list[str] = []
 
@@ -140,7 +134,7 @@ def testDownloadDataset_pollsAndCaches(tmp_path: Path):
             )
         return httpx.Response(200, content=b"blk_no,street\n")
 
-    with HttpSession(transport=httpx.MockTransport(handler), sleep=lambda s: None) as session:
+    with mockSession(handler) as session:
         path = dgs.downloadDataset(session, "d_abc", tmp_path / "info.csv", isCsv=True)
         assert path.read_bytes() == b"blk_no,street\n"
         dgs.downloadDataset(session, "d_abc", tmp_path / "info.csv", isCsv=True)
@@ -151,7 +145,7 @@ def testDownloadDataset_givesUpWhenNeverReady(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(201, json={"code": 0, "data": {"status": "PENDING"}})
 
-    with HttpSession(transport=httpx.MockTransport(handler), sleep=lambda s: None) as session:
+    with mockSession(handler) as session:
         with pytest.raises(RuntimeError, match="not ready"):
             dgs.downloadDataset(session, "d_abc", tmp_path / "x.geojson", isCsv=False, maxPolls=3)
 

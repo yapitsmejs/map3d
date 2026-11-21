@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import math
 import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers import landCover as lc
@@ -25,8 +25,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 
 def _geometry(scene: SyntheticScene, s: float = 2.0, heading: float = 0.0) -> GridGeometry:
-    h = math.radians(heading)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading)
     return GridGeometry.fromRequest(
         SceneRequest((scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, 1000.0, 1000.0)
     )
@@ -51,7 +50,7 @@ def testClasses_landCoverAndGroundRoads(plane: SyntheticScene):
     assert _at(geom, classes, -350.0, -350.0) == 10  # tree patch
     assert _at(geom, classes, 100.0, -450.0) == lc.CLASS_ROAD  # 8 m wide ground road
     assert _at(geom, classes, 100.0, -460.0) == 30  # 10 m off its centerline
-    assert _at(geom, classes, 0.0, 200.0) == 30  # the bridge is not a ground road
+    assert _at(geom, classes, 0.0, 200.0) == lc.CLASS_ROAD  # bridges burn as the roads they carry
 
 
 def testClasses_rotatedGridChunkedEqualsWhole(plane: SyntheticScene):
@@ -128,3 +127,40 @@ def testFootways_doNotOverrideLandCover(plane: SyntheticScene, tmp_path: Path):
     ingestFiles(pack, "overtureTransportation", [tmp_path / "fw.parquet"])
     geom = _geometry(plane)
     assert _at(geom, _classes(pack, geom), 0.0, 0.0) == 30
+
+
+def testClasses_segmentEndsBurnWithRoundCaps(plane: SyntheticScene, tmp_path: Path):
+    """A node just past a road segment's end still burns (round cap, not flat).
+
+    With flat caps, the last node of a dead-end road projects past the
+    endpoint and falls outside the burn, painting raw land cover.
+    """
+    import shapely
+
+    from map3d.pack.geoparquet import writeGeoParquet
+
+    pack = tmp_path / "ends.pack"
+    shutil.copytree(plane.packDir, pack)
+    manifest = Manifest.load(pack)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(pack)
+    t = np.linspace(0.0, 1.0, 9)
+    lat, lon, _ = plane.frame.columnPointAtHeight(
+        -100.0 + t * 200.0, np.zeros(9), 0.0
+    )  # E-W road, e = -100..100
+    writeGeoParquet(
+        tmp_path / "t.parquet",
+        np.array([shapely.LineString(np.column_stack([lon, lat]))], dtype=object),
+        {
+            "sourceFeatureId": ["r0"],
+            "kind": ["road"],
+            "isBridge": [False],
+            "level": [0],
+            "width_m": [8.0],
+        },
+    )
+    ingestFiles(pack, "overtureTransportation", [tmp_path / "t.parquet"])
+    geom = _geometry(plane)
+    classes = _classes(pack, geom)
+    # the node whose centre projects ~1 m past the segment's east end
+    assert _at(geom, classes, 101.0, -1.0) == lc.CLASS_ROAD

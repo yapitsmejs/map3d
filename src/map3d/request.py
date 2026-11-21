@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import numpy as np
 import numpy.typing as npt
@@ -14,7 +13,7 @@ __all__ = ["SceneRequest", "VerticalDatum"]
 
 VerticalDatum = Literal["msl", "ellipsoid"]
 
-_VERTICAL_DATUMS: tuple[str, ...] = ("msl", "ellipsoid")
+_VERTICAL_DATUMS: tuple[str, ...] = get_args(VerticalDatum)
 _RATIO_REL_TOL = 1e-9
 
 
@@ -31,7 +30,6 @@ class SceneRequest:
         swathVertical_m: Swath extent along grid y (an in-plane extent, not altitude).
         verticalDatum: ``"msl"`` (EGM2008 geoid) or ``"ellipsoid"`` (WGS84).
         maxDeckLevels: Number of elevated-structure levels stored in the grid.
-        imageryPath: Optional bring-your-own orthophoto for the mesh drape.
         axesTol: Tolerance for the orthonormality / handedness / z-Up checks.
 
     Raises:
@@ -45,15 +43,13 @@ class SceneRequest:
     swathVertical_m: float
     verticalDatum: VerticalDatum = "msl"
     maxDeckLevels: int = 5
-    imageryPath: Path | None = None
     axesTol: float = 1e-6
     nCols: int = field(init=False)
     nRows: int = field(init=False)
 
     def __post_init__(self) -> None:
         self._validateCenter()
-        if not (math.isfinite(self.axesTol) and self.axesTol > 0):
-            raise ValueError(f"axesTol must be a positive finite number, got {self.axesTol!r}")
+        _requirePositiveFinite("axesTol", self.axesTol)
         object.__setattr__(self, "gridAxes_ENU", _validateAxes(self.gridAxes_ENU, self.axesTol))
         _requirePositiveFinite("gridSpacing_m", self.gridSpacing_m)
         nCols = _nodeCount("swathHorizontal_m", self.swathHorizontal_m, self.gridSpacing_m)
@@ -72,8 +68,6 @@ class SceneRequest:
             raise ValueError(
                 f"maxDeckLevels must be a non-negative integer, got {self.maxDeckLevels!r}"
             )
-        if self.imageryPath is not None:
-            object.__setattr__(self, "imageryPath", Path(self.imageryPath))
 
     def _validateCenter(self) -> None:
         if len(self.sceneCenter_deg) != 2:

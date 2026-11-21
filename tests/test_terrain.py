@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns
@@ -28,8 +29,7 @@ def hill(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 
 def _geometry(scene: SyntheticScene, heading_deg: float, swath_m: float, s: float) -> GridGeometry:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     lat, lon = scene.frame.lat0_deg, scene.frame.lon0_deg
     return GridGeometry.fromRequest(SceneRequest((lat, lon), s, axes, swath_m, swath_m))
 
@@ -58,18 +58,14 @@ def testGroundModel_usesPrimarySourceAndGeoid(plane: SyntheticScene):
 def testCellMax_planeMatchesAnalyticCornerMax(plane: SyntheticScene, heading_deg: float):
     geom = _geometry(plane, heading_deg, 800.0, 20.0)
     model = GroundModel.load(Pack.open(plane.packDir), geom)
-    ground = model.cellMaxOrthometric(
-        ChunkColumns(geom, slice(None), slice(None)), geom.gridSpacing_m
-    )
+    ground = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)))
     np.testing.assert_allclose(ground, _cornerMax(plane, geom, plane.terrainHeight_m), atol=2e-3)
 
 
 def testCellMax_hillCloseToAnalytic(hill: SyntheticScene):
     geom = _geometry(hill, 15.0, 800.0, 10.0)
     model = GroundModel.load(Pack.open(hill.packDir), geom)
-    ground = model.cellMaxOrthometric(
-        ChunkColumns(geom, slice(None), slice(None)), geom.gridSpacing_m
-    )
+    ground = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)))
     np.testing.assert_allclose(ground, _cornerMax(hill, geom, hill.terrainHeight_m), atol=0.05)
 
 
@@ -77,19 +73,17 @@ def testCellMax_supersamplesCoarseGrids(hill: SyntheticScene):
     # 40 m cells over a 5 m source -> 8x8 sub-lattice catches the hill top inside a cell.
     geom = _geometry(hill, 0.0, 400.0, 40.0)
     model = GroundModel.load(Pack.open(hill.packDir), geom)
-    ground = model.cellMaxOrthometric(
-        ChunkColumns(geom, slice(None), slice(None)), geom.gridSpacing_m
-    )
+    ground = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)))
     assert np.nanmax(ground) == pytest.approx(40.0, abs=0.1)  # hill peak 10 + 30
 
 
 def testChunked_equalsWhole(plane: SyntheticScene):
     geom = _geometry(plane, 30.0, 800.0, 20.0)
     model = GroundModel.load(Pack.open(plane.packDir), geom)
-    whole = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)), 20.0)
+    whole = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)))
     parts = np.full(geom.shape, np.nan)
     for rows, cols in geom.iterChunks(7, 11):
-        parts[rows, cols] = model.cellMaxOrthometric(ChunkColumns(geom, rows, cols), 20.0)
+        parts[rows, cols] = model.cellMaxOrthometric(ChunkColumns(geom, rows, cols))
     np.testing.assert_array_equal(parts, whole)
 
 
@@ -132,14 +126,14 @@ def testSmoothing_zeroLeavesWindowUntouched(plane: SyntheticScene):
     raw = GroundModel.load(Pack.open(plane.packDir), geom)
     same = GroundModel.load(Pack.open(plane.packDir), geom, smoothing_m=0.0)
     np.testing.assert_array_equal(same.window.values, raw.window.values)
-    assert same.smoothing_m == 0.0 and same.nativeResolution_m == raw.nativeResolution_m
+    assert same.nativeResolution_m == raw.nativeResolution_m
 
 
 @pytest.mark.parametrize("heading_deg", [0.0, 30.0])
 def testSmoothing_preservesPlane(plane: SyntheticScene, heading_deg: float):
     geom = _geometry(plane, heading_deg, 400.0, 20.0)
     model = GroundModel.load(Pack.open(plane.packDir), geom, smoothing_m=90.0)
-    ground = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)), 20.0)
+    ground = model.cellMaxOrthometric(ChunkColumns(geom, slice(None), slice(None)))
     np.testing.assert_allclose(ground, _cornerMax(plane, geom, plane.terrainHeight_m), atol=2e-3)
 
 
@@ -152,7 +146,6 @@ def testSmoothing_hillMatchesConvolvedGaussian(hill: SyntheticScene):
     lat, lon = np.array([hill.frame.lat0_deg]), np.array([hill.frame.lon0_deg])
     expected = 10.0 + 30.0 * 150.0**2 / (150.0**2 + sf**2)
     assert float(model.orthometricAt(lat, lon)[0]) == pytest.approx(expected, abs=0.1)
-    assert model.smoothing_m == 90.0
     assert model.nativeResolution_m == 90.0  # effective resolution after smoothing
 
 

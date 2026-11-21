@@ -24,10 +24,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 _MIME = {
     ".html": "text/html",
     ".js": "text/javascript",
-    ".mjs": "text/javascript",
     ".json": "application/json",
     ".glb": "model/gltf-binary",
-    ".css": "text/css",
     "": "application/octet-stream",
 }
 

@@ -19,7 +19,7 @@ container.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xdde8f2);
-// Conceptual style lighting (satellite tiles are unlit and ignore it): a soft
+// Conceptual style lighting: a soft
 // sky with a light ground bounce keeps shaded walls light grey, and a sun 35
 // degrees up in the south-west lights south- and west-facing walls and leaves
 // east- and north-facing ones in shade, so roofs, sunlit walls and shaded walls

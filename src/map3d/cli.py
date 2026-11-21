@@ -17,6 +17,7 @@ from map3d import __version__
 from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
 from map3d.pack.ingest import ingestFiles
 from map3d.pack.reader import Pack
+from map3d.prepare import DEFAULT_BUILDINGS_YEAR, defaultCacheDir
 from map3d.request import SceneRequest
 from map3d.scene import buildScene
 
@@ -150,7 +151,6 @@ def build(
     formats: Annotated[
         str, typer.Option("--format", help="Comma list: npz, geotiff, 3dtiles.")
     ] = "npz",
-    imagery: Annotated[Path | None, typer.Option("--imagery", help="BYO orthophoto.")] = None,
     groundSmoothing: Annotated[
         float,
         typer.Option(
@@ -159,11 +159,14 @@ def build(
         ),
     ] = DEFAULT_GROUND_SMOOTHING_m,
     style: Annotated[
-        str | None,
+        str,
+        typer.Option("--style", help="3D Tiles look. Currently supported: conceptual."),
+    ] = "conceptual",
+    buildingImagery: Annotated[
+        Path | None,
         typer.Option(
-            "--style",
-            help="3D Tiles look: conceptual (flat map colours) or satellite (imagery). "
-            "Default: satellite with --imagery, else conceptual.",
+            "--building-imagery",
+            help="Optional high-resolution RGB orthophoto for building roof and facade colours.",
         ),
     ] = None,
 ) -> None:
@@ -181,7 +184,6 @@ def build(
             swathVertical_m=swath[1],
             verticalDatum=datum,  # type: ignore[arg-type]
             maxDeckLevels=decks,
-            imageryPath=imagery,
         )
         scene = buildScene(request, pack, groundSmoothing_m=groundSmoothing)
     except ValueError as exc:
@@ -197,7 +199,11 @@ def build(
         typer.echo(f"  wrote {len(paths)} GeoTIFFs to {out / 'geotiff'}")
     if "3dtiles" in wanted:
         try:
-            tileset = scene.write3dTiles(out / "tiles", style=style)  # type: ignore[arg-type]
+            tileset = scene.write3dTiles(
+                out / "tiles",
+                style=style,  # type: ignore[arg-type]
+                buildingImageryPath=buildingImagery,
+            )
         except ValueError as exc:
             scene.close()
             _fail(exc)
@@ -254,7 +260,7 @@ def prepare(
     ] = False,
     year: Annotated[
         int, typer.Option("--year", help="Year for Google Open Buildings 2.5D.")
-    ] = 2023,
+    ] = DEFAULT_BUILDINGS_YEAR,
 ) -> None:
     """Download open data for a box and build an offline pack (needs internet)."""
     try:
@@ -267,7 +273,7 @@ def prepare(
         )
     if caBundle is not None and systemCerts:
         _fail(ValueError("use either --ca-bundle or --system-certs, not both"))
-    cacheDir = cache if cache is not None else out.with_name(out.name + ".cache")
+    cacheDir = cache if cache is not None else defaultCacheDir(out)
     bundle = certs.exportCaBundle(cacheDir / "ca-bundle.pem") if systemCerts else caBundle
     wanted = [s.strip() for s in sources.split(",") if s.strip()] if sources else None
     try:

@@ -10,6 +10,8 @@ import pytest
 
 from map3d.mesh.gltf import MeshPart, enuToGltf, writeGlb
 
+_PNG = b"\x89PNG\r\n\x1a\nfakepng"
+
 
 def _square(z: float = 0.0, uv: bool = True, color: bool = False) -> MeshPart:
     pos = np.array([[0, 0, z], [10, 0, z], [10, 10, z], [0, 10, z]], dtype=np.float64)
@@ -35,11 +37,10 @@ def testMeshPart_concatenateAndEmpty():
 
 
 def testWriteGlb_texturedAndColoredPrimitives(tmp_path: Path):
-    jpeg = b"\xff\xd8\xff\xe0fakejpeg\xff\xd9"
     path = writeGlb(
         tmp_path / "t.glb",
         textured=_square(1.0),
-        texture=jpeg,
+        texture=_PNG,
         colored=_square(2.0, uv=False, color=True),
     )
     raw = path.read_bytes()
@@ -57,12 +58,11 @@ def testWriteGlb_texturedAndColoredPrimitives(tmp_path: Path):
     color = gltf.accessors[prims[1].attributes.COLOR_0]
     assert color.normalized is True
     assert color.type == "VEC4"  # 4-byte aligned elements (glTF requirement)
-    assert "KHR_materials_unlit" in gltf.extensionsUsed
-    assert gltf.images[0].mimeType == "image/jpeg"
+    assert gltf.images[0].mimeType == "image/png"
     assert gltf.materials[prims[1].material].doubleSided is True
     blob = gltf.binary_blob()
     view = gltf.bufferViews[gltf.images[0].bufferView]
-    assert blob[view.byteOffset : view.byteOffset + view.byteLength] == jpeg
+    assert blob[view.byteOffset : view.byteOffset + view.byteLength] == _PNG
 
 
 def testWriteGlb_onlyColoredOrNothing(tmp_path: Path):
@@ -78,9 +78,6 @@ def testWriteGlb_onlyColoredOrNothing(tmp_path: Path):
 def testWriteGlb_texturedPartNeedsUvAndTexture(tmp_path: Path):
     with pytest.raises(ValueError, match="uv"):
         writeGlb(tmp_path / "x.glb", textured=_square(uv=False), texture=b"x", colored=None)
-
-
-_PNG = b"\x89PNG\r\n\x1a\nfakepng"
 
 
 def testVertexNormals_flatAndSmooth():
@@ -101,17 +98,15 @@ def testVertexNormals_flatAndSmooth():
     )
 
 
-def testWriteGlb_litWritesNormalsAndPng(tmp_path: Path):
+def testWriteGlb_everyPrimitiveIsLitWithNormals(tmp_path: Path):
     path = writeGlb(
         tmp_path / "lit.glb",
         textured=_square(1.0),
         texture=_PNG,
         colored=_square(2.0, uv=False, color=True),
-        lit=True,
     )
     gltf = pygltflib.GLTF2().load_binary(str(path))
     assert "KHR_materials_unlit" not in (gltf.extensionsUsed or [])
-    assert gltf.images[0].mimeType == "image/png"
     blob = gltf.binary_blob()
     for prim in gltf.meshes[0].primitives:
         acc = gltf.accessors[prim.attributes.NORMAL]
@@ -121,14 +116,6 @@ def testWriteGlb_litWritesNormalsAndPng(tmp_path: Path):
             blob[view.byteOffset : view.byteOffset + view.byteLength], np.float32
         ).reshape(-1, 3)
         np.testing.assert_allclose(normals, np.tile([0.0, 1.0, 0.0], (4, 1)))  # up is +y in glTF
-
-
-def testWriteGlb_unlitTexturedPartHasNoNormals(tmp_path: Path):
-    path = writeGlb(tmp_path / "u.glb", textured=_square(1.0), texture=_PNG, colored=None)
-    gltf = pygltflib.GLTF2().load_binary(str(path))
-    assert gltf.meshes[0].primitives[0].attributes.NORMAL is None
-    assert "KHR_materials_unlit" in gltf.extensionsUsed
-    assert gltf.images[0].mimeType == "image/png"
 
 
 def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
@@ -143,8 +130,9 @@ def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
         color=(90, 160, 70),
         translations_ENU_m=np.array([[10.0, 20.0, 5.0], [-3.0, 4.0, 1.0]]),
         scales=np.array([[2.0, 2.0, 3.0], [1.0, 1.0, 1.5]]),
+        rotations_ENU=np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.6, 0.8]]),
     )
-    path = writeGlb(tmp_path / "i.glb", _square(1.0), _PNG, None, lit=True, instanced=[part, part])
+    path = writeGlb(tmp_path / "i.glb", _square(1.0), _PNG, None, instanced=[part, part])
     gltf = pygltflib.GLTF2().load_binary(str(path))
     assert "EXT_mesh_gpu_instancing" in gltf.extensionsUsed
     assert "EXT_mesh_gpu_instancing" in gltf.extensionsRequired
@@ -161,11 +149,40 @@ def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
 
     np.testing.assert_allclose(read(ext["TRANSLATION"]), [[10, 5, -20], [-3, 1, -4]])  # y-up
     np.testing.assert_allclose(read(ext["SCALE"]), [[2, 3, 2], [1, 1.5, 1]])
+    # ENU yaw (x, y, z, w) -> glTF yaw about +y: (x, z, -y, w).
+    np.testing.assert_allclose(read(ext["ROTATION"]), [[0, 0, 0, 1], [0, 0.6, 0, 0.8]], atol=1e-6)
     prim = gltf.meshes[node.mesh].primitives[0]
     assert prim.attributes.NORMAL is not None
     mat = gltf.materials[prim.material]
     linear = (np.array([90, 160, 70]) / 255) ** 2.2  # glTF colour factors are linear
     np.testing.assert_allclose(mat.pbrMetallicRoughness.baseColorFactor[:3], linear, rtol=0.05)
+
+
+def testWriteGlb_texturedFacadesRepeatAndKeepVertexColors(tmp_path: Path):
+    facade = _square(2.0, uv=True, color=True)
+    path = writeGlb(
+        tmp_path / "f.glb",
+        textured=_square(1.0),
+        texture=_PNG,
+        colored=None,
+        facades=facade,
+        facadeTexture=_PNG,
+    )
+    gltf = pygltflib.GLTF2().load_binary(str(path))
+    assert len(gltf.images) == 2
+    assert len(gltf.meshes[0].primitives) == 2
+    primitive = gltf.meshes[0].primitives[1]
+    assert primitive.attributes.TEXCOORD_0 is not None
+    assert primitive.attributes.COLOR_0 is not None
+    assert primitive.attributes.NORMAL is not None
+    material = gltf.materials[primitive.material]
+    assert material.doubleSided is True
+    sampler = gltf.samplers[
+        gltf.textures[material.pbrMetallicRoughness.baseColorTexture.index].sampler
+    ]
+    assert sampler.wrapS == 10497 and sampler.wrapT == 10497
+    with pytest.raises(ValueError, match="facade"):
+        writeGlb(tmp_path / "bad.glb", None, None, None, facades=facade)
 
 
 def testWriteGlb_onlyInstancedIsAllowed(tmp_path: Path):

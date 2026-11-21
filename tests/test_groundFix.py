@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rasterio
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.buildings import loadBuildings
@@ -56,8 +56,7 @@ def mound(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 
 def _request(scene: SyntheticScene, heading_deg: float = 0.0, s: float = 2.0) -> SceneRequest:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     return SceneRequest((scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, 1000.0, 1000.0)
 
 
@@ -71,7 +70,8 @@ def _correction(scene: SyntheticScene) -> GroundCorrection:
 
 def testBuild_triggersOnlyOnTheMoundedBuildingAndFitsTheTruePlane(mound: SyntheticScene):
     corr = _correction(mound)
-    assert corr.buildingIndex.tolist() == [1]  # B1 only
+    assert corr.footprints.size == 1  # B1 only
+    assert corr.footprints[0].bounds == pytest.approx(B1, abs=1e-6)
     a, b, c = corr.coeffs[0]
     assert a == pytest.approx(10.0, abs=0.05)
     assert b == pytest.approx(0.02, abs=2e-4) and c == pytest.approx(-0.01, abs=2e-4)

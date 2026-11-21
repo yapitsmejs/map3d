@@ -22,6 +22,7 @@ __all__ = [
     "Manifest",
     "PackFile",
     "SourceEntry",
+    "boundsIntersect",
     "fileSha256",
     "validateBounds",
 ]
@@ -76,6 +77,19 @@ def validateBounds(bounds: Sequence[float], allowDegenerate: bool = False) -> Bo
     return (minLon, minLat, maxLon, maxLat)
 
 
+def boundsIntersect(a: Bounds, b: Bounds) -> bool:
+    """Whether two lon/lat boxes overlap (touching edges count).
+
+    Args:
+        a: ``(minLon, minLat, maxLon, maxLat)``.
+        b: Another box.
+
+    Returns:
+        ``True`` if the closed boxes share at least one point.
+    """
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
 @dataclass
 class PackFile:
     """One data file in a pack.
@@ -124,12 +138,11 @@ class SourceEntry:
     accessedDate: str | None = None
 
     @classmethod
-    def fromSpec(cls, spec: SourceSpec, crs: str | None) -> SourceEntry:
-        """Create an empty entry from a registry spec.
+    def fromSpec(cls, spec: SourceSpec) -> SourceEntry:
+        """Create an empty entry (no CRS, no files) from a registry spec.
 
         Args:
             spec: The registry source spec.
-            crs: Raster CRS (WKT or authority string), or ``None``.
 
         Returns:
             The entry, with no files.
@@ -143,7 +156,7 @@ class SourceEntry:
             attribution=spec.attribution,
             nativeResolution_m=spec.nativeResolution_m,
             verticalReference=spec.verticalReference,
-            crs=crs,
+            crs=None,
         )
 
 

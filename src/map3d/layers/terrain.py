@@ -110,7 +110,6 @@ class GroundModel:
         geoid: Geoid grid for datum conversions.
         correction: Optional cap removing building residue under buildings
             (see :mod:`map3d.layers.groundFix`); applied to every query.
-        smoothing_m: Width (FWHM) of the low-pass applied to the source; 0 = none.
     """
 
     sourceId: str
@@ -119,7 +118,6 @@ class GroundModel:
     window: RasterWindow
     geoid: GeoidGrid
     correction: GroundCorrection | None = None
-    smoothing_m: float = 0.0
 
     @classmethod
     def load(cls, pack: Pack, geometry: GridGeometry, smoothing_m: float = 0.0) -> GroundModel:
@@ -154,7 +152,6 @@ class GroundModel:
             verticalReference=entry.verticalReference,
             window=window,
             geoid=pack.geoid(),
-            smoothing_m=smoothing_m,
         )
 
     def undulation_m(self, lat_deg: npt.ArrayLike, lon_deg: npt.ArrayLike) -> FloatArray:
@@ -175,18 +172,13 @@ class GroundModel:
             ValueError: If the source's vertical reference is unsupported.
         """
         values = self.window.sample(lat_deg, lon_deg)
-        if self.verticalReference == "WGS84":
+        if self._isEllipsoidal():
             values = values - self.undulation_m(lat_deg, lon_deg)
-        elif self.verticalReference != "EGM2008":
-            raise ValueError(
-                f"ground source {self.sourceId!r} has unsupported vertical reference "
-                f"{self.verticalReference!r}"
-            )
         if self.correction is not None:
             values = self.correction.correctPoints(lat_deg, lon_deg, values)
         return values
 
-    def cellMaxOrthometric(self, columns: ChunkColumns, gridSpacing_m: float) -> FloatArray:
+    def cellMaxOrthometric(self, columns: ChunkColumns) -> FloatArray:
         """Cell-max ground height above MSL for a chunk.
 
         Samples a sub-lattice that includes all cell corners, subdivided when
@@ -194,23 +186,25 @@ class GroundModel:
 
         Args:
             columns: Chunk column geometry.
-            gridSpacing_m: Grid spacing.
 
         Returns:
             Orthometric cell-max ground height, chunk-shaped.
         """
-        ss = supersampleFactor(gridSpacing_m, self.nativeResolution_m)
+        ss = supersampleFactor(columns.geometry.gridSpacing_m, self.nativeResolution_m)
         col, row = columns.mapLattice(ss, self.window.pixelCoords)
         values = self.window.sampleAtPixels(col, row)
-        if self.verticalReference == "WGS84":
-            lat, lon = columns.latticeLatLon(ss)
-            values = values - self.undulation_m(lat, lon)
-        elif self.verticalReference != "EGM2008":
+        if self._isEllipsoidal():
+            values = values - self.undulation_m(*columns.latticeLatLon(ss))
+        ground = cellMax(values, ss)
+        if self.correction is not None:
+            ground = self.correction.correctChunk(columns, ground)
+        return ground
+
+    def _isEllipsoidal(self) -> bool:
+        """Whether source heights are ellipsoidal (else EGM2008); raises if unsupported."""
+        if self.verticalReference not in ("EGM2008", "WGS84"):
             raise ValueError(
                 f"ground source {self.sourceId!r} has unsupported vertical reference "
                 f"{self.verticalReference!r}"
             )
-        ground = cellMax(values, ss)
-        if self.correction is not None:
-            ground = self.correction.correctChunk(columns.rows, columns.cols, ground)
-        return ground
+        return self.verticalReference == "WGS84"

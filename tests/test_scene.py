@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from _support import headingAxes
 
 from map3d.layers.provenance import HeightSource
 from map3d.pack.manifest import Manifest
@@ -25,8 +26,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 def _request(
     scene: SyntheticScene, heading_deg: float = 0.0, swath_m: float = 800.0, s: float = 4.0, **kw
 ) -> SceneRequest:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     return SceneRequest(
         (scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, swath_m, swath_m, **kw
     )
@@ -124,6 +124,136 @@ def testCanopy_raisesSurfaceWithCanopyProvenance(built: Scene):
     assert built.layers["landClass"][r, c] == 10
 
 
+def testGround_corridorNodesUsePointSample(tmp_path: Path):
+    """Ground at road/rail nodes is the corridor grade (point sample), not the cell max.
+
+    Cell-max pooling biases toward embankment and roadside vegetation; along a
+    transport corridor the ground *is* the graded road, so corridor nodes take
+    the ground sampled at their own footprint.
+    """
+    import shapely
+
+    from map3d.pack.geoparquet import writeGeoParquet
+    from map3d.pack.ingest import ingestFiles
+
+    hill = makeSyntheticPack(tmp_path / "h1.pack", terrain="hill")
+
+    def lineAt(n0: float) -> None:
+        t = np.linspace(0.0, 1.0, 9)
+        lat, lon, _ = hill.frame.columnPointAtHeight(-400.0 + t * 800.0, np.full(9, n0), 0.0)
+        writeGeoParquet(
+            tmp_path / "t.parquet",
+            np.array([shapely.LineString(np.column_stack([lon, lat]))], dtype=object),
+            {
+                "sourceFeatureId": ["r0"],
+                "kind": ["road"],
+                "isBridge": [False],
+                "level": [0],
+                "width_m": [20.0],
+            },
+        )
+
+    withRoad = tmp_path / "road.pack"
+    shutil.copytree(hill.packDir, withRoad)
+    manifest = Manifest.load(withRoad)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(withRoad)
+    lineAt(-200.0)  # an at-grade road across the hill's flank (sloping ground)
+    ingestFiles(withRoad, "overtureTransportation", [tmp_path / "t.parquet"])
+
+    bare = tmp_path / "bare.pack"
+    shutil.copytree(hill.packDir, bare)
+    manifest = Manifest.load(bare)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(bare)
+
+    sceneRoad = buildScene(_request(hill, s=10.0), withRoad)
+    sceneBare = buildScene(_request(hill, s=10.0), bare)
+    r, c = _rc(sceneRoad, 0.0, -200.0)
+    gRoad = sceneRoad.layers["groundHeight_datum_m"][r, c]
+    gBare = sceneBare.layers["groundHeight_datum_m"][r, c]
+    # the road node's ground is its own footprint's terrain, below the cell max
+    lat, lon = _nodeLatLon(sceneRoad, r, c)
+    pointGround = float(
+        np.asarray(sceneRoad.models.ground.orthometricAt(np.array([[lat]]), np.array([[lon]])))[
+            0, 0
+        ]
+    )
+    assert gRoad == pytest.approx(pointGround, abs=1e-6)
+    assert gBare - gRoad > 0.1
+    # off the corridor, the cell max is unchanged
+    r2, c2 = _rc(sceneRoad, 0.0, -150.0)
+    assert sceneRoad.layers["groundHeight_datum_m"][r2, c2] == pytest.approx(
+        sceneBare.layers["groundHeight_datum_m"][r2, c2], abs=1e-6
+    )
+
+
+def _nodeLatLon(scene: Scene, r: int, c: int) -> tuple[float, float]:
+    from map3d.layers.columns import ChunkColumns
+
+    lat, lon = ChunkColumns(scene.geometry, slice(r, r + 1), slice(c, c + 1)).nodeLatLon()
+    return float(lat[0, 0]), float(lon[0, 0])
+
+
+def testCanopy_doesNotWinRoadCorridors(plane: SyntheticScene, tmp_path: Path):
+    """Canopy over a ground-level road never tops the surface: the road stays at grade.
+
+    The canopy raster layer itself is untouched (trees still draw beside the
+    road as objects); only the surface composition suppresses it.
+    """
+
+    from map3d.pack.ingest import ingestFiles
+    from map3d.pack.synthetic import _METERS_PER_DEG_LAT, _pixelCentersEnu, _writeGeoTiff
+
+    pack = tmp_path / "c.pack"
+    shutil.copytree(plane.packDir, pack)
+    bounds = plane.sceneBounds_deg(plane.halfSize_m)
+    width = math.ceil((bounds[2] - bounds[0]) * _METERS_PER_DEG_LAT / 5.0)
+    height = math.ceil((bounds[3] - bounds[1]) * _METERS_PER_DEG_LAT / 5.0)
+    e, n = _pixelCentersEnu(plane.frame, bounds, (height, width))
+    # 15 m canopy over the at-grade road at n = -450 and the ground beside it.
+    patch = (e >= -350) & (e <= -250) & (n >= -460) & (n <= -425)
+    _writeGeoTiff(
+        tmp_path / "canopy.tif",
+        np.where(patch, 15.0, 0.0).astype(np.float32),
+        bounds,
+    )
+    ingestFiles(pack, "syntheticCanopy", [tmp_path / "canopy.tif"])
+
+    scene = buildScene(_request(plane, swath_m=1000.0), pack)
+    r, c = _rc(scene, -300.0, -450.0)  # on the road, under the canopy patch
+    assert scene.layers["canopyHeight_m"][r, c] == pytest.approx(15.0)
+    assert scene.layers["landClass"][r, c] == 210  # road
+    assert scene.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(
+        scene.layers["groundHeight_datum_m"][r, c], abs=1e-4
+    )
+    assert scene.layers["heightSource"][r, c] == HeightSource.GROUND
+    r2, c2 = _rc(scene, -300.0, -430.0)  # in the patch, off the road: canopy still wins
+    assert scene.layers["heightSource"][r2, c2] == HeightSource.CANOPY
+    assert scene.layers["surfaceHeight_datum_m"][r2, c2] == pytest.approx(
+        scene.layers["groundHeight_datum_m"][r2, c2] + 15.0, abs=1e-4
+    )
+
+
+def testHeightUncertainty_followsTheWinningSource(built: Scene):
+    """The uncertainty layer mirrors each node's height source."""
+    from map3d.layers.provenance import HEIGHT_UNCERTAINTY_m, HeightSource
+
+    known = built.layers["heightSource"] != int(HeightSource.NONE)
+    uncertainty = built.layers["heightUncertainty_m"]
+    src = built.layers["heightSource"]
+    assert uncertainty.shape == src.shape
+    known = src != int(HeightSource.NONE)
+    assert np.isnan(uncertainty[~known]).all()
+    r, c = _rc(built, 0.0, 0.0)  # open ground
+    assert uncertainty[r, c] == pytest.approx(HEIGHT_UNCERTAINTY_m[HeightSource.GROUND])
+    r2, c2 = _rc(built, -350.0, -350.0)  # canopy
+    assert uncertainty[r2, c2] == pytest.approx(HEIGHT_UNCERTAINTY_m[HeightSource.CANOPY])
+    r3, c3 = _rc(built, 0.0, 200.0)  # deck
+    assert uncertainty[r3, c3] == pytest.approx(HEIGHT_UNCERTAINTY_m[HeightSource.DECK_ESTIMATED])
+    assert built.metadata["heightUncertainty_m"]["DECK_ESTIMATED"] == pytest.approx(4.0)
+
+
 def testDeck_setsSurfaceClassFeatureAndLevels(built: Scene, plane: SyntheticScene):
     r, c = _rc(built, 0.0, 200.0)
     top = built.layers["deckTopHeight_datum_m"][0, r, c]
@@ -134,7 +264,8 @@ def testDeck_setsSurfaceClassFeatureAndLevels(built: Scene, plane: SyntheticScen
     assert built.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(top, abs=1e-4)
     assert built.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED
     assert built.layers["featureId"][r, c] == 4
-    assert built.layers["landClass"][r, c] == 220
+    # bridges burn as the roads they carry: the corridor wins over the deck
+    assert built.layers["landClass"][r, c] == 210
     assert built.layers["nativeResolution_m"][r, c] == 0.0
     _, _, uRef = built.geometry.frame.columnPointAtHeight(
         built.geometry.nodesEnu()[0][r, c], built.geometry.nodesEnu()[1][r, c], float(top) + 8.0
@@ -166,12 +297,6 @@ def testMetadata_hasClassTableAndDeckModel(built: Scene):
         "syntheticLandCover",
         "syntheticTransport",
     } <= sources
-
-
-def testChunkSize_doesNotChangeResult(plane: SyntheticScene, built: Scene):
-    other = buildScene(_request(plane, heading_deg=20.0), plane.packDir, chunkSize=37)
-    for name, arr in built.layers.items():
-        np.testing.assert_array_equal(other.layers[name], arr, err_msg=name)
 
 
 def testMetadata_describesFrameDatumSourcesAndWarnings(built: Scene):
@@ -216,14 +341,14 @@ def testBuildScene_withoutBuildingsSource(plane: SyntheticScene, tmp_path: Path)
     assert any("buildings" in w for w in scene.warnings)
 
 
-def testParallelWorkers_identicalToSequential(plane: SyntheticScene, built: Scene):
+def testChunkedParallelBuild_identicalToWholeSequential(plane: SyntheticScene, built: Scene):
     import warnings
 
     before = list(warnings.filters)
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # no leaked warnings from worker threads
         parallel = buildScene(
-            _request(plane, heading_deg=20.0), plane.packDir, chunkSize=64, workers=8
+            _request(plane, heading_deg=20.0), plane.packDir, chunkSize=37, workers=8
         )
     assert warnings.filters == before  # global warning filters left untouched
     for name, arr in built.layers.items():
@@ -261,7 +386,54 @@ def testGroundSmoothing_defaultRecordedAndOverridable(plane: SyntheticScene, bui
     from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
 
     assert built.metadata["groundSmoothing_m"] == DEFAULT_GROUND_SMOOTHING_m == 90.0
-    assert built.models.ground.smoothing_m == 90.0
+    assert built.models.ground.nativeResolution_m == 90.0  # source 5 m, smoothed to 90 m
     raw = buildScene(_request(plane, swath_m=200.0, s=10.0), plane.packDir, groundSmoothing_m=0.0)
     assert raw.metadata["groundSmoothing_m"] == 0.0
-    assert raw.models.ground.smoothing_m == 0.0
+    assert raw.models.ground.nativeResolution_m == 5.0  # the unsmoothed source
+
+
+def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):
+    """A deck over a ground road paints the corridor, not the deck class.
+
+    The terrain under a viaduct shows the road beneath (class road/rail);
+    the viaduct's own slab top samples the same class, so a road bridge
+    reads as a road on both layers.
+    """
+    import shapely
+
+    from map3d.layers.provenance import HeightSource
+    from map3d.pack.geoparquet import writeGeoParquet
+    from map3d.pack.ingest import ingestFiles
+
+    pack = tmp_path / "cross.pack"
+    shutil.copytree(plane.packDir, pack)
+    manifest = Manifest.load(pack)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(pack)
+    t = np.linspace(0.0, 1.0, 9)
+    latR, lonR, _ = plane.frame.columnPointAtHeight(-300.0 + t * 600.0, np.zeros(9), 0.0)
+    latB, lonB, _ = plane.frame.columnPointAtHeight(np.zeros(9), -300.0 + t * 600.0, 0.0)
+    writeGeoParquet(
+        tmp_path / "t.parquet",
+        np.array(
+            [
+                shapely.LineString(np.column_stack([lonR, latR])),
+                shapely.LineString(np.column_stack([lonB, latB])),
+            ],
+            dtype=object,
+        ),
+        {
+            "sourceFeatureId": ["ground", "bridge"],
+            "kind": ["road", "road"],
+            "isBridge": [False, True],
+            "level": [0, 1],
+            "width_m": [8.0, 8.0],
+        },
+    )
+    ingestFiles(pack, "overtureTransportation", [tmp_path / "t.parquet"])
+    scene = buildScene(_request(plane), pack)
+    r, c = _rc(scene, 0.0, 0.0)  # the crossing: ground road under the bridge
+    assert scene.layers["landClass"][r, c] == 210  # the corridor keeps its class
+    assert scene.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED  # surface = deck
+    r2, c2 = _rc(scene, 0.0, 200.0)  # on the bridge, off the ground road
+    assert scene.layers["landClass"][r2, c2] == 210  # the bridge's own corridor

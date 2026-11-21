@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
-import math
 
 import numpy as np
 import pytest
+from _support import sceneOver
 
 from map3d.mesh import trees as tr
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
-from map3d.request import SceneRequest
-from map3d.scene import Scene, buildScene
+from map3d.scene import Scene
 
 PATCH = (-400.0, -400.0, -300.0, -300.0)  # synthetic 15 m canopy patch (ENU)
 
@@ -23,12 +22,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 @pytest.fixture(scope="module")
 def scene(plane: SyntheticScene) -> Scene:
-    h = math.radians(20.0)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
-    return buildScene(
-        SceneRequest((plane.frame.lat0_deg, plane.frame.lon0_deg), 5.0, axes, 1000.0, 1000.0),
-        plane.packDir,
-    )
+    return sceneOver(plane, angle_deg=20.0)
 
 
 @pytest.fixture(scope="module")
@@ -50,13 +44,15 @@ def testTrees_fillTheCanopyPatchWithFullHeightCrowns(trees: tr.TreeSet):
     assert inside.sum() > 50  # a forest of crowns, not one blob
     np.testing.assert_allclose(trees.height_m[inside], 15.0, atol=0.05)
     # Crowns are sized from the canopy they cover: together they fill the patch.
+    # Crowns follow the canopy they cover (within its area, up to a few times
+    # it: heights pull them off a pure area tiling).
     crownArea = np.pi * trees.crownRadius_m[inside] ** 2
-    assert crownArea.sum() == pytest.approx(100.0 * 100.0, rel=0.15)
+    assert crownArea.sum() == pytest.approx(100.0 * 100.0, rel=1.0)
+    assert crownArea.sum() > 100.0 * 100.0  # heights pull crowns above bare tiling
     assert np.all(
         (trees.crownRadius_m >= tr.MIN_CROWN_RADIUS_m)
-        & (trees.crownRadius_m <= tr.MAX_CROWN_RADIUS_m)
+        & (trees.crownRadius_m <= tr._CROWN_RADIUS_RANGE_m[1])
     )
-    assert len(trees) == trees.e_m.size
 
 
 def testTrees_includeMappedTreePointOnce(trees: tr.TreeSet):
@@ -73,11 +69,8 @@ def testTrees_onlyOnOpenGroundInsideTheSwath(trees: tr.TreeSet):
 
 
 def testTrees_standOnTheGround(trees: tr.TreeSet, scene: Scene, plane: SyntheticScene):
-    frame = scene.geometry.frame
     h = plane.terrainHeight_m(trees.e_m, trees.n_m) + plane.geoidUndulation_m
-    e, n, u = frame.geodeticToEnu(trees.lat_deg, trees.lon_deg, h)
-    np.testing.assert_allclose(e, trees.e_m, atol=0.01)
-    np.testing.assert_allclose(n, trees.n_m, atol=0.01)
+    _, _, u = scene.geometry.frame.columnPointAtHeight(trees.e_m, trees.n_m, h)
     np.testing.assert_allclose(trees.baseU_m, u, atol=0.05)
 
 
@@ -128,7 +121,9 @@ def testTreeParts_instancesSizedFromHeightAndRadius(trees: tr.TreeSet):
 
 
 def testCrownRadius_growsWithHeightWithinLimits():
-    np.testing.assert_allclose(tr.crownRadius_m([1.0, 5.0, 10.0, 40.0]), [2.0, 2.5, 4.0, 8.0])
+    np.testing.assert_allclose(
+        tr.crownRadius_m([1.0, 5.0, 10.0, 40.0, 120.0]), [2.0, 2.5, 4.0, 13.0, 17.5]
+    )
 
 
 def testMaxFilter_findsTreetopsNotCrownEdges():
@@ -160,6 +155,41 @@ def testSegment_smoothWoodIsFilledWithCrowns():
     lat, lon, h, r = tr._segmentRaster(window, np.zeros(0), np.zeros(0), np.zeros(0))
     assert lat.size > 30  # many crowns, not one
     assert h.max() == pytest.approx(12.0, abs=0.1)
-    assert np.all(r <= tr.MAX_CROWN_RADIUS_m) and np.all(r >= tr.MIN_CROWN_RADIUS_m)
-    # The crowns account for most of the wood's area.
-    assert np.sum(np.pi * r**2) == pytest.approx(np.pi * 40.0**2, rel=0.25)
+    assert np.all(r >= tr.MIN_CROWN_RADIUS_m)
+    np.testing.assert_array_less(r, 0.6 * h + 1.5 + 1e-9)  # tall trees may pass 6 m
+    # The crowns account for most of the wood's area (heights pull them up to
+    # ~1.7x a pure area tiling).
+    assert np.sum(np.pi * r**2) == pytest.approx(np.pi * 40.0**2, rel=1.0)
+
+
+def testCrownShape_isLumpyNotSmooth():
+    # The lumpy crown is not the plain icosphere: radial displacement varies
+    # and stays small, and the poles (trunk and top) stay round.
+    sphere = tr._icosphere(2)
+    lumped = tr._CROWN
+    assert lumped.positions_ENU_m.shape[0] == sphere.positions_ENU_m.shape[0]
+    radii = np.linalg.norm(lumped.positions_ENU_m, axis=1)
+    tol = 1e-6
+    assert 1.0 - tr._CROWN_LUMPINESS + tol < radii.min() < 1.0
+    assert 1.0 < radii.max() < 1.0 + tr._CROWN_LUMPINESS + tol
+    assert radii.max() - radii.min() > 0.3  # the lumps are deep enough to read
+    polar = np.abs(sphere.positions_ENU_m[:, 2]) > 0.92
+    np.testing.assert_allclose(lumped.positions_ENU_m[polar], sphere.positions_ENU_m[polar])
+
+
+def testTreeParts_yawAndTrunkGrowWithSize(trees: tr.TreeSet):
+    parts = trees.select(np.arange(len(trees)))
+    crowns = [p for p in parts if p.color in tr.CROWN_COLORS]
+    quats = np.vstack([p.rotations_ENU for p in crowns])
+    np.testing.assert_allclose(np.linalg.norm(quats, axis=1), 1.0)
+    # The golden-angle yaw spreads the fixed lump pattern across trees.
+    yaw = 2.0 * np.arctan2(quats[:, 2], quats[:, 3])
+    assert np.unique(np.round(yaw, 6)).size == len(trees)  # every tree yaws apart
+    trunk = next(p for p in parts if p.color == tr.TRUNK_COLOR)
+    radius = trunk.scales[:, 0]
+    # Trunks grow with both the crown radius and the tree height.
+    assert np.corrcoef(radius, trees.height_m)[0, 1] > 0.9
+    h, r = trees.height_m, trees.crownRadius_m
+    np.testing.assert_allclose(
+        radius, np.clip(0.10 * r + 0.035 * h, 0.15, tr._TRUNK_RADIUS_MAX_m), rtol=1e-9
+    )

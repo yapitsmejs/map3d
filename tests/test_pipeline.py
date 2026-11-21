@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -124,13 +125,47 @@ def testContext_lazyS3AndRelease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     calls = {"fs": 0}
 
     def fakeFs(ca):
+        assert ca == Path("ca.pem")
         calls["fs"] += 1
         return "FS"
 
     monkeypatch.setattr(overture, "s3FileSystem", fakeFs)
     monkeypatch.setattr(overture, "latestRelease", lambda fs: "2026-11-18.0")
-    ctx = pipeline.PrepareContext(SG, tmp_path, session=None, year=2023)  # type: ignore[arg-type]
+    session = SimpleNamespace(caBundle=Path("ca.pem"))
+    ctx = pipeline.PrepareContext(SG, tmp_path, session=session, year=2023)  # type: ignore[arg-type]
     assert ctx.releaseBase() == "overturemaps-us-west-2/release/2026-11-18.0"
     ctx.s3()
     assert calls["fs"] == 1
     assert ctx.workDir("x") == tmp_path / "work" / "x"
+
+
+def testFetchers_keepWorkDirsAndFileNames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Ingest de-dupes by file name, so the fetcher wiring must keep its paths."""
+    from map3d.prepare.sources import dataGovSg, googleBuildings
+
+    monkeypatch.setattr(dataGovSg, "downloadDataset", lambda s, datasetId, target, isCsv: target)
+    monkeypatch.setattr(dataGovSg, "adaptHdbBuildings", lambda *args: args)
+    monkeypatch.setattr(googleBuildings, "fetchGoogleBuildings", lambda s, b, w, year: [w, year])
+    ctx = pipeline.PrepareContext(SG, tmp_path, session=None, year=2021)  # type: ignore[arg-type]
+    ctx._s3, ctx._release = "FS", "R"
+    work, raw = tmp_path / "work", tmp_path / "datagovsg"
+
+    assert pipeline._tiles("fabdem", lambda s, b, w: [w])(ctx) == [work / "fabdem"]
+    assert pipeline._overture("overtureBuildings", lambda fs, base, b, out: out)(ctx) == [
+        work / "overtureBuildings" / "overtureBuildings.parquet"
+    ]
+    assert pipeline._sg("sgUraBuildings", "uraBuildings", lambda src, b, out: (src, out))(ctx) == [
+        (raw / "uraBuildings.geojson", work / "sgUraBuildings" / "sgUraBuildings.parquet")
+    ]
+    assert pipeline.FETCHERS["sgHdbBuildings"](ctx) == [
+        (
+            raw / "hdbBuildings.geojson",
+            raw / "hdbPropertyInfo.csv",
+            SG,
+            work / "sgHdbBuildings" / "sgHdbBuildings.parquet",
+        )
+    ]
+    assert pipeline.FETCHERS["googleOpenBuildings25d"](ctx) == [
+        work / "googleOpenBuildings25d",
+        2021,
+    ]

@@ -51,3 +51,6 @@ Thumbs.db
 
 # Local env
 .env
+
+# Temporary local outputs
+temp/

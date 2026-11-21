@@ -43,14 +43,12 @@ class RoleSpec:
         kind: ``"raster"`` or ``"vector"``.
         required: Whether a scene cannot be built without it.
         requiredColumns: Canonical attribute columns (vector roles only).
-        description: Human-readable description.
     """
 
     role: str
     kind: DataKind
     required: bool
-    requiredColumns: tuple[str, ...]
-    description: str
+    requiredColumns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,48 +81,58 @@ class SourceSpec:
 ROLES: dict[str, RoleSpec] = {
     spec.role: spec
     for spec in (
-        RoleSpec("ground", "raster", True, (), "Bare-earth terrain height."),
-        RoleSpec("geoid", "raster", True, (), "Geoid undulation grid (EGM2008)."),
-        RoleSpec(
-            "buildings",
-            "vector",
-            False,
-            ("sourceFeatureId", "height_m", "numFloors"),
-            "Building footprints with optional height (m) / floor count.",
-        ),
-        RoleSpec(
-            "buildingHeightRaster",
-            "raster",
-            False,
-            (),
-            "Gridded building height above ground.",
-        ),
-        RoleSpec("canopyHeight", "raster", False, (), "Vegetation canopy height above ground."),
-        RoleSpec("landCover", "raster", False, (), "Land-cover class (ESA WorldCover codes)."),
+        RoleSpec("ground", "raster", True),  # bare-earth terrain height
+        RoleSpec("geoid", "raster", True),  # geoid undulation grid (EGM2008)
+        # footprints with optional height (m) / floor count
+        RoleSpec("buildings", "vector", False, ("sourceFeatureId", "height_m", "numFloors")),
+        RoleSpec("buildingHeightRaster", "raster", False),  # building height above ground
+        RoleSpec("canopyHeight", "raster", False),  # vegetation canopy height above ground
+        RoleSpec("landCover", "raster", False),  # land-cover class (ESA WorldCover codes)
+        # road/rail/footway centerlines with bridge flag, level and width
         RoleSpec(
             "transport",
             "vector",
             False,
             ("sourceFeatureId", "kind", "isBridge", "level", "width_m"),
-            "Road/rail/footway centerlines with bridge flag, level and width.",
         ),
-        RoleSpec(
-            "trees",
-            "vector",
-            False,
-            ("sourceFeatureId", "height_m"),
-            "Individual tree points with height.",
-        ),
-        RoleSpec(
-            "elevatedStructures",
-            "vector",
-            False,
-            ("sourceFeatureId", "structureType"),
-            "Footprints of flyovers/bridges/viaducts (location only; no deck heights).",
-        ),
-        RoleSpec("imagery", "raster", False, (), "RGB imagery for the mesh drape."),
+        RoleSpec("trees", "vector", False, ("sourceFeatureId", "height_m")),  # points + height
+        # flyover/bridge/viaduct footprints (location only; no deck heights)
+        RoleSpec("elevatedStructures", "vector", False, ("sourceFeatureId", "structureType")),
+        RoleSpec("imagery", "raster", False),  # RGB imagery for the mesh drape
     )
 }
+
+
+def _synthetic(
+    sourceId: str,
+    role: str,
+    kind: DataKind,
+    what: str,
+    nativeResolution_m: float = 0.0,
+    verticalReference: VerticalReference | None = None,
+) -> SourceSpec:
+    """A ``makeSyntheticPack`` source: test data, lowest priority in its role."""
+    return SourceSpec(
+        sourceId,
+        role,
+        kind,
+        f"map3d synthetic {what}",
+        "synthetic test data",
+        "map3d synthetic test data",
+        nativeResolution_m,
+        verticalReference,
+    )
+
+
+def _sgOdl(datasetName: str) -> tuple[str, str]:
+    """Licence and attribution notice for a data.gov.sg dataset (``{accessed}`` filled later)."""
+    return (
+        "Singapore Open Data Licence v1.0",
+        f"Contains information from {datasetName} accessed on {{accessed}} from data.gov.sg, "
+        "made available under the terms of the Singapore Open Data Licence version 1.0 "
+        "(https://data.gov.sg/open-data-licence)",
+    )
+
 
 _SOURCE_LIST: tuple[SourceSpec, ...] = (
     # --- ground (priority order) ---
@@ -151,16 +159,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         30.0,
         "EGM2008",
     ),
-    SourceSpec(
-        "syntheticGround",
-        "ground",
-        "raster",
-        "map3d synthetic terrain",
-        "synthetic test data",
-        "map3d synthetic test data",
-        5.0,
-        "EGM2008",
-    ),
+    _synthetic("syntheticGround", "ground", "raster", "terrain", 5.0, "EGM2008"),
     # --- geoid ---
     SourceSpec(
         "egm2008",
@@ -171,25 +170,14 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "EGM2008 geoid © U.S. National Geospatial-Intelligence Agency",
         4600.0,
     ),
-    SourceSpec(
-        "syntheticGeoid",
-        "geoid",
-        "raster",
-        "map3d synthetic geoid",
-        "synthetic test data",
-        "map3d synthetic test data",
-        100.0,
-    ),
+    _synthetic("syntheticGeoid", "geoid", "raster", "geoid", 100.0),
     # --- buildings (fused; height precedence order) ---
     SourceSpec(
         "sgHdbBuildings",
         "buildings",
         "vector",
         "HDB Existing Building + HDB Property Information (max_floor_lvl)",
-        "Singapore Open Data Licence v1.0",
-        "Contains information from HDB Existing Building and HDB Property Information accessed on {accessed} from data.gov.sg, "
-        "made available under the terms of the Singapore Open Data Licence version 1.0 "
-        "(https://data.gov.sg/open-data-licence)",
+        *_sgOdl("HDB Existing Building and HDB Property Information"),
         0.0,
         authoritative=True,
     ),
@@ -207,22 +195,11 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "buildings",
         "vector",
         "URA Master Plan 2025 Building Layer (indicative outlines, no height)",
-        "Singapore Open Data Licence v1.0",
-        "Contains information from Master Plan 2025 Building Layer accessed on {accessed} from data.gov.sg, "
-        "made available under the terms of the Singapore Open Data Licence version 1.0 "
-        "(https://data.gov.sg/open-data-licence)",
+        *_sgOdl("Master Plan 2025 Building Layer"),
         0.0,
         authoritative=True,
     ),
-    SourceSpec(
-        "syntheticBuildings",
-        "buildings",
-        "vector",
-        "map3d synthetic buildings",
-        "synthetic test data",
-        "map3d synthetic test data",
-        0.0,
-    ),
+    _synthetic("syntheticBuildings", "buildings", "vector", "buildings"),
     # --- building height raster ---
     SourceSpec(
         "googleOpenBuildings25d",
@@ -246,16 +223,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         1.0,
         "aboveGround",
     ),
-    SourceSpec(
-        "syntheticCanopy",
-        "canopyHeight",
-        "raster",
-        "map3d synthetic canopy",
-        "synthetic test data",
-        "map3d synthetic test data",
-        5.0,
-        "aboveGround",
-    ),
+    _synthetic("syntheticCanopy", "canopyHeight", "raster", "canopy", 5.0, "aboveGround"),
     # --- land cover ---
     SourceSpec(
         "esaWorldCover",
@@ -276,15 +244,7 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "contains modified Copernicus Sentinel data",
         10.0,
     ),
-    SourceSpec(
-        "syntheticLandCover",
-        "landCover",
-        "raster",
-        "map3d synthetic land cover",
-        "synthetic test data",
-        "map3d synthetic test data",
-        5.0,
-    ),
+    _synthetic("syntheticLandCover", "landCover", "raster", "land cover", 5.0),
     # --- transport ---
     SourceSpec(
         "overtureTransportation",
@@ -300,53 +260,25 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "transport",
         "vector",
         "URA Master Plan 2025 Rail Line Layer (GRND_LEVEL marks viaducts)",
-        "Singapore Open Data Licence v1.0",
-        "Contains information from Master Plan 2025 Rail Line Layer accessed on {accessed} from data.gov.sg, "
-        "made available under the terms of the Singapore Open Data Licence version 1.0 "
-        "(https://data.gov.sg/open-data-licence)",
+        *_sgOdl("Master Plan 2025 Rail Line Layer"),
         0.0,
         authoritative=True,
     ),
-    SourceSpec(
-        "syntheticTransport",
-        "transport",
-        "vector",
-        "map3d synthetic transport",
-        "synthetic test data",
-        "map3d synthetic test data",
-        0.0,
-    ),
+    _synthetic("syntheticTransport", "transport", "vector", "transport"),
     # --- trees ---
-    SourceSpec(
-        "syntheticTrees",
-        "trees",
-        "vector",
-        "map3d synthetic trees",
-        "synthetic test data",
-        "map3d synthetic test data",
-        0.0,
-    ),
+    _synthetic("syntheticTrees", "trees", "vector", "trees"),
     # --- elevated structures ---
     SourceSpec(
         "sgLtaElevatedStructures",
         "elevatedStructures",
         "vector",
         "LTA Vehicular Bridge / Underpass / Flyover",
-        "Singapore Open Data Licence v1.0",
-        "Contains information from LTA Vehicular Bridge/Underpass/Flyover accessed on {accessed} from data.gov.sg, "
-        "made available under the terms of the Singapore Open Data Licence version 1.0 "
-        "(https://data.gov.sg/open-data-licence)",
+        *_sgOdl("LTA Vehicular Bridge/Underpass/Flyover"),
         0.0,
         authoritative=True,
     ),
-    SourceSpec(
-        "syntheticElevatedStructures",
-        "elevatedStructures",
-        "vector",
-        "map3d synthetic elevated structures",
-        "synthetic test data",
-        "map3d synthetic test data",
-        0.0,
+    _synthetic(
+        "syntheticElevatedStructures", "elevatedStructures", "vector", "elevated structures"
     ),
     # --- imagery ---
     SourceSpec(

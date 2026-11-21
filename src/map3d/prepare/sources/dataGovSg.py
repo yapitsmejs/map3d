@@ -28,6 +28,7 @@ import numpy as np
 import shapely
 
 from map3d.pack.geoparquet import writeGeoParquet
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpSession
 
 __all__ = [
@@ -39,11 +40,8 @@ __all__ = [
     "adaptMasterPlanRail",
     "adaptUraBuildings",
     "downloadDataset",
-    "intersectsSingapore",
     "joinStreetCodes",
 ]
-
-Bounds = tuple[float, float, float, float]
 
 _API = "https://api-open.data.gov.sg/v1/public/api/datasets/{}/{}"
 MIN_INTERVAL_s = {"api-open.data.gov.sg": 5.0}  # 2 requests / 10 s without an API key
@@ -58,11 +56,6 @@ DATASETS: dict[str, tuple[str, bool]] = {
 }
 
 _EXCLUDED_STRUCTURES = {"Vehicular Tunnel", "Vehicular Underpass"}
-
-
-def intersectsSingapore(bounds: Bounds) -> bool:
-    """Whether a lon/lat box overlaps Singapore."""
-    return bool(shapely.intersects(shapely.box(*bounds), shapely.box(*SINGAPORE_BOUNDS)))
 
 
 def downloadDataset(
@@ -132,7 +125,7 @@ def joinStreetCodes(
 
 def adaptHdbBuildings(
     footprintsGeojson: Path, propertyCsv: Path, bounds: Bounds, outPath: Path
-) -> tuple[Path, dict[str, int]]:
+) -> Path:
     """HDB footprints joined to storey counts -> canonical buildings GeoParquet.
 
     Args:
@@ -142,7 +135,7 @@ def adaptHdbBuildings(
         outPath: Output path.
 
     Returns:
-        ``(outPath, {"footprints": n, "joined": m})``.
+        ``outPath``.
     """
     allGeoms, allProps = _readGeoJson(footprintsGeojson, None)
     floors: dict[tuple[str, str], int] = {}
@@ -173,7 +166,7 @@ def adaptHdbBuildings(
             "numFloors": numFloors,
         },
     )
-    return outPath, {"footprints": len(props), "joined": sum(f is not None for f in numFloors)}
+    return outPath
 
 
 def adaptUraBuildings(geojson: Path, bounds: Bounds, outPath: Path) -> Path:
@@ -199,7 +192,7 @@ def adaptMasterPlanRail(geojson: Path, bounds: Bounds, outPath: Path) -> Path:
     n = len(keep)
     writeGeoParquet(
         outPath,
-        geoms[keep] if n else geoms[:0],
+        geoms[keep],
         {
             "sourceFeatureId": [str(props[i]["OBJECTID"]) for i in keep],
             "kind": ["rail"] * n,
@@ -217,7 +210,7 @@ def adaptLtaStructures(geojson: Path, bounds: Bounds, outPath: Path) -> Path:
     keep = [i for i, p in enumerate(props) if p.get("TYP_CD") not in _EXCLUDED_STRUCTURES]
     writeGeoParquet(
         outPath,
-        geoms[keep] if keep else geoms[:0],
+        geoms[keep],
         {
             "sourceFeatureId": [
                 str(props[i].get("OBJECTID_1") or props[i].get("OBJECTID")) for i in keep

@@ -30,12 +30,23 @@ from map3d.layers.buildings import BuildingSet, loadBuildings, rasterizeBuilding
 from map3d.layers.canopy import CanopyModel
 from map3d.layers.columns import ChunkColumns
 from map3d.layers.decks import DeckSet, loadDecks, rasterizeDecks
-from map3d.layers.landCover import CLASS_BUILDING, CLASS_DECK, LandCoverModel, classTable
-from map3d.layers.provenance import HeightSource, heightSourceTable
+from map3d.layers.landCover import (
+    CLASS_BUILDING,
+    CLASS_DECK,
+    CLASS_RAIL,
+    CLASS_ROAD,
+    LandCoverModel,
+    classTable,
+)
+from map3d.layers.provenance import (
+    HeightSource,
+    heightSourceTable,
+    heightUncertaintyFor,
+    heightUncertaintyTable,
+)
 from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m, GroundModel
 from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
 from map3d.pack.reader import Pack
-from map3d.pack.registry import sourcesForRole
 from map3d.request import SceneRequest
 
 if TYPE_CHECKING:
@@ -75,6 +86,10 @@ LAYER_INFO: dict[str, dict[str, str]] = {
     "heightSource": {
         "units": "1",
         "description": "Code of the source that set surfaceHeight (see heightSourceCodes).",
+    },
+    "heightUncertainty_m": {
+        "units": "m",
+        "description": "Conservative error of surfaceHeight per its source (see heightUncertainty_m table in scene.json).",
     },
     "nativeResolution_m": {
         "units": "m",
@@ -193,20 +208,19 @@ class Scene:
     def write3dTiles(
         self,
         outDir: str | os.PathLike[str],
-        imageryPath: str | os.PathLike[str] | None = None,
         withViewer: bool = True,
-        style: Style | None = None,
+        style: Style = "conceptual",
+        buildingImageryPath: str | os.PathLike[str] | None = None,
     ) -> Path:
         """Write the scene as a 3D Tiles 1.1 tileset (plus the offline viewer).
 
         Args:
             outDir: Output directory.
-            imageryPath: BYO RGB GeoTIFF to drape (default: the request's
-                ``imageryPath``, else the pack's imagery in the satellite style).
             withViewer: Also install the offline viewer (``map3d view``).
-            style: ``"conceptual"`` (flat map colours, lit) or ``"satellite"``
-                (imagery). Default: satellite when imagery is given (here or in
-                the request), else conceptual.
+            style: ``"conceptual"`` (flat map colours, lit), the default.
+            buildingImageryPath: Optional high-resolution RGB orthophoto for
+                building palettes. Default: the pack's imagery, with neutral
+                fallback. Facade windows and floor bands are procedural.
 
         Returns:
             Path of ``tileset.json``.
@@ -214,8 +228,7 @@ class Scene:
         from map3d.mesh.tileset import write3dTiles
         from map3d.viewer import installViewer
 
-        drape = imageryPath if imageryPath is not None else self.request.imageryPath
-        path = write3dTiles(self, outDir, imageryPath=drape, style=style)
+        path = write3dTiles(self, outDir, style=style, buildingImageryPath=buildingImageryPath)
         if withViewer:
             installViewer(outDir)
         return path
@@ -412,10 +425,16 @@ def _buildChunk(
 ) -> int:
     columns = ChunkColumns(geometry, rows, cols)
     ground, buildings = models.ground, models.buildings
-    groundH = ground.cellMaxOrthometric(columns, geometry.gridSpacing_m)
+    classes = models.landCover.classes(columns)
+    groundH = ground.cellMaxOrthometric(columns)
+    corridor = np.isin(classes, (CLASS_ROAD, CLASS_RAIL))
+    if corridor.any():
+        # The ground at a transport node is the graded corridor, not the cell
+        # max of its embankment and roadside vegetation.
+        groundH = np.where(corridor, ground.orthometricAt(*columns.nodeLatLon()), groundH)
     canopy = models.canopy.cellMax(columns)
-    ids = rasterizeBuildings(buildings, geometry, rows, cols)
-    decks = rasterizeDecks(models.decks, geometry, columns, request.maxDeckLevels)
+    ids = rasterizeBuildings(buildings, columns)
+    decks = rasterizeDecks(models.decks, columns, ground, request.maxDeckLevels)
 
     hasBuilding = ids > 0
     index = np.maximum(ids - 1, 0)
@@ -427,15 +446,18 @@ def _buildChunk(
         roofH = np.full(ids.shape, np.nan)
         bldgSource = np.zeros(ids.shape, dtype=np.uint8)
         bldgRes = np.zeros(ids.shape)
-    canopyTop = np.where(canopy > 0, groundH + canopy, np.nan)
     hasDeck = decks.maxDeck > 0
+    # Canopy never wins a node a road layer owns (road, rail or a deck on top):
+    # the corridor renders at its own surface, trees stand beside it as objects.
+    canopyTop = np.where((canopy > 0) & ~(corridor | hasDeck), groundH + canopy, np.nan)
 
     # Candidates in tie-break order: building > deck > canopy > ground.
     stack = np.stack([roofH, decks.maxTop, canopyTop, groundH])
     known = np.isfinite(stack)
     anyKnown = known.any(axis=0)
-    winner = np.argmax(np.where(known, stack, -np.inf), axis=0)
-    surfaceH = np.where(anyKnown, np.nanmax(np.where(known, stack, -np.inf), axis=0), np.nan)
+    ranked = np.where(known, stack, -np.inf)
+    winner = np.argmax(ranked, axis=0)
+    surfaceH = np.where(anyKnown, np.nanmax(ranked, axis=0), np.nan)
     sourceByWinner = np.stack(
         [
             bldgSource,
@@ -446,6 +468,7 @@ def _buildChunk(
     )
     heightSource = np.take_along_axis(sourceByWinner, winner[None], axis=0)[0]
     heightSource = np.where(anyKnown, heightSource, np.uint8(HeightSource.NONE)).astype(np.uint8)
+    uncertainty = heightUncertaintyFor(heightSource).astype(np.float32)  # NONE -> NaN
     resByWinner = np.stack(
         [
             bldgRes,
@@ -458,8 +481,10 @@ def _buildChunk(
 
     deckOnTop = hasDeck & (~hasBuilding | (decks.maxTop > roofH))
     featureId = np.where(deckOnTop, len(buildings) + decks.maxDeck, ids)
-    landClass = models.landCover.classes(columns)
-    landClass = np.where(hasDeck, np.uint8(CLASS_DECK), landClass)
+    # A deck never relabels a road/rail corridor: the terrain under a viaduct
+    # keeps showing the road beneath, and the viaduct's slab top samples the
+    # same class (a road bridge reads as a road on both layers).
+    landClass = np.where(hasDeck & ~corridor, np.uint8(CLASS_DECK), classes)
     landClass = np.where(hasBuilding, np.uint8(CLASS_BUILDING), landClass).astype(np.uint8)
 
     (undulation,) = columns.mapNodes(lambda la, lo: (ground.undulation_m(la, lo),))
@@ -474,6 +499,7 @@ def _buildChunk(
     layers["canopyHeight_m"][rows, cols] = canopy
     layers["featureId"][rows, cols] = featureId
     layers["heightSource"][rows, cols] = heightSource
+    layers["heightUncertainty_m"][rows, cols] = uncertainty
     layers["nativeResolution_m"][rows, cols] = nativeRes
     layers["landClass"][rows, cols] = landClass
     layers["deckTopHeight_datum_m"][:, rows, cols] = decks.tops + offset
@@ -503,9 +529,7 @@ def _usedSources(pack: Pack) -> list[SourceEntry]:
         if entry is not None:
             used.append(entry)
     for role in ("buildings", "transport", "elevatedStructures"):
-        used += [
-            pack.manifest.sources[s] for s in sourcesForRole(role) if s in pack.manifest.sources
-        ]
+        used += [pack.manifest.sources[s] for s in pack.sourcesFor(role)]
     return used
 
 
@@ -530,7 +554,6 @@ def _metadata(
             "swathVertical_m": request.swathVertical_m,
             "verticalDatum": request.verticalDatum,
             "maxDeckLevels": request.maxDeckLevels,
-            "imageryPath": None if request.imageryPath is None else str(request.imageryPath),
         },
         "frame": {
             "sceneCenter_deg": [lat0, lon0],
@@ -555,6 +578,7 @@ def _metadata(
             for name, arr in layers.items()
         },
         "heightSourceCodes": heightSourceTable(),
+        "heightUncertainty_m": heightUncertaintyTable(),
         "landClassCodes": classTable(),
         "deckModel": {
             "roadLevelHeight_m": deckModel.ROAD_LEVEL_HEIGHT_m,
@@ -562,7 +586,9 @@ def _metadata(
             "footbridgeLevelHeight_m": deckModel.FOOTBRIDGE_LEVEL_HEIGHT_m,
             "deckThickness_m": deckModel.DECK_THICKNESS_m,
             "mergeTolerance_m": deckModel.MERGE_TOLERANCE_m,
-            "note": "Deck heights are estimated: ground interpolated between bridge ends + level x height.",
+            "note": "Deck heights are estimated: ground sampled along the bridge "
+            "centerline + level x height, tapering to grade at free ends. "
+            "Elevated-structure outlines exclude at-grade carriageways.",
         },
         "sources": [
             {

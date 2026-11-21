@@ -18,17 +18,17 @@ import numpy.typing as npt
 import shapely
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers._vectors import objectColumn
 from map3d.layers.columns import ChunkColumns
-from map3d.layers.pixels import rasterizePixels, toPixelGeometries
+from map3d.layers.decks import corridorWidths_m
+from map3d.layers.pixels import burnChunk, toPixelGeometries
 from map3d.pack.reader import Pack, RasterWindow
-from map3d.pack.registry import sourcesForRole
 
 __all__ = [
     "CLASS_BUILDING",
     "CLASS_DECK",
     "CLASS_RAIL",
     "CLASS_ROAD",
-    "DEFAULT_WIDTH_m",
     "LandCoverModel",
     "classTable",
     "remapClasses",
@@ -38,7 +38,6 @@ CLASS_BUILDING = 200
 CLASS_ROAD = 210
 CLASS_DECK = 220
 CLASS_RAIL = 230
-DEFAULT_WIDTH_m = {"road": 7.0, "rail": 4.0}
 
 _NAMES = {
     0: "unknown",
@@ -84,13 +83,11 @@ class LandCoverModel:
     """Land cover raster plus ground-level transport, ready to classify chunks.
 
     Attributes:
-        sourceId: Land-cover source used, if any.
-        window: Raster data over the scene, if any.
+        window: Land-cover raster over the scene, if any.
         transportShapes: Buffered ground-level road/rail footprints (pixel space).
         transportClasses: Class code of each footprint.
     """
 
-    sourceId: str | None
     window: RasterWindow | None
     transportShapes: npt.NDArray[np.object_]
     transportClasses: npt.NDArray[np.uint8]
@@ -111,43 +108,29 @@ class LandCoverModel:
         window = pack.readRaster(entry.sourceId, bounds) if entry is not None else None
         shapes: list[object] = []
         classes: list[int] = []
-        for sourceId in sourcesForRole("transport"):
-            if sourceId not in pack.manifest.sources:
-                continue
-            selection = pack.readVectors(sourceId, bounds, columns=["kind", "isBridge", "width_m"])
+        for sourceId in pack.sourcesFor("transport"):
+            selection = pack.readVectors(
+                sourceId, bounds, columns=["kind", "isBridge", "level", "width_m"]
+            )
             table = selection.table
-            # Footways (park paths, pavements) leave the underlying land cover alone.
-            ground = np.array(
-                [
-                    not bool(bridge) and kind != "footway"
-                    for bridge, kind in zip(
-                        table.column("isBridge").to_pylist(),
-                        table.column("kind").to_pylist(),
-                        strict=True,
-                    )
-                ],
-                dtype=bool,
-            )
-            if not ground.any():
+            # Every road/rail corridor burns its class - bridges included, so a
+            # viaduct's slab top paints as the road it carries. Footways (park
+            # paths, pavements) leave the underlying land cover alone. Levels
+            # are not filtered: OSM tags level -1 on ordinary roads that dip
+            # under intersections, which must keep their surface paint.
+            kinds = objectColumn(table, "kind")
+            burn = kinds != "footway"
+            if not burn.any():
                 continue
-            kinds = np.array(table.column("kind").to_pylist(), dtype=object)[ground]
-            widths = np.array(
-                [
-                    DEFAULT_WIDTH_m.get(str(k), DEFAULT_WIDTH_m["road"]) if w is None else float(w)
-                    for k, w in zip(
-                        kinds,
-                        np.array(table.column("width_m").to_pylist(), dtype=object)[ground],
-                        strict=True,
-                    )
-                ]
-            )
-            lines = toPixelGeometries(selection.geometries[ground], 0.0, geometry)
+            kinds = kinds[burn]
+            widths = corridorWidths_m(kinds, objectColumn(table, "width_m")[burn])
+            lines = toPixelGeometries(selection.geometries[burn], 0.0, geometry)
             shapes.extend(
-                shapely.buffer(lines, 0.5 * widths / geometry.gridSpacing_m, cap_style="flat")
+                # round caps: a node just past a dead-end still burns as road
+                shapely.buffer(lines, 0.5 * widths / geometry.gridSpacing_m, cap_style="round")
             )
             classes.extend(CLASS_RAIL if k == "rail" else CLASS_ROAD for k in kinds)
         return cls(
-            sourceId=None if entry is None else entry.sourceId,
             window=window,
             transportShapes=np.array(shapes, dtype=object),
             transportClasses=np.array(classes, dtype=np.uint8),
@@ -162,29 +145,14 @@ class LandCoverModel:
         Returns:
             Chunk-shaped uint8 class codes.
         """
-        nr, nc = columns.shape
-        if self.window is not None and self.sourceId is not None:
+        if self.window is not None:
             col, row = columns.mapNodes(self.window.pixelCoords)
             sampled = self.window.sampleAtPixels(col, row, method="nearest")
-            out = remapClasses(np.nan_to_num(sampled, nan=0.0), self.sourceId)
+            out = remapClasses(np.nan_to_num(sampled, nan=0.0), self.window.sourceId)
         else:
-            out = np.zeros((nr, nc), dtype=np.uint8)
-        if self.transportShapes.size:
-            r0, c0 = columns.rows.start, columns.cols.start
-            box = shapely.box(c0, r0, c0 + nc, r0 + nr)
-            hits = np.flatnonzero(shapely.intersects(self.transportShapes, box))
-            if hits.size:
-                order = hits[
-                    np.argsort(self.transportClasses[hits], kind="stable")
-                ]  # rail drawn last
-                burned = rasterizePixels(
-                    ((self.transportShapes[i], int(self.transportClasses[i])) for i in order),
-                    (nr, nc),
-                    r0,
-                    c0,
-                    allTouched=False,
-                    dtype="uint8",
-                    fill=0,
-                )
-                out = np.where(burned > 0, burned, out).astype(np.uint8)
-        return out
+            out = np.zeros(columns.shape, dtype=np.uint8)
+        # rail (the higher code) is drawn last
+        burned = burnChunk(
+            self.transportShapes, self.transportClasses, columns, allTouched=False, dtype="uint8"
+        )
+        return np.where(burned > 0, burned, out).astype(np.uint8)

@@ -3,6 +3,14 @@
 Nodes are cell-centered. Arrays are indexed ``[row, col]`` with row 0 at -y and
 column 0 at -x of the grid frame. Because v1 grids have z = Up, every node maps
 to a horizontal ENU position ``(e, n)`` that defines its vertical column.
+
+Three horizontal coordinate systems are used, converted by :class:`GridGeometry`:
+
+- **ENU** ``(e, n)``: scene-center frame, metres.
+- **Grid** ``(gx, gy)``: the grid frame (origin at the grid centre), metres.
+- **Pixel** ``(col, row)``: the grid frame scaled by ``1 / gridSpacing_m`` and
+  shifted so cell ``(row i, col j)`` spans ``[j, j+1] x [i, i+1]``; node
+  ``(i, j)`` sits at pixel ``(j + 0.5, i + 0.5)``.
 """
 
 from __future__ import annotations
@@ -21,6 +29,8 @@ from map3d.request import SceneRequest
 __all__ = ["GridGeometry"]
 
 FloatArray = npt.NDArray[np.float64]
+
+_FOOTPRINT_SAMPLES_PER_EDGE = 33
 
 
 @dataclass(frozen=True, eq=False)
@@ -87,10 +97,119 @@ class GridGeometry:
         """
         gx_m = self.gridAxisX_m()[cols if cols is not None else slice(None)]
         gy_m = self.gridAxisY_m()[rows if rows is not None else slice(None)]
-        axes = self.gridAxes_ENU
-        e_m = gy_m[:, None] * axes[1, 0] + gx_m[None, :] * axes[0, 0]
-        n_m = gy_m[:, None] * axes[1, 1] + gx_m[None, :] * axes[0, 1]
-        return e_m, n_m
+        return self.gridToEnu(gx_m[None, :], gy_m[:, None])
+
+    def gridToEnu(self, gx_m: FloatArray, gy_m: FloatArray) -> tuple[FloatArray, FloatArray]:
+        """Grid-frame horizontal coordinates to ENU ``(e, n)`` (arrays broadcast).
+
+        Args:
+            gx_m: Grid x, in meters.
+            gy_m: Grid y, in meters.
+
+        Returns:
+            ``(e_m, n_m)``.
+        """
+        a = self.gridAxes_ENU
+        return gx_m * a[0, 0] + gy_m * a[1, 0], gx_m * a[0, 1] + gy_m * a[1, 1]
+
+    def enuToGrid(
+        self, e_m: FloatArray, n_m: FloatArray, u_m: FloatArray | None = None
+    ) -> tuple[FloatArray, FloatArray]:
+        """ENU coordinates to grid-frame horizontal ``(gx, gy)`` (arrays broadcast).
+
+        Args:
+            e_m: East, in meters.
+            n_m: North, in meters.
+            u_m: Optional Up, in meters (omitted = 0).
+
+        Returns:
+            ``(gx_m, gy_m)``.
+        """
+        a = self.gridAxes_ENU
+        gx_m = a[0, 0] * e_m + a[0, 1] * n_m
+        gy_m = a[1, 0] * e_m + a[1, 1] * n_m
+        if u_m is not None:
+            gx_m = gx_m + a[0, 2] * u_m
+            gy_m = gy_m + a[1, 2] * u_m
+        return gx_m, gy_m
+
+    def gridToPixel(self, gx_m: FloatArray, gy_m: FloatArray) -> tuple[FloatArray, FloatArray]:
+        """Grid-frame coordinates to pixel ``(col, row)``.
+
+        Args:
+            gx_m: Grid x, in meters.
+            gy_m: Grid y, in meters.
+
+        Returns:
+            ``(col, row)`` in pixel units.
+        """
+        s = self.gridSpacing_m
+        return (gx_m + 0.5 * self.nCols * s) / s, (gy_m + 0.5 * self.nRows * s) / s
+
+    def nodeIndex(
+        self, gx_m: FloatArray, gy_m: FloatArray
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """Index ``(col, row)`` of the node whose cell holds each point, clipped to the grid.
+
+        Args:
+            gx_m: Grid x, in meters.
+            gy_m: Grid y, in meters.
+
+        Returns:
+            ``(col, row)`` integer node indices.
+        """
+        col, row = self.gridToPixel(gx_m, gy_m)
+        return (
+            np.clip(np.asarray(col).astype(np.int64), 0, self.nCols - 1),
+            np.clip(np.asarray(row).astype(np.int64), 0, self.nRows - 1),
+        )
+
+    def pixelToGrid(self, col: FloatArray, row: FloatArray) -> tuple[FloatArray, FloatArray]:
+        """Pixel ``(col, row)`` to grid-frame coordinates (inverse of :meth:`gridToPixel`).
+
+        Args:
+            col: Pixel column coordinate.
+            row: Pixel row coordinate.
+
+        Returns:
+            ``(gx_m, gy_m)``.
+        """
+        s = self.gridSpacing_m
+        return (col - 0.5 * self.nCols) * s, (row - 0.5 * self.nRows) * s
+
+    def enuToPixel(
+        self, e_m: FloatArray, n_m: FloatArray, u_m: FloatArray | None = None
+    ) -> tuple[FloatArray, FloatArray]:
+        """ENU coordinates to pixel ``(col, row)``; see :meth:`enuToGrid`.
+
+        Args:
+            e_m: East, in meters.
+            n_m: North, in meters.
+            u_m: Optional Up, in meters (omitted = 0).
+
+        Returns:
+            ``(col, row)`` in pixel units.
+        """
+        return self.gridToPixel(*self.enuToGrid(e_m, n_m, u_m))
+
+    def pixelToEnu(self, col: FloatArray, row: FloatArray) -> tuple[FloatArray, FloatArray]:
+        """Pixel ``(col, row)`` to ENU ``(e, n)``: the exact inverse of :meth:`enuToPixel`.
+
+        Solves the 2x2 horizontal system instead of transposing it (as
+        :meth:`gridToEnu` does), so it also inverts axes that are orthonormal only
+        within the request tolerance.
+
+        Args:
+            col: Pixel column coordinate.
+            row: Pixel row coordinate.
+
+        Returns:
+            ``(e_m, n_m)``.
+        """
+        gx_m, gy_m = self.pixelToGrid(col, row)
+        a = self.gridAxes_ENU
+        det = a[0, 0] * a[1, 1] - a[0, 1] * a[1, 0]
+        return (a[1, 1] * gx_m - a[0, 1] * gy_m) / det, (a[0, 0] * gy_m - a[1, 0] * gx_m) / det
 
     def affine(self) -> Affine:
         """Affine map from pixel-corner ``(col, row)`` to ortho-CRS ``(x, y)``.
@@ -118,9 +237,7 @@ class GridGeometry:
         """Ellipsoidal orthographic CRS centered on the scene center."""
         return self.frame.orthoCrs()
 
-    def footprintBounds_deg(
-        self, margin_m: float = 0.0, samplesPerEdge: int = 33
-    ) -> tuple[float, float, float, float]:
+    def footprintBounds_deg(self, margin_m: float = 0.0) -> tuple[float, float, float, float]:
         """Lon/lat bounding box of the swath rectangle's footprint on the ellipsoid.
 
         The rectangle covers all cells (not just node centers), optionally grown
@@ -129,7 +246,6 @@ class GridGeometry:
 
         Args:
             margin_m: Extra distance added on every side, in meters.
-            samplesPerEdge: Perimeter samples per edge.
 
         Returns:
             ``(minLon, minLat, maxLon, maxLat)`` in degrees.
@@ -141,13 +257,11 @@ class GridGeometry:
             raise ValueError(f"margin_m must be non-negative, got {margin_m}")
         halfX_m = 0.5 * self.nCols * self.gridSpacing_m + margin_m
         halfY_m = 0.5 * self.nRows * self.gridSpacing_m + margin_m
-        t = np.linspace(-1.0, 1.0, samplesPerEdge)
+        t = np.linspace(-1.0, 1.0, _FOOTPRINT_SAMPLES_PER_EDGE)
         ones = np.ones_like(t)
         gx_m = np.concatenate([t * halfX_m, ones * halfX_m, -t * halfX_m, -ones * halfX_m])
         gy_m = np.concatenate([-ones * halfY_m, t * halfY_m, ones * halfY_m, -t * halfY_m])
-        axes = self.gridAxes_ENU
-        e_m = gx_m * axes[0, 0] + gy_m * axes[1, 0]
-        n_m = gx_m * axes[0, 1] + gy_m * axes[1, 1]
+        e_m, n_m = self.gridToEnu(gx_m, gy_m)
         lat_deg, lon_deg, _ = self.frame.columnPointAtHeight(e_m, n_m, 0.0)
         return (
             float(lon_deg.min()),
