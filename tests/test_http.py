@@ -9,6 +9,7 @@ import httpx
 import numpy as np
 import pytest
 import rasterio
+from _packSupport import mockSession
 from _support import rangeServer
 from rasterio.windows import Window
 
@@ -16,15 +17,10 @@ from map3d.prepare import certs
 from map3d.prepare.http import HttpRangeFile, HttpSession
 
 
-def _session(handler, **kw) -> HttpSession:
-    kw.setdefault("sleep", lambda s: None)
-    return HttpSession(transport=httpx.MockTransport(handler), **kw)
-
-
 def testRangeFile_readsSeeksAndCachesBlocks():
     data = bytes(range(256)) * 40  # 10240 bytes
     log: list[httpx.Request] = []
-    with _session(rangeServer({"https://x/f.bin": data}, log)) as session:
+    with mockSession(rangeServer({"https://x/f.bin": data}, log)) as session:
         f = HttpRangeFile(session, "https://x/f.bin", blockSize=1000)
         assert f.size == len(data)
         f.seek(995)
@@ -46,7 +42,7 @@ def testRangeFile_readsSeeksAndCachesBlocks():
 
 def testRangeFile_evictsLeastRecentlyUsedBlocks():
     data = bytes(5000)
-    with _session(rangeServer({"https://x/f": data})) as session:
+    with mockSession(rangeServer({"https://x/f": data})) as session:
         f = HttpRangeFile(session, "https://x/f", blockSize=1000, maxCachedBlocks=2)
         for pos in (0, 1000, 2000):
             f.seek(pos)
@@ -55,7 +51,7 @@ def testRangeFile_evictsLeastRecentlyUsedBlocks():
 
 
 def testRangeFile_readPastEndReturnsEmpty():
-    with _session(rangeServer({"https://x/f": b"abc"})) as session:
+    with mockSession(rangeServer({"https://x/f": b"abc"})) as session:
         f = HttpRangeFile(session, "https://x/f")
         f.seek(10)
         assert f.read(5) == b""
@@ -64,7 +60,7 @@ def testRangeFile_readPastEndReturnsEmpty():
 def testRasterOpener_readsRemoteGeoTiffWindow(tmp_path: Path, writeRaster):
     values = np.arange(64 * 64, dtype=np.float32).reshape(64, 64)
     path = writeRaster(tmp_path / "r.tif", (103.0, 1.0, 104.0, 2.0), values=values, shape=(64, 64))
-    with _session(rangeServer({"https://x/r.tif": path.read_bytes()})) as session:
+    with mockSession(rangeServer({"https://x/r.tif": path.read_bytes()})) as session:
         with rasterio.open("https://x/r.tif", opener=session.rasterOpener) as src:
             np.testing.assert_array_equal(
                 src.read(1, window=Window(10, 20, 5, 3)), values[20:23, 10:15]
@@ -85,14 +81,14 @@ def testGet_retriesTransientFailuresThenSucceeds():
         return httpx.Response(200, text="ok")
 
     slept: list[float] = []
-    with _session(handler, sleep=slept.append, retries=4, backoff_s=0.5) as session:
+    with mockSession(handler, sleep=slept.append, retries=4, backoff_s=0.5) as session:
         assert session.get("https://x/a").text == "ok"
     assert calls["n"] == 4
     assert slept[-1] == 1.0  # honoured Retry-After
 
 
 def testGet_givesUpAfterRetries():
-    with _session(lambda r: httpx.Response(500), retries=2) as session:
+    with mockSession(lambda r: httpx.Response(500), retries=2) as session:
         with pytest.raises(httpx.HTTPStatusError):
             session.get("https://x/a")
 
@@ -104,7 +100,7 @@ def testGet_doesNotRetryClientErrors():
         calls["n"] += 1
         return httpx.Response(404)
 
-    with _session(handler) as session:
+    with mockSession(handler) as session:
         with pytest.raises(httpx.HTTPStatusError):
             session.get("https://x/missing")
     assert calls["n"] == 1
@@ -114,7 +110,7 @@ def testGet_transportErrorRaisedAfterRetries():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow")
 
-    with _session(handler, retries=1) as session:
+    with mockSession(handler, retries=1) as session:
         with pytest.raises(httpx.ReadTimeout):
             session.get("https://x/a")
 
@@ -127,7 +123,7 @@ def testThrottle_enforcesMinimumIntervalPerHost():
         slept.append(s)
         clock["t"] += s
 
-    with _session(
+    with mockSession(
         lambda r: httpx.Response(200),
         sleep=sleep,
         clock=lambda: clock["t"],
@@ -141,7 +137,7 @@ def testThrottle_enforcesMinimumIntervalPerHost():
 
 def testDownload_streamsToFileAndReusesCache(tmp_path: Path):
     log: list[httpx.Request] = []
-    with _session(rangeServer({"https://x/big.bin": b"payload"}, log)) as session:
+    with mockSession(rangeServer({"https://x/big.bin": b"payload"}, log)) as session:
         target = tmp_path / "cache" / "big.bin"
         assert session.download("https://x/big.bin", target) == target
         assert target.read_bytes() == b"payload"
@@ -151,7 +147,7 @@ def testDownload_streamsToFileAndReusesCache(tmp_path: Path):
 
 
 def testHead_returnsResponse():
-    with _session(rangeServer({"https://x/f": b"12345"})) as session:
+    with mockSession(rangeServer({"https://x/f": b"12345"})) as session:
         assert session.head("https://x/f").headers["content-length"] == "5"
 
 
@@ -195,15 +191,15 @@ def testSystemCertificates_windowsEnumeratesX509Only(monkeypatch: pytest.MonkeyP
 
 
 def testRangeFile_nonHttpPathIsNotFound():
-    with _session(rangeServer({})) as session:
+    with mockSession(rangeServer({})) as session:
         with pytest.raises(FileNotFoundError):
             session.rasterOpener("test/test")
 
 
 def testRangeFile_404IsNotFoundOtherErrorsPropagate():
-    with _session(rangeServer({})) as session:
+    with mockSession(rangeServer({})) as session:
         with pytest.raises(FileNotFoundError):
             HttpRangeFile(session, "https://x/missing.tif.aux.xml")
-    with _session(lambda r: httpx.Response(403)) as session:
+    with mockSession(lambda r: httpx.Response(403)) as session:
         with pytest.raises(httpx.HTTPStatusError):
             HttpRangeFile(session, "https://x/forbidden.tif")

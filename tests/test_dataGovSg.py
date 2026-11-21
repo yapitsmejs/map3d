@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 import shapely
+from _packSupport import mockSession
 
 from map3d.pack.geoparquet import readGeoParquet
-from map3d.prepare.http import HttpSession
 from map3d.prepare.sources import dataGovSg as dgs
 
 BOUNDS = (103.6, 1.2, 104.1, 1.5)
@@ -134,7 +134,7 @@ def testDownloadDataset_pollsAndCaches(tmp_path: Path):
             )
         return httpx.Response(200, content=b"blk_no,street\n")
 
-    with HttpSession(transport=httpx.MockTransport(handler), sleep=lambda s: None) as session:
+    with mockSession(handler) as session:
         path = dgs.downloadDataset(session, "d_abc", tmp_path / "info.csv", isCsv=True)
         assert path.read_bytes() == b"blk_no,street\n"
         dgs.downloadDataset(session, "d_abc", tmp_path / "info.csv", isCsv=True)
@@ -145,7 +145,7 @@ def testDownloadDataset_givesUpWhenNeverReady(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(201, json={"code": 0, "data": {"status": "PENDING"}})
 
-    with HttpSession(transport=httpx.MockTransport(handler), sleep=lambda s: None) as session:
+    with mockSession(handler) as session:
         with pytest.raises(RuntimeError, match="not ready"):
             dgs.downloadDataset(session, "d_abc", tmp_path / "x.geojson", isCsv=False, maxPolls=3)
 
