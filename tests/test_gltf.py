@@ -196,3 +196,26 @@ def testWriteGlb_onlyInstancedIsAllowed(tmp_path: Path):
     empty = InstancedPart(part.mesh, part.color, np.zeros((0, 3)), np.zeros((0, 3)))
     with pytest.raises(ValueError, match="empty"):
         writeGlb(tmp_path / "e.glb", None, None, None, instanced=[empty])
+
+
+def testWriteGlb_otherFacadesGetTheirOwnTextures(tmp_path: Path):
+    facade = MeshPart(
+        np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0]]),
+        np.array([[0, 1, 2]], dtype=np.uint32),
+        uv=np.zeros((3, 2), dtype=np.float32),
+        colors=np.full((3, 3), 200, dtype=np.uint8),
+    )
+    path = writeGlb(
+        tmp_path / "o.glb",
+        textured=None,
+        texture=None,
+        colored=None,
+        otherFacades=[(facade, _PNG), (facade, _PNG), (MeshPart.empty(withUv=True), _PNG)],
+    )
+    gltf = pygltflib.GLTF2().load_binary(str(path))
+    assert len(gltf.meshes[0].primitives) == 2  # the empty part is skipped
+    assert len(gltf.images) == 2
+    assert all(m.doubleSided for m in gltf.materials)
+    noUv = MeshPart(facade.positions_ENU_m, facade.triangles)
+    with pytest.raises(ValueError, match="facade part needs uv"):
+        writeGlb(tmp_path / "x.glb", None, None, None, otherFacades=[(noUv, _PNG)])

@@ -41,6 +41,8 @@ def release(tmp_path: Path) -> str:
                 "id": "b-in",
                 "height": 42.0,
                 "num_floors": 12,
+                "class": "office",
+                "subtype": "commercial",
                 "is_underground": False,
                 "geometry": shapely.box(103.81, 1.29, 103.811, 1.291),
             },
@@ -66,6 +68,87 @@ def release(tmp_path: Path) -> str:
                 "geometry": shapely.box(104.5, 1.5, 104.51, 1.51),
             },
         ],
+    )
+    _write(
+        base / "theme=buildings" / "type=building_part" / "part-0.parquet",
+        [
+            {
+                "id": f"p-{k}",
+                "building_id": "b-in",
+                "height": 42.0 if k else 60.0,
+                "min_height": 30.0 if k else None,
+                "num_floors": None,
+                "min_floor": None,
+                "roof_shape": "dome" if k else None,
+                "roof_height": 8.0 if k else None,
+                "roof_direction": None,
+                "roof_orientation": None,
+                "facade_color": "#5D7877" if k else None,
+                "roof_color": None,
+                "is_underground": False,
+                "geometry": shapely.box(103.81 + 5e-4 * k, 1.29, 103.8105 + 5e-4 * k, 1.291),
+            }
+            for k in range(2)
+        ]
+        + [
+            {
+                "id": "p-under",
+                "building_id": "b-noattrs",
+                "height": 3.0,
+                "min_height": None,
+                "num_floors": None,
+                "min_floor": None,
+                "roof_shape": None,
+                "roof_height": None,
+                "roof_direction": None,
+                "roof_orientation": None,
+                "is_underground": True,
+                "geometry": shapely.box(103.82, 1.30, 103.821, 1.301),
+            }
+        ],
+    )
+    _write(
+        base / "theme=base" / "type=water" / "part-0.parquet",
+        [
+            {
+                "id": "w-bay",
+                "subtype": "ocean",
+                "class": "ocean",
+                "geometry": shapely.box(103.83, 1.27, 103.85, 1.29),  # crosses the box edge
+            },
+            {
+                "id": "w-pool",
+                "subtype": "human_made",
+                "class": "swimming_pool",
+                "geometry": shapely.box(103.81, 1.30, 103.8101, 1.3001),
+            },
+            {
+                "id": "w-stream",
+                "subtype": "stream",
+                "class": "stream",
+                "geometry": shapely.LineString([(103.81, 1.31), (103.82, 1.31)]),
+            },
+        ],
+    )
+    landUse = [
+        ("u-park", "park", "park", shapely.box(103.811, 1.311, 103.812, 1.312)),
+        ("u-plaza", "pedestrian", "pedestrian", shapely.box(103.813, 1.311, 103.814, 1.312)),
+        ("u-site", "construction", "construction", shapely.box(103.815, 1.311, 103.816, 1.312)),
+        ("u-homes", "residential", "residential", shapely.box(103.817, 1.311, 103.818, 1.312)),
+        ("u-golf", "recreation", "golf_course", shapely.box(103.819, 1.311, 103.82, 1.312)),
+    ]
+    _write(
+        base / "theme=base" / "type=land_use" / "part-0.parquet",
+        [{"id": i, "subtype": s, "class": c, "geometry": g} for i, s, c, g in landUse],
+    )
+    land = [
+        ("l-wood", "forest", "wood", shapely.box(103.811, 1.313, 103.812, 1.314)),
+        ("l-island", "land", "island", shapely.box(103.80, 1.28, 103.84, 1.32)),
+        ("l-beach", "sand", "beach", shapely.box(103.813, 1.313, 103.814, 1.314)),
+    ]
+    _write(
+        base / "theme=base" / "type=land" / "part-0.parquet",
+        [{"id": i, "subtype": s, "class": c, "geometry": g} for i, s, c, g in land],
     )
     line = shapely.LineString([(103.81, 1.30), (103.83, 1.30)])
     flags = lambda values, between=None: [{"values": values, "between": between}]  # noqa: E731
@@ -147,10 +230,43 @@ def testBuildings_canonicalAndFiltered(tmp_path: Path, release: str):
         pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "b.parquet"
     )
     table, geoms = readGeoParquet(out)
-    assert table.column("sourceFeatureId").to_pylist() == ["b-in", "b-noattrs"]
-    assert table.column("height_m").to_pylist() == [42.0, None]
-    assert table.column("numFloors").to_pylist() == [12, None]
-    assert geoms.shape == (2,)
+    # b-in is mapped as parts. Its ground-level part covers only half of it, so
+    # its outline stays as the base below the lowest part (p-1 from 30 m), capped
+    # there; the underground part is dropped.
+    assert table.column("sourceFeatureId").to_pylist() == ["b-in", "b-noattrs", "p-0", "p-1"]
+    assert table.column("height_m").to_pylist() == [30.0, None, 60.0, 42.0]
+    assert table.column("numFloors").to_pylist() == [10, None, None, None]
+    assert table.column("minHeight_m").to_pylist() == [None, None, None, 30.0]
+    assert table.column("roofShape").to_pylist() == [None, None, None, "dome"]
+    assert table.column("roofHeight_m").to_pylist() == [None, None, None, 8.0]
+    assert set(table.column_names) >= {"minFloor", "roofDirection_deg", "roofOrientation"}
+    assert table.column("facadeColor").to_pylist() == [None, None, None, "#5D7877"]
+    assert table.column("roofColor").to_pylist() == [None, None, None, None]
+    # Parts take their building's class.
+    assert table.column("buildingClass").to_pylist() == ["office", None, "office", "office"]
+    assert geoms.shape == (4,)
+
+
+def testBuildings_olderReleaseWithoutPartsOr3dColumns(tmp_path: Path):
+    base = tmp_path / "bucket" / "release" / "2024-01-01.0"
+    _write(
+        base / "theme=buildings" / "type=building" / "part-0.parquet",
+        [
+            {
+                "id": "b-old",
+                "height": 9.0,
+                "num_floors": 3,
+                "is_underground": False,
+                "geometry": shapely.box(103.81, 1.29, 103.811, 1.291),
+            }
+        ],
+    )
+    out = overture.fetchOvertureBuildings(
+        pafs.LocalFileSystem(), str(base.as_posix()), BOUNDS, tmp_path / "b.parquet"
+    )
+    table, _ = readGeoParquet(out)
+    assert table.column("sourceFeatureId").to_pylist() == ["b-old"]
+    assert table.column("roofShape").to_pylist() == [None]
 
 
 def testTransport_splitsFlagsDropsTunnelsAndWater(tmp_path: Path, release: str):
@@ -183,3 +299,91 @@ def testS3FileSystem_passesCaBundle(tmp_path: Path):
     fs = overture.s3FileSystem(bundle)
     assert isinstance(fs, pafs.S3FileSystem)
     assert isinstance(overture.s3FileSystem(None), pafs.S3FileSystem)
+
+
+def testWater_polygonsClippedToTheBoxLinesDropped(tmp_path: Path, release: str):
+    out = overture.fetchOvertureWater(
+        pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "w.parquet"
+    )
+    table, geoms = readGeoParquet(out)
+    assert table.column("sourceFeatureId").to_pylist() == ["w-bay", "w-pool"]
+    assert table.column("landClass").to_pylist() == [80, 80]
+    x0, y0, x1, y1 = shapely.total_bounds(geoms)
+    assert (x0, y0) == pytest.approx((103.81, 1.28)) and (x1, y1) == pytest.approx((103.84, 1.3001))
+
+
+def testLandUse_surfaceClassesOnlyFromLandUseAndLand(tmp_path: Path, release: str):
+    out = overture.fetchOvertureLandUse(
+        pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "u.parquet"
+    )
+    table, _ = readGeoParquet(out)
+    got = dict(
+        zip(
+            table.column("sourceFeatureId").to_pylist(),
+            table.column("landClass").to_pylist(),
+            strict=True,
+        )
+    )
+    # Zoning (residential) and the island outline say nothing about the surface.
+    assert got == {
+        "u-park": 30,
+        "u-plaza": 50,
+        "u-site": 60,
+        "u-golf": 30,
+        "l-wood": 10,
+        "l-beach": 60,
+    }
+
+
+def testBuildings_partsCoveringTheOutlineReplaceIt(tmp_path: Path):
+    base = tmp_path / "bucket" / "release" / "2026-01-01.0"
+    outline = shapely.box(103.81, 1.29, 103.811, 1.291)
+    row = {"is_underground": False, "min_height": None, "class": None, "subtype": None}
+    _write(
+        base / "theme=buildings" / "type=building" / "part-0.parquet",
+        [
+            {
+                **row,
+                "id": "tall",
+                "height": 90.0,
+                "num_floors": 30,
+                "subtype": "residential",
+                "geometry": outline,
+            },
+            {
+                **row,
+                "id": "noHeight",
+                "height": None,
+                "num_floors": None,
+                "geometry": shapely.box(103.812, 1.29, 103.813, 1.291),
+            },
+        ],
+    )
+    _write(
+        base / "theme=buildings" / "type=building_part" / "part-0.parquet",
+        [
+            {
+                "id": "whole",
+                "building_id": "tall",
+                "height": 90.0,
+                "min_height": None,
+                "is_underground": False,
+                "geometry": outline,
+            },
+            {
+                "id": "tower",
+                "building_id": "noHeight",
+                "height": 50.0,
+                "min_height": 20.0,
+                "is_underground": False,
+                "geometry": shapely.box(103.812, 1.29, 103.8125, 1.2905),
+            },
+        ],
+    )
+    out = overture.fetchOvertureBuildings(
+        pafs.LocalFileSystem(), str(base.as_posix()), BOUNDS, tmp_path / "b.parquet"
+    )
+    table, _ = readGeoParquet(out)
+    # Fully covered outlines, and outlines with no height of their own, are replaced.
+    assert table.column("sourceFeatureId").to_pylist() == ["whole", "tower"]
+    assert table.column("buildingClass").to_pylist() == ["residential", None]

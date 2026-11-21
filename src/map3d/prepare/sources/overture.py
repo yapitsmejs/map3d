@@ -4,8 +4,25 @@ Reads the public GeoParquet release on S3 (``overturemaps-us-west-2``) with
 Arrow's own S3 client, pushing a filter on the ``bbox`` struct column down to
 row-group statistics, and writes the canonical pack schemas:
 
-- **buildings:** ``sourceFeatureId``, ``height_m``, ``numFloors``. Underground
-  buildings are excluded.
+- **buildings:** ``sourceFeatureId``, ``height_m``, ``numFloors``, plus the
+  optional 3D columns ``minHeight_m``, ``minFloor``, ``roofShape``,
+  ``roofHeight_m``, ``roofDirection_deg``, ``roofOrientation``, ``facadeColor``,
+  ``roofColor``, ``facadeMaterial`` and ``roofMaterial`` (OSM Simple 3D
+  Buildings tags), and ``buildingClass`` (Overture ``class``, else
+  ``subtype``; parts take their building's). Where a building is mapped as
+  **building parts** (``building_part`` rows), the parts replace its outline,
+  as Simple 3D Buildings renderers do, unless the parts leave the outline's
+  base unmapped: mappers often let a building's own height describe its
+  podium and map only the tower above it as a part (``min_height`` = the
+  podium height). Such an outline (with its own height or floor count, less
+  than 90 % covered by ground-level parts) is kept as the base, no taller than
+  the lowest part (the lowest ``min_height`` of a raised part, or the top of a
+  ground-level one). Underground buildings and parts are excluded.
+- **water:** polygonal water (ocean, reservoirs, rivers, ponds, pools) clipped
+  to the box, as land-cover polygons of class water (``landClass`` 80).
+- **land use:** surface-like ``land_use`` (parks, grass, plazas, construction
+  sites, farmland) and natural ``land`` (woods, scrub, grass, wetland, sand)
+  areas as land-cover polygons with WorldCover classes.
 - **transport:** ``sourceFeatureId``, ``kind`` (road/rail/footway), ``isBridge``,
   ``level``, ``width_m``. Overture's linear-referenced rules (``between``
   fractions along the segment) are honoured by splitting segments at rule
@@ -16,10 +33,12 @@ row-group statistics, and writes the canonical pack schemas:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.fs as pafs
@@ -32,7 +51,9 @@ from map3d.pack.manifest import Bounds
 __all__ = [
     "BUCKET",
     "fetchOvertureBuildings",
+    "fetchOvertureLandUse",
     "fetchOvertureTransport",
+    "fetchOvertureWater",
     "latestRelease",
     "s3FileSystem",
 ]
@@ -69,7 +90,7 @@ def latestRelease(fs: pafs.FileSystem, bucket: str = BUCKET) -> str:
 def fetchOvertureBuildings(
     fs: pafs.FileSystem, releaseBase: str, bounds: Bounds, outPath: Path
 ) -> Path:
-    """Extract buildings intersecting ``bounds`` into canonical GeoParquet.
+    """Extract buildings (and building parts) intersecting ``bounds`` into canonical GeoParquet.
 
     Args:
         fs: Filesystem holding the release.
@@ -80,24 +101,277 @@ def fetchOvertureBuildings(
     Returns:
         ``outPath``.
     """
-    dataset = ds.dataset(
-        f"{releaseBase}/theme=buildings/type=building", filesystem=fs, format="parquet"
+    buildings = _readBuildingType(
+        fs, f"{releaseBase}/theme=buildings/type=building", bounds, ["class", "subtype"]
     )
+    parts = _readBuildingType(
+        fs, f"{releaseBase}/theme=buildings/type=building_part", bounds, ["building_id"]
+    )
+    classes = {
+        str(i): c or s
+        for i, c, s in zip(buildings["id"], buildings["class"], buildings["subtype"], strict=True)
+    }
+    ownParts: dict[str, list[int]] = {}
+    for k, parent in enumerate(parts["building_id"]):
+        ownParts.setdefault(str(parent), []).append(k)
+    geoms: list[Any] = []
+    cols: dict[str, list[Any]] = {name: [] for name in [*_CANONICAL.values(), "buildingClass"]}
+
+    def emit(table: dict[str, list[Any]], k: int, buildingClass: Any, **override: Any) -> None:
+        geoms.append(table["geometry"][k])
+        for raw, name in _CANONICAL.items():
+            cols[name].append(override.get(raw, table[raw][k]))
+        cols["buildingClass"].append(buildingClass)
+
+    for k, ident in enumerate(buildings["id"]):
+        own = ownParts.get(str(ident))
+        if own is None:
+            emit(buildings, k, classes[str(ident)])
+            continue
+        podium = _podium(buildings, k, parts, own)
+        if podium is not None:
+            emit(buildings, k, classes[str(ident)], **podium)
+    for k, parent in enumerate(parts["building_id"]):
+        emit(parts, k, classes.get(str(parent)))
+    writeGeoParquet(outPath, np.array(geoms, dtype=object), cols)
+    return outPath
+
+
+_PODIUM_COVERED = 0.9  # outlines this covered by ground-level parts are fully replaced
+
+
+def _partTop(table: dict[str, list[Any]], k: int) -> float | None:
+    height, floors = table["height"][k], table["num_floors"][k]
+    if height is not None:
+        return float(height)
+    return None if floors is None else 3.0 * float(floors)
+
+
+def _partBottom(table: dict[str, list[Any]], k: int) -> float:
+    minHeight, minFloor = table["min_height"][k], table["min_floor"][k]
+    if minHeight is not None and minHeight > 0:
+        return float(minHeight)
+    return 0.0 if not minFloor else 3.0 * float(minFloor)
+
+
+def _podium(
+    buildings: dict[str, list[Any]], k: int, parts: dict[str, list[Any]], own: list[int]
+) -> dict[str, Any] | None:
+    """Overrides that keep a parted building's outline as its base, or ``None`` to drop it."""
+    top = _partTop(buildings, k)
+    if top is None:
+        return None
+    outline = buildings["geometry"][k]
+    grounded = [j for j in own if _partBottom(parts, j) <= 0.0]
+    if grounded:
+        cover = shapely.union_all([parts["geometry"][j] for j in grounded])
+        covered = shapely.area(shapely.intersection(outline, cover)) / max(
+            shapely.area(outline), 1e-30
+        )
+        if covered >= _PODIUM_COVERED:
+            return None
+    levels = [_partBottom(parts, j) or _partTop(parts, j) for j in own]
+    cap = min((v for v in levels if v), default=None)
+    if cap is None or top <= cap + 0.5:
+        return {}
+    floors = buildings["num_floors"][k]
+    return {
+        "height": cap,
+        "num_floors": None if floors is None else min(int(floors), max(1, round(cap / 3.0))),
+        "roof_shape": None,
+        "roof_height": None,
+    }
+
+
+# Overture attribute -> canonical pack column.
+_CANONICAL = {
+    "id": "sourceFeatureId",
+    "height": "height_m",
+    "num_floors": "numFloors",
+    "min_height": "minHeight_m",
+    "min_floor": "minFloor",
+    "roof_shape": "roofShape",
+    "roof_height": "roofHeight_m",
+    "roof_direction": "roofDirection_deg",
+    "roof_orientation": "roofOrientation",
+    "facade_color": "facadeColor",
+    "roof_color": "roofColor",
+    "facade_material": "facadeMaterial",
+    "roof_material": "roofMaterial",
+}
+_FLOAT_ATTRS = ("height", "min_height", "roof_height", "roof_direction")
+
+
+def _readBuildingType(
+    fs: pafs.FileSystem, path: str, bounds: Bounds, extra: list[str]
+) -> dict[str, list[Any]]:
+    """Rows of one building type intersecting ``bounds``, as columns (missing columns are null)."""
+    names = [*_CANONICAL, *extra]
+    empty: dict[str, list[Any]] = {name: [] for name in [*names, "geometry"]}
+    if fs.get_file_info(path).type == pafs.FileType.NotFound:
+        return empty
+    dataset = ds.dataset(path, filesystem=fs, format="parquet")
+    present = [n for n in names if n in dataset.schema.names]
     underground = pc.field("is_underground")
     table = dataset.to_table(
-        columns=["id", "height", "num_floors", "geometry"],
+        columns=[*present, "geometry"],
         filter=_bboxFilter(bounds) & (underground.is_null() | (underground == False)),  # noqa: E712
     )
     geoms = shapely.from_wkb(table.column("geometry").to_numpy(zero_copy_only=False))
     keep = shapely.intersects(geoms, shapely.box(*bounds))
     table = table.filter(keep)
+    out: dict[str, list[Any]] = {"geometry": list(geoms[keep])}
+    for name in names:
+        if name not in present:
+            out[name] = [None] * table.num_rows
+        elif name in _FLOAT_ATTRS:
+            out[name] = table.column(name).cast("float64").to_pylist()
+        else:
+            out[name] = table.column(name).to_pylist()
+    return out
+
+
+def fetchOvertureWater(
+    fs: pafs.FileSystem, releaseBase: str, bounds: Bounds, outPath: Path
+) -> Path:
+    """Extract polygonal water intersecting ``bounds`` as land-cover polygons.
+
+    Args:
+        fs: Filesystem holding the release.
+        releaseBase: ``<bucket>/release/<version>``.
+        bounds: ``(minLon, minLat, maxLon, maxLat)``.
+        outPath: Output GeoParquet path.
+
+    Returns:
+        ``outPath``.
+    """
+    polygons = _coverPolygons(
+        fs, f"{releaseBase}/theme=base/type=water", bounds, lambda subtype, cls: WATER_CLASS
+    )
+    return _writeCoverPolygons(outPath, [polygons])
+
+
+def fetchOvertureLandUse(
+    fs: pafs.FileSystem, releaseBase: str, bounds: Bounds, outPath: Path
+) -> Path:
+    """Extract surface-like land use and natural land cover as land-cover polygons.
+
+    Overture ``land_use`` areas that describe a surface (parks, managed grass,
+    pitches, cemeteries: grass; pedestrian plazas: built-up; construction
+    sites: bare; farmland: cropland) and ``land`` areas (woods, scrub, grass,
+    wetland, sand, rock), clipped to the box. Zoning-like land use
+    (residential, commercial, ...) is skipped: it says nothing about the
+    surface.
+
+    Args:
+        fs: Filesystem holding the release.
+        releaseBase: ``<bucket>/release/<version>``.
+        bounds: ``(minLon, minLat, maxLon, maxLat)``.
+        outPath: Output GeoParquet path.
+
+    Returns:
+        ``outPath``.
+    """
+    landUse = _coverPolygons(fs, f"{releaseBase}/theme=base/type=land_use", bounds, _landUseClass)
+    land = _coverPolygons(fs, f"{releaseBase}/theme=base/type=land", bounds, _landClass)
+    return _writeCoverPolygons(outPath, [landUse, land])
+
+
+WATER_CLASS = 80  # WorldCover "permanent water bodies"
+# Overture land_use class (else subtype) -> WorldCover code.
+_LAND_USE_CLASSES = {
+    **dict.fromkeys(
+        (
+            "park",
+            "garden",
+            "grass",
+            "village_green",
+            "meadow",
+            "pitch",
+            "golf_course",
+            "recreation_ground",
+            "cemetery",
+            "grave_yard",
+            "dog_park",
+        ),
+        30,
+    ),
+    **dict.fromkeys(("pedestrian", "plaza"), 50),
+    **dict.fromkeys(("construction", "brownfield", "landfill", "quarry"), 60),
+    **dict.fromkeys(("farmland", "allotments", "orchard", "plant_nursery"), 40),
+}
+# Overture land subtype -> WorldCover code ("land" itself, islands etc. are skipped).
+_LAND_SUBTYPES = {
+    "forest": 10,
+    "shrub": 20,
+    "grass": 30,
+    "wetland": 90,
+    "sand": 60,
+    "rock": 60,
+    "glacier": 70,
+}
+
+
+def _landUseClass(subtype: str | None, cls: str | None) -> int | None:
+    return _LAND_USE_CLASSES.get(cls or "", _LAND_USE_CLASSES.get(subtype or ""))
+
+
+def _landClass(subtype: str | None, cls: str | None) -> int | None:
+    return _LAND_SUBTYPES.get(subtype or "")
+
+
+_CoverPolygons = tuple[npt.NDArray[np.object_], list[str], list[int]]
+
+
+def _coverPolygons(
+    fs: pafs.FileSystem,
+    path: str,
+    bounds: Bounds,
+    classify: Callable[[str | None, str | None], int | None],
+) -> _CoverPolygons:
+    """Polygons of an Overture base type, clipped to ``bounds``, with a land class each.
+
+    ``classify(subtype, class)`` returns a WorldCover code, or ``None`` to skip.
+
+    Returns:
+        ``(polygons, source feature ids, class codes)``.
+    """
+    dataset = ds.dataset(path, filesystem=fs, format="parquet")
+    table = dataset.to_table(
+        columns=["id", "subtype", "class", "geometry"], filter=_bboxFilter(bounds)
+    )
+    geoms = shapely.from_wkb(table.column("geometry").to_numpy(zero_copy_only=False))
+    box = shapely.box(*bounds)
+    codes = [
+        classify(s, c)
+        for s, c in zip(
+            table.column("subtype").to_pylist(), table.column("class").to_pylist(), strict=True
+        )
+    ]
+    polygonal = np.isin(shapely.get_type_id(geoms), (3, 6, 7))  # (multi)polygons, collections
+    keep = polygonal & np.array([c is not None for c in codes], dtype=bool)
+    keep &= shapely.intersects(geoms, box)
+    idx = np.flatnonzero(keep)
+    clipped = shapely.intersection(shapely.make_valid(geoms[idx]), box)
+    # Clipping can leave lines or collections: keep the polygon parts.
+    parts, owner = shapely.get_parts(clipped, return_index=True)
+    poly = (shapely.get_type_id(parts) == 3) & (shapely.area(parts) > 0)
+    parts, src = parts[poly], idx[owner[poly]]
+    ids = table.column("id").to_pylist()
+    return (
+        np.asarray(parts, dtype=object),
+        [ids[i] for i in src],
+        [int(codes[i] or 0) for i in src],
+    )
+
+
+def _writeCoverPolygons(outPath: Path, groups: list[_CoverPolygons]) -> Path:
     writeGeoParquet(
         outPath,
-        geoms[keep],
+        np.concatenate([g[0] for g in groups]),
         {
-            "sourceFeatureId": table.column("id").to_pylist(),
-            "height_m": table.column("height").cast("float64").to_pylist(),
-            "numFloors": table.column("num_floors").to_pylist(),
+            "sourceFeatureId": [i for g in groups for i in g[1]],
+            "landClass": [c for g in groups for c in g[2]],
         },
     )
     return outPath

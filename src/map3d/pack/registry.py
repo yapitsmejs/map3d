@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 __all__ = [
+    "BUILDING_3D_COLUMNS",
     "ROLES",
     "SOURCES",
     "DataKind",
@@ -31,6 +32,22 @@ __all__ = [
 ]
 
 DataKind = Literal["raster", "vector"]
+# Optional building columns: bottom of a raised part (height above ground, or
+# floors skipped), roof shape / height / facing bearing / ridge orientation,
+# mapped facade / roof colours (``#RRGGBB`` or a colour name) and materials.
+BUILDING_3D_COLUMNS = (
+    "minHeight_m",
+    "minFloor",
+    "roofShape",
+    "roofHeight_m",
+    "roofDirection_deg",
+    "roofOrientation",
+    "facadeColor",
+    "roofColor",
+    "facadeMaterial",
+    "roofMaterial",
+    "buildingClass",
+)
 VerticalReference = Literal["EGM2008", "WGS84", "aboveGround"]
 
 
@@ -43,12 +60,15 @@ class RoleSpec:
         kind: ``"raster"`` or ``"vector"``.
         required: Whether a scene cannot be built without it.
         requiredColumns: Canonical attribute columns (vector roles only).
+        optionalColumns: Canonical columns a source may add; layer code uses
+            them when present.
     """
 
     role: str
     kind: DataKind
     required: bool
     requiredColumns: tuple[str, ...] = ()
+    optionalColumns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,8 +103,15 @@ ROLES: dict[str, RoleSpec] = {
     for spec in (
         RoleSpec("ground", "raster", True),  # bare-earth terrain height
         RoleSpec("geoid", "raster", True),  # geoid undulation grid (EGM2008)
-        # footprints with optional height (m) / floor count
-        RoleSpec("buildings", "vector", False, ("sourceFeatureId", "height_m", "numFloors")),
+        # footprints (or building parts) with optional height (m) / floor count,
+        # plus optional OSM Simple 3D Buildings attributes (SPEC section 8)
+        RoleSpec(
+            "buildings",
+            "vector",
+            False,
+            ("sourceFeatureId", "height_m", "numFloors"),
+            BUILDING_3D_COLUMNS,
+        ),
         RoleSpec("buildingHeightRaster", "raster", False),  # building height above ground
         RoleSpec("canopyHeight", "raster", False),  # vegetation canopy height above ground
         RoleSpec("landCover", "raster", False),  # land-cover class (ESA WorldCover codes)
@@ -99,6 +126,9 @@ ROLES: dict[str, RoleSpec] = {
         # flyover/bridge/viaduct footprints (location only; no deck heights)
         RoleSpec("elevatedStructures", "vector", False, ("sourceFeatureId", "structureType")),
         RoleSpec("imagery", "raster", False),  # RGB imagery for the mesh drape
+        # crisp land-cover polygons (water, parks, ...) with a WorldCover class code,
+        # drawn over the land-cover raster
+        RoleSpec("landCoverPolygons", "vector", False, ("sourceFeatureId", "landClass")),
     )
 }
 
@@ -245,6 +275,25 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         10.0,
     ),
     _synthetic("syntheticLandCover", "landCover", "raster", "land cover", 5.0),
+    # --- land-cover polygons (priority order: drawn last wins) ---
+    SourceSpec(
+        "overtureWater",
+        "landCoverPolygons",
+        "vector",
+        "Overture Maps base water (oceans, reservoirs, rivers, ponds, pools)",
+        "ODbL 1.0",
+        "© Overture Maps Foundation, ODbL (OpenStreetMap contributors)",
+        0.0,
+    ),
+    SourceSpec(
+        "overtureLandUse",
+        "landCoverPolygons",
+        "vector",
+        "Overture Maps base land use and land (parks, grass, plazas, woods, ...)",
+        "ODbL 1.0",
+        "© Overture Maps Foundation, ODbL (OpenStreetMap contributors)",
+        0.0,
+    ),
     # --- transport ---
     SourceSpec(
         "overtureTransportation",

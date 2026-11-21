@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import shutil
+
 import numpy as np
 import pytest
+import shapely
 from _support import decodePng, sceneOver
 
 from map3d.mesh import scenery
-from map3d.mesh.buildingAppearance import BuildingAppearance
+from map3d.mesh.buildingAppearance import BuildingAppearance, FacadeStyle
+from map3d.pack.geoparquet import writeGeoParquet
+from map3d.pack.ingest import ingestFiles
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
-from map3d.scene import Scene
+from map3d.request import SceneRequest
+from map3d.scene import Scene, buildScene
 
 
 @pytest.fixture(scope="module")
@@ -234,3 +240,278 @@ def testDecks_slabClippedToTileKeepsUVsInRange(scene: Scene):
     farAway = scenery.TileExtent(-500.0, -480.0, -500.0, -480.0)
     tops2, sides2 = scenery.deckParts(scene, np.array([0]), farAway)
     assert tops2.isEmpty and sides2.isEmpty
+
+
+@pytest.fixture(scope="module")
+def shaped(plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory) -> Scene:
+    """A domed hall, a gabled house and a raised walkway on the synthetic plane."""
+    tmp = tmp_path_factory.mktemp("shaped")
+    pack = tmp / "shaped.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def lonLat(poly: shapely.Polygon) -> shapely.Polygon:
+        e, n = shapely.get_coordinates(poly.exterior).T
+        lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    geoms = [
+        lonLat(shapely.Point(-300.0, 360.0).buffer(20.0, quad_segs=16)),
+        lonLat(shapely.box(-250.0, 340.0, -230.0, 350.0)),
+        lonLat(shapely.box(-380.0, 300.0, -340.0, 304.0)),
+    ]
+    writeGeoParquet(
+        tmp / "o.parquet",
+        np.array(geoms, dtype=object),
+        {
+            "sourceFeatureId": ["hall", "house", "walkway"],
+            "height_m": [30.0, 8.0, 15.0],
+            "numFloors": [None, None, None],
+            "minHeight_m": [None, None, 12.0],
+            "roofShape": ["dome", "gabled", None],
+            "roofHeight_m": [None, 3.0, None],
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp / "o.parquet"])
+    axes = np.eye(3)
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    return buildScene(SceneRequest(centre, 5.0, axes, 1000.0, 1000.0), pack)
+
+
+def _index(scene: Scene, featureId: str) -> int:
+    return list(scene.models.buildings.sourceFeatureIds).index(featureId)
+
+
+def _ellToUp(scene: Scene, i: int, orthometric: float) -> float:
+    b = scene.models.buildings
+    c = shapely.centroid(b.geometries[i])
+    lon, lat = float(shapely.get_x(c)), float(shapely.get_y(c))
+    und = float(scene.models.ground.undulation_m(np.array([lat]), np.array([lon]))[0])
+    return float(scene.geometry.frame.geodeticToEnu(lat, lon, orthometric + und)[2])
+
+
+def testShapedRoof_domeIsSmoothAndReachesTheTop(shaped: Scene):
+    i = _index(shaped, "hall")
+    b = shaped.models.buildings
+    roofs, walls = scenery.buildingParts(shaped, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    top = roofs.positions_ENU_m[:, 2].max()
+    assert top == pytest.approx(_ellToUp(shaped, i, b.roofOrthometric_m[i]), abs=0.05)
+    # Shared vertices (smooth shading): far fewer vertices than triangle corners.
+    assert roofs.positions_ENU_m.shape[0] < roofs.triangles.shape[0]
+    p = roofs.positions_ENU_m[roofs.triangles]
+    assert (np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])[:, 2] > 0).all()
+    # Walls stop at the eaves; the dome sits on them.
+    eave = _ellToUp(shaped, i, b.eaveOrthometric_m[i])
+    assert walls.positions_ENU_m[:, 2].max() == pytest.approx(eave, abs=0.05)
+
+
+def testShapedRoof_gableWallsRiseToTheRidge(shaped: Scene):
+    i = _index(shaped, "house")
+    b = shaped.models.buildings
+    roofs, walls = scenery.buildingParts(shaped, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    ridge = _ellToUp(shaped, i, b.roofOrthometric_m[i])
+    assert roofs.positions_ENU_m[:, 2].max() == pytest.approx(ridge, abs=0.02)
+    assert walls.positions_ENU_m[:, 2].max() == pytest.approx(ridge, abs=0.02)
+    # Faceted: every triangle keeps its own corners (sharp ridge).
+    assert roofs.positions_ENU_m.shape[0] == 3 * roofs.triangles.shape[0]
+    assert walls.uv is not None and np.isfinite(walls.uv).all()
+
+
+def testRaisedPart_hasAnUndersideAndWallsFromItsMinHeight(shaped: Scene):
+    i = _index(shaped, "walkway")
+    b = shaped.models.buildings
+    roofs, walls = scenery.buildingParts(shaped, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    bottom = _ellToUp(shaped, i, b.bottomOrthometric_m[i])
+    assert walls.positions_ENU_m[:, 2].min() == pytest.approx(bottom, abs=0.02)
+    p = roofs.positions_ENU_m[roofs.triangles]
+    nz = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])[:, 2]
+    assert (nz > 0).sum() == (nz < 0).sum() == 2  # a roof and an underside
+    assert p[nz < 0][..., 2].max() == pytest.approx(bottom, abs=0.02)
+
+
+def testTexture_mappedWaterIsCrispAndUnmappedRasterWaterIsNot(
+    plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory
+):
+    tmp = tmp_path_factory.mktemp("water")
+    pack = tmp / "water.pack"
+    shutil.copytree(plane.packDir, pack)
+    e, n = shapely.get_coordinates(shapely.Point(100.0, 100.0).buffer(30.0).exterior).T
+    lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+    writeGeoParquet(
+        tmp / "w.parquet",
+        np.array([shapely.Polygon(np.column_stack([lon, lat]))], dtype=object),
+        {"sourceFeatureId": ["pond"], "landClass": [80]},
+    )
+    ingestFiles(pack, "overtureWater", [tmp / "w.parquet"])
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    scene = buildScene(SceneRequest(centre, 5.0, np.eye(3), 1000.0, 1000.0), pack)
+    size = 500  # 2 m pixels
+    rgb = decodePng(
+        scenery.renderTexture(scene, FULL, BuildingAppearance.neutral(scene.models.buildings), size)
+    )
+
+    def pixel(e_m: float, n_m: float) -> np.ndarray:
+        gx, gy = scene.geometry.enuToGrid(np.array(e_m), np.array(n_m))
+        return rgb[int((FULL.y1 - gy) / 1000.0 * size), int((gx - FULL.x0) / 1000.0 * size)]
+
+    water, grass = scenery.CONCEPT_COLORS["water"], scenery.CONCEPT_COLORS["grass"]
+    np.testing.assert_array_equal(pixel(100.0, 100.0), water)
+    np.testing.assert_array_equal(pixel(100.0, 128.0), water)  # 2 m inside the edge
+    np.testing.assert_array_equal(pixel(100.0, 133.0), grass)  # 3 m outside: no blur
+    assert not np.array_equal(pixel(0.0, 450.0), water)  # raster water without a polygon
+    assert "overtureWater" in {s["sourceId"] for s in scene.metadata["sources"]}  # attributed
+
+
+def testLoft_supertreeStackIsOneSmoothSurfaceWithACap(
+    plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory
+):
+    tmp = tmp_path_factory.mktemp("loft")
+    pack = tmp / "loft.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def disc(r: float) -> shapely.Polygon:
+        e, n = shapely.get_coordinates(shapely.Point(-300.0, 360.0).buffer(r).exterior).T
+        lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    writeGeoParquet(
+        tmp / "o.parquet",
+        np.array([disc(3.0), disc(5.0), disc(7.0)], dtype=object),
+        {
+            "sourceFeatureId": ["trunk", "ring1", "ring2"],
+            "height_m": [30.0, 33.0, 41.0],
+            "numFloors": [None, None, None],
+            "minHeight_m": [None, 30.0, 36.0],
+            "facadeColor": ["#76C82E"] * 3,
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp / "o.parquet"])
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    scene = buildScene(SceneRequest(centre, 5.0, np.eye(3), 1000.0, 1000.0), pack)
+    b = scene.models.buildings
+    ids = list(b.sourceFeatureIds)
+    trunk, ring1, ring2 = (ids.index(k) for k in ("trunk", "ring1", "ring2"))
+    assert [loft.members for loft in b.lofts] == [(trunk, ring1, ring2)]
+    appearance = BuildingAppearance.fromScene(scene)
+    assert appearance.facadeStyles is not None
+    assert set(appearance.facadeStyles[[trunk, ring1, ring2]]) == {FacadeStyle.LATTICE}
+    caps, side = scenery.buildingParts(scene, np.array([trunk, ring1, ring2]), FULL, appearance)
+    # One loft: 4 profile rings x 37 ring vertices, shared (smooth); a fan cap on top.
+    assert side.positions_ENU_m.shape[0] == 4 * 37
+    assert side.triangles.shape[0] == 2 * 3 * 36
+    assert caps.triangles.shape[0] == 36
+    top = _ellToUp(scene, ring2, b.roofOrthometric_m[ring2])
+    assert caps.positions_ENU_m[:, 2].max() == pytest.approx(top, abs=0.05)
+    # Only the bottom part draws the loft; the rings alone draw nothing.
+    alone = scenery.buildingParts(scene, np.array([ring1, ring2]), FULL, appearance)
+    assert alone[0].isEmpty and alone[1].isEmpty
+
+
+@pytest.fixture(scope="module")
+def towers(plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory) -> Scene:
+    """A round tower and a square block of 12 mapped storeys on the synthetic plane."""
+    tmp = tmp_path_factory.mktemp("towers")
+    pack = tmp / "towers.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def lonLat(poly: shapely.Polygon) -> shapely.Polygon:
+        e, n = shapely.get_coordinates(poly.exterior).T
+        lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    writeGeoParquet(
+        tmp / "o.parquet",
+        np.array(
+            [
+                lonLat(shapely.Point(-300.0, 300.0).buffer(15.0, quad_segs=12)),
+                lonLat(shapely.box(-250.0, 300.0, -230.0, 320.0)),
+            ],
+            dtype=object,
+        ),
+        {
+            "sourceFeatureId": ["round", "block"],
+            "height_m": [60.0, 30.0],
+            "numFloors": [None, 12],
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp / "o.parquet"])
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    return buildScene(SceneRequest(centre, 5.0, np.eye(3), 1000.0, 1000.0), pack)
+
+
+def testWalls_roundTowerShadesSmoothlyWithContinuousBays(towers: Scene):
+    i = _index(towers, "round")
+    _, walls = scenery.buildingParts(
+        towers, np.array([i]), FULL, BuildingAppearance.neutral(towers.models.buildings)
+    )
+    segments = 48  # quad_segs=12 -> 48 outline segments
+    assert walls.triangles.shape[0] == 2 * segments
+    # One run round the whole tower: 49 columns of shared bottom/top vertices.
+    assert walls.positions_ENU_m.shape[0] == 2 * (segments + 1)
+    u = walls.uv[: segments + 1, 0]
+    assert np.all(np.diff(u) > 0) and u[-1] == pytest.approx(round(2 * np.pi * 15.0 / 3.0), abs=1)
+
+
+def testWalls_floorBandsFollowMappedStoreys(towers: Scene):
+    b = towers.models.buildings
+    i = _index(towers, "block")
+    _, walls = scenery.buildingParts(towers, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    assert b.floorHeight_m[i] == pytest.approx(2.5)
+    # Square corners stay sharp: 4 runs of 2 columns each.
+    assert walls.positions_ENU_m.shape[0] == 4 * 2 * 2
+    wallHeight = b.roofOrthometric_m[i] - b.baseOrthometric_m[i]
+    assert walls.uv[:, 1].max() == pytest.approx(wallHeight / 2.5, rel=1e-4)
+    unmapped = _index(towers, "round")
+    assert np.isnan(b.floorHeight_m[unmapped])
+
+
+def testWheelAndTrunklessLoft_meshes(
+    plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory
+):
+    tmp = tmp_path_factory.mktemp("wheel")
+    pack = tmp / "wheel.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def lonLat(poly: shapely.Polygon) -> shapely.Polygon:
+        e, n = shapely.get_coordinates(poly.exterior).T
+        lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    radius, hub = 60.0, 75.0
+    s = np.linspace(-55.0, 55.0, 12)
+    half = np.sqrt(radius**2 - s**2)
+    spans = [lonLat(shapely.box(x - 4.0, 297.5, x + 4.0, 302.5)) for x in s]
+    rings = [lonLat(shapely.Point(-300.0, 380.0).buffer(r)) for r in (5.0, 7.0)]
+    writeGeoParquet(
+        tmp / "o.parquet",
+        np.array(spans + rings, dtype=object),
+        {
+            "sourceFeatureId": [f"span{k}" for k in range(12)] + ["ring1", "ring2"],
+            "height_m": [*(hub + half).tolist(), 33.0, 41.0],
+            "numFloors": [None] * 14,
+            "minHeight_m": [*(hub - half).tolist(), 30.0, 36.0],
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp / "o.parquet"])
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    scene = buildScene(SceneRequest(centre, 5.0, np.eye(3), 1000.0, 1000.0), pack)
+    b = scene.models.buildings
+    appearance = BuildingAppearance.fromScene(scene)
+    ids = list(b.sourceFeatureIds)
+    spanIdx = np.array([ids.index(f"span{k}") for k in range(12)])
+    assert len(b.wheels) == 1 and set(b.wheels[0].members) == set(spanIdx.tolist())
+    assert set(appearance.facadeStyles[spanIdx]) == {FacadeStyle.PLAIN}
+    assert all(b.minHeight_m[i] > 0 for i in spanIdx)  # spans are not grounded
+    roofs, walls = scenery.buildingParts(scene, spanIdx, FULL, appearance)
+    assert roofs.isEmpty and walls.triangles.shape[0] > 0
+    up = walls.positions_ENU_m[:, 2]
+    wheel = b.wheels[0]
+    assert wheel.radius_m == pytest.approx(radius, rel=0.01)
+    hubUp = _ellToUp(scene, int(spanIdx[0]), wheel.hubHeight_m)
+    assert up.max() == pytest.approx(hubUp + radius + 2.5 + 1.8, abs=0.5)  # capsule tops
+    assert np.allclose(walls.uv, 0.5)  # untextured: blank panel
+    # Two rings with no trunk mapped stand on a trunk from the ground.
+    r1, r2 = ids.index("ring1"), ids.index("ring2")
+    assert [loft.members for loft in b.lofts] == [(r1, r2)]
+    _, side = scenery.buildingParts(scene, np.array([r1, r2]), FULL, appearance)
+    base = _ellToUp(scene, r1, b.baseOrthometric_m[r1])
+    assert side.positions_ENU_m[:, 2].min() == pytest.approx(base, abs=0.05)

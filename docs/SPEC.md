@@ -139,9 +139,9 @@ node's cell footprint (cell-max):
 |---|---|---|---|
 | `groundHeight_datum_m` / `groundHeight_ENU_m` | (Ny, Nx) | f4 | Bare-earth ground. |
 | `surfaceHeight_datum_m` / `surfaceHeight_ENU_m` | (Ny, Nx) | f4 | Top surface, i.e. the cell-max DSM over terrain, buildings, canopy and decks. Canopy never wins a node a road layer owns (§6.4). |
-| `buildingHeight_m` | (Ny, Nx) | f4 | Building height above ground (NaN where there is no building). |
+| `buildingHeight_m` | (Ny, Nx) | f4 | Height of the top-most building surface above ground (NaN where there is no building). Follows mapped roof shapes. |
 | `canopyHeight_m` | (Ny, Nx) | f4 | Vegetation canopy height above ground (NaN/0 where there is none). |
-| `deckTopHeight_datum_m` / `deckTopHeight_ENU_m` | (K, Ny, Nx) | f4 | Top of elevated structure level k (k = 0 is the lowest). |
+| `deckTopHeight_datum_m` / `deckTopHeight_ENU_m` | (K, Ny, Nx) | f4 | Top of elevated structure level k (k = 0 is the lowest): decks, and raised building parts with open space beneath (e.g. a cantilevered sky park). |
 | `deckBottomHeight_datum_m` / `deckBottomHeight_ENU_m` | (K, Ny, Nx) | f4 | Underside of level k. Clearance below level k = bottom[k] − top[k−1] (or − ground when k = 0). |
 | `landClass` | (Ny, Nx) | u1 | Class of the top-most visible surface (§6.4). |
 | `featureId` | (Ny, Nx) | i8 | ID of the top-most feature (building/deck); 0 = none. Indexes the `features` table. |
@@ -194,6 +194,19 @@ and trees over them draw as objects, not as the surface.
 
 - **Land cover:** sampled nearest-pixel at the node footprint. Impact
   Observatory codes are remapped to WorldCover codes.
+- **Land-cover polygons** (role `landCoverPolygons`): mapped polygons with a
+  WorldCover class, burned crisply (cell centres) over the raster, lowest
+  priority source first and larger polygons before smaller ones.
+  `overtureWater` (Overture base water: ocean, reservoirs, rivers, canals,
+  ponds, pools; class 80) maps water completely, so raster water pixels with
+  no water polygon (the raster's coarse shoreline) become built-up (50).
+  `overtureLandUse` (below water) adds surface-like Overture `land_use` (parks,
+  managed grass, pitches, golf courses, cemeteries: grass 30; pedestrian
+  plazas: built-up 50; construction sites: bare 60; farmland: cropland 40) and
+  natural `land` (woods 10, scrub 20, grass 30, wetland 90, sand and rock 60);
+  zoning-like land use (residential, commercial, ...) is skipped. Grass
+  polygons leave raster tree cover in place, so a park's wooded parts stay
+  trees.
 - **Roads/rails (including bridges):** every road/rail corridor burns its
   class with its width (defaults shared with deck footprints: road 8 m, rail
   8 m), cell centres only, so the corridor class, the canopy carve and the
@@ -214,7 +227,8 @@ and trees over them draw as objects, not as the surface.
   - **Terrain:** adaptive triangulation (e.g. RTIN) of the ground model, with
     an error tolerance, so mesh density is independent of `gridSpacing_m`.
   - **Buildings:** best available geometry. LOD1 (footprint extruded to a flat
-    roof) by default, and LOD2 roof shapes where open data provides them.
+    roof) by default, and LOD2 roof shapes, building parts and raised parts
+    where open data provides them (§8).
   - **Elevated structures:** true 3D decks (road/rail centerline swept to
     width, with thickness) with open space underneath. Every level is
     included, not just `K`.
@@ -223,14 +237,51 @@ and trees over them draw as objects, not as the surface.
   map-like look in the spirit of geosg.app.
   - **Land cover:** WorldCover, sampled bilinearly so its 10 m cells blend
     softly. Grass is pale green, built-up land warm light grey, water blue.
+    Land-cover polygons (mapped water, parks, plazas, ...) are burned into each tile's texture at
+    its own resolution, so shorelines are crisp at any grid spacing.
   - **Crisp overlays from the grid:** grey roads, rail and decks, and a soft
     green on the ground under canopy ≥ 2 m (not on roads), so gaps between
     crowns and distant views read as wooded.
-  - **Building palettes:** robust median roof colours from interior imagery
+  - **Mapped colours first:** OSM `building:colour` / `roof:colour` (Overture
+    `facade_color` / `roof_color`, `#RRGGBB` or a common colour name) set a
+    building's walls / roof as mapped; a mapped roof colour without a facade
+    colour also sets the coordinated wall tint. Mapped colours keep their hue
+    but their HLS saturation is capped at 0.5 (lightness 0.15–0.95) to suit the
+    map-like style: OSM `roof:colour=red` (`#FF3333`, ~1,600 roofs around Marina
+    Bay) means roof tiles, not signal red. The tileset records
+    `mappedColorBuildings`.
+  - **Building palettes:** otherwise, robust median roof colours from interior imagery
     pixel centres, capped at 256 samples per building. Dark/shadowed and
     vegetation-like samples are rejected. Footprints under one source pixel or
     with fewer than two usable samples keep neutral colours. Walls receive a
     coordinated lighter, desaturated tint with deterministic per-feature variation.
+  - **Facade styles**, one repeating 96² tile per storey and bay, in two
+    variants each (chosen per building from its feature id): from the Overture
+    class, ribbon windows for offices, commercial and hotels (glass curtain
+    walls from 80 m), balconies or ledged windows for flats and all HDB
+    blocks, shop panes or blank mall walls for retail, stations and
+    entertainment, profiled cladding for industrial buildings and sports
+    halls, open decks or louvres for car parks, and tall shuttered windows for
+    civic and religious buildings up to 30 m and low tiled-roof buildings
+    (shophouses); unclassified towers of 120 m or more glass. Mapped
+    `facade_material` then sets glass or (metal) plain cladding. Structures
+    without storeys are plain: raised parts under 6 m tall (canopies, link
+    bridges), small round parts with no mapped storeys (columns, lone
+    Supertree trunks), observation wheels. Lofts use a steel lattice. Punched
+    windows remain the default. Each style and variant is its own wall
+    primitive and repeating PNG in a tile; walls with neither a mapped nor an
+    imagery colour take a stable tint from a palette of eight plausible
+    facade colours. A mapped `roof:material` (tiles, grass, metal, glass, concrete, ...)
+    without a roof colour gives a typical roof colour, ahead of imagery. The
+    tileset records `facadeStyles` counts.
+  - **Curved walls and storeys:** each outline is walled as a chain; corners
+    sharper than 30° split it into runs, and within a run neighbouring wall
+    quads share vertices (curved facades shade smoothly) and window bays run
+    on continuously, a whole number per run. Floor bands use the mapped storey
+    height (height / `num_floors`, 2.4–6 m) where known, else about 3 m, and
+    count up from the wall bottom so rows stay level under sloping tops.
+  - **Lofted structures** (§8) are drawn as one smooth surface with a steel
+    lattice facade texture.
   - **Procedural facades:** a shared repeating PNG supplies framed and divided
     windows, sills and floor bands. UV repetition uses approximately 3 m window
     bays and floors derived from building height. These are illustrative, not
@@ -240,8 +291,8 @@ and trees over them draw as objects, not as the surface.
   - **Imagery choice:** `buildingImageryPath` / `--building-imagery` supplies an
     RGB orthophoto; otherwise the pack's imagery is used. This does not restore
     a satellite style or drape the terrain with imagery.
-  - **Shading:** materials are lit, with vertex normals (smooth on terrain
-    and tree crowns, flat on roofs and walls). Walls use the facade texture
+  - **Shading:** materials are lit, with vertex normals (smooth on terrain,
+    tree crowns and curved roofs; flat on other roofs and walls). Walls use the facade texture
     multiplied by their per-building tint.
   - **Not drawn:** road labels, lane markings, or measured architectural details.
 - `map3d view <tilesetDir>` serves the tileset on localhost with a bundled
@@ -284,7 +335,9 @@ and trees over them draw as objects, not as the surface.
       2.5 km² of crowns over 3.9 km² of canopy ≥ 2 m), found in ~4 s.
     - The grid layers are unchanged: they keep bare ground and canopy height.
   - **Buildings:** parent tiles keep buildings ≥ 10 m × 2^(levels above the
-    leaves − 1), so distant views keep the skyline.
+    leaves − 1), so distant views keep the skyline. A raised part counts by
+    its own extent (top − min height), so no distant view keeps a crown or
+    canopy while dropping the part beneath it.
   - **Decks:** in leaves and their parents.
   - **Geometric error:** max(terrain tolerance, omitted building height).
   - **Texture:** one 512² PNG per tile, projected top-down onto terrain, roofs
@@ -308,10 +361,98 @@ and trees over them draw as objects, not as the surface.
 | Building heights | Google Open Buildings 2.5D (CC BY 4.0, ~4 m effective); OSM `height` / `building:levels` via Overture | HDB Property Information `max_floor_lvl` (storeys) |
 | Canopy height | Meta/WRI global 1 m canopy height (CC BY 4.0) | — (NParks TreesSG is not downloadable) |
 | Land cover | ESA WorldCover 2021 10 m; Impact Observatory 10 m annual LULC | — |
+| Land-cover polygons | Overture base water (OSM-derived oceans, reservoirs, rivers, ponds) and land use / land (parks, plazas, woods, ...); ODbL | — |
 | Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | URA Master Plan rail lines (`GRND_LEVEL` marks viaducts) |
 | Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
 | Imagery | Sentinel-2 cloudless 2024 by EOX (s2maps.eu WMTS, zoom 14 ≈ 10 m; CC BY-NC-SA 4.0) | BYO RGB orthophoto (`--building-imagery`) for building palettes |
 | Geoid | EGM2008 grid (PROJ-data `us_nga_egm08_25.tif`) | — |
+
+**Building parts, raised parts and roof shapes (OSM Simple 3D Buildings, via
+Overture):**
+- **Parts:** where a building is mapped as `building_part`s, the parts replace
+  its outline (`map3d prepare`). Parts carry their own heights and shapes.
+  Mappers often let the outline's own height describe the podium and map only
+  the tower above it (e.g. The Riverwalk: a 30 m outline, a 30–100 m part), so
+  an outline with its own height or floor count that its ground-level parts
+  cover less than 90 % stays as the base, capped at its lowest part (the
+  lowest raised part's `min_height`, or a ground-level part's top). Parts take
+  their building's Overture `class` (`buildingClass`).
+- **Unsupported raised parts:** a raised part with nothing reaching up to
+  within 2 m of its underside over 5 % of its footprint has unmapped lower
+  levels; if it is at least 6 m thick and not a narrow bridge (over 4x as long
+  as wide and under 15 m wide), it is taken down to the ground. Thin canopies,
+  link bridges, lofts and wheels stay raised.
+- **Observation wheels** (`map3d.layers.wheels`): a wheel such as the Singapore
+  Flyer is mapped as a row of small parts each spanning the wheel's height at
+  its position. Six or more such spans (under 150 m², at least 20 m tall,
+  linked within 25 m) on a straight line whose ends fit one circle (RMS misfit
+  under 6 % of the radius) are drawn as a wheel: rim, 28 spokes, hub, 28
+  capsules and an A-frame of legs (the rim is fitted; spokes, capsules and
+  legs are illustrative). The grid keeps the spans.
+- **Raised parts:** `min_height` (else `min_floor` × storey height) lifts a
+  part's underside above its base; it is ignored unless at least 1 m below
+  the top. Raised parts take no part in ground correction.
+- **Roof shapes** (`map3d.layers.roofs`): skillion, gabled (also gambrel,
+  saltbox), hipped (also half-hipped, mansard), pyramidal, dome, onion and
+  round. A roof is a height field over its footprint whose highest point is
+  the building's top; `roof_height` sets its rise (capped at the part's
+  height), otherwise a per-shape default (domes and pyramids: the radius of a
+  circle of the footprint's area; round: half the width; pitched roofs a
+  30° (skillion 15°) pitch; pitched and round defaults take at most half the
+  part's height). `roof_direction`
+  (bearing the slope faces) and `roof_orientation` turn the ridge. Round and
+  hipped roofs on footprints that are not near-rectangular follow the distance
+  to the outline instead, so e.g. a conservatory's round roof comes down to the
+  eaves on every side.
+- **Grid:** per node, parts on the ground burn as before (tallest top wins)
+  with their roof height fields evaluated at the node. A raised part extends
+  the solid column under it if its underside is within 2 m of that column's
+  top (or the ground): a sky park resting on its towers is one column. Over
+  open space it is an **elevated level**, stored in the deck-level layers with
+  its top and underside, and it sets the surface if it is highest.
+- **Mesh:** walls run from the underside to the eaves and rise to meet gable
+  and barrel ends; roofs are the footprint triangulated along the shape's
+  creases and lifted onto the height field; raised parts get an underside.
+  Curved roofs (dome, onion, round) share vertices so they shade smoothly.
+- **Features table:** `minHeight_m` and `roofShape` per building (decks: their
+  underside above ground, `flat`).
+- **Colours and materials:** `facade_color`, `roof_color`, `facade_material`
+  and `roof_material` are carried as optional `facadeColor` / `roofColor` /
+  `facadeMaterial` / `roofMaterial` columns for the mesh palette and facade
+  styles (§7).
+
+**Placement on slopes:** a building's heights are measured from its
+**anchor**, the median ground under its footprint (outline and a ~5 m
+interior grid): a DSM-derived height (Google 2.5D) is a height above the local
+ground, and measuring from the lowest point buried hillside buildings on
+their uphill side. The top is anchor + height, lifted where needed so the roof
+clears the highest ground under the footprint by one storey (or the
+building's height, if lower). Walls still reach down to the **base**, the
+lowest ground on the outline, so the downhill side stands on a plinth. Raised
+parts start at anchor + min height. Around Marina Bay and Fort Canning Hill
+this took the number of buildings with ground above their roof from 51 to 0.
+
+**Lofted structures** (`map3d.layers.lofts`): OSM maps funnel-shaped
+structures such as the Supertrees at Gardens by the Bay as stacked circular
+parts (a trunk, then rings that widen with height). A cluster of round parts
+(isoperimetric quotient ≥ 0.85) sharing a centre (within 2 m) whose chain by
+top height has gaps of at most 6 m, never narrows and ends at least 20 % wider
+than it starts is drawn as one loft: a smooth surface through the parts'
+outlines (36 rays from the centre), capped on top; a raised stack with no
+trunk mapped stands on a trunk from the ground (0.4 of its lowest ring's
+radius). Gaps up to 10 m are bridged; a wider base under the trunk (a planter)
+stays separate, as do parts thinner than 1 m; other cluster parts are absorbed
+into the loft. Narrowing stacks (set-back towers) keep their steps.
+Grid layers are unchanged. Marina Bay: 12 lofts, 10 of them Supertrees.
+
+**Attributes of dropped duplicates:** when fusion drops a feature as a
+duplicate and it is the same building as the accepted feature it overlaps
+most (each covers at least half of the other), it hands that feature the
+appearance attributes it lacks: roof shape (with roof height, direction and
+orientation), facade / roof colours and materials. An authoritative HDB or URA
+outline thus keeps its own footprint and height but gains Overture's mapped
+roof and colours (Marina Bay: 111 of 448 authoritative outlines gain a facade
+colour). Heights and min heights are never inherited.
 
 **Building height precedence (authoritative first):** local government data →
 OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` ×
@@ -544,7 +685,9 @@ map3d info    sg.pack
 - At 0.5 m, terrain (30 m), land cover (10 m) and building heights (~4 m
   raster) are interpolated. Only footprint edges are truly sharp.
 - Open LOD2 roof data is scarce, so expect mostly LOD1 buildings even in
-  Singapore.
+  Singapore. Mapped roof shapes are idealised (a dome is a smooth dome, without
+  e.g. the Esplanade's sunshades); free-form shells are approximated by the
+  nearest shape.
 - Deck elevations are mostly heuristic (§8).
 - Sentinel-2 imagery is ~10 m, so many buildings lack reliable independent
   colours and use neutral fallback. Higher-resolution orthophotos improve roof

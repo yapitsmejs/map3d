@@ -21,7 +21,7 @@ from rasterio.transform import Affine
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns
 
-__all__ = ["burnChunk", "chunkBox", "rasterizePixels", "toPixelGeometries"]
+__all__ = ["burnChunk", "chunkBox", "rasterizeAffine", "rasterizePixels", "toPixelGeometries"]
 
 _RASTERIZE_LOCK = threading.Lock()
 
@@ -119,6 +119,30 @@ def rasterizePixels(
     Returns:
         The burned chunk (0 where nothing is burned).
     """
+    return rasterizeAffine(shapes, outShape, Affine.translation(col0, row0), allTouched, dtype)
+
+
+def rasterizeAffine(
+    shapes: Iterable[tuple[Any, float]],
+    outShape: tuple[int, int],
+    transform: Affine,
+    allTouched: bool,
+    dtype: str,
+) -> npt.NDArray[Any]:
+    """Burn shapes into an array whose ``(col, row)`` maps to their coordinates by ``transform``.
+
+    Later shapes overwrite earlier ones, so pass them in ascending priority.
+
+    Args:
+        shapes: ``(geometry, value)`` pairs.
+        outShape: Output shape ``(rows, cols)``.
+        transform: Output ``(col, row)`` -> shape coordinates.
+        allTouched: Burn every touched cell (conservative), not just centres.
+        dtype: Output dtype name.
+
+    Returns:
+        The burned array (0 where nothing is burned).
+    """
     # rasterio's in-memory dataset wraps its open in warnings.catch_warnings(),
     # which is not thread-safe: concurrent calls leak warnings and can leave the
     # process-wide warning filters altered. Chunks run in threads, so serialize.
@@ -126,7 +150,7 @@ def rasterizePixels(
         burned = rasterize(
             shapes,
             out_shape=outShape,
-            transform=Affine.translation(col0, row0),
+            transform=transform,
             fill=0,
             all_touched=allTouched,
             dtype=dtype,

@@ -433,17 +433,20 @@ def _buildChunk(
         # max of its embankment and roadside vegetation.
         groundH = np.where(corridor, ground.orthometricAt(*columns.nodeLatLon()), groundH)
     canopy = models.canopy.cellMax(columns)
-    ids = rasterizeBuildings(buildings, columns)
-    decks = rasterizeDecks(models.decks, columns, ground, request.maxDeckLevels)
+    built = rasterizeBuildings(buildings, columns, groundH)
+    ids = built.ids
+    # Raised building parts with open space beneath stack with the decks.
+    decks = rasterizeDecks(
+        models.decks, columns, ground, request.maxDeckLevels, extraLevels=built.levels
+    )
 
     hasBuilding = ids > 0
     index = np.maximum(ids - 1, 0)
+    roofH = built.top
     if len(buildings):
-        roofH = np.where(hasBuilding, buildings.roofOrthometric_m[index], np.nan)
         bldgSource = buildings.heightSource[index]
         bldgRes = buildings.nativeResolution_m[index]
     else:
-        roofH = np.full(ids.shape, np.nan)
         bldgSource = np.zeros(ids.shape, dtype=np.uint8)
         bldgRes = np.zeros(ids.shape)
     hasDeck = decks.maxDeck > 0
@@ -528,7 +531,7 @@ def _usedSources(pack: Pack) -> list[SourceEntry]:
         entry = pack.primarySource(role)
         if entry is not None:
             used.append(entry)
-    for role in ("buildings", "transport", "elevatedStructures"):
+    for role in ("buildings", "transport", "elevatedStructures", "landCoverPolygons"):
         used += [pack.manifest.sources[s] for s in pack.sourcesFor(role)]
     return used
 

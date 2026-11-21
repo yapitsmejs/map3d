@@ -6,8 +6,13 @@ scene-centre ENU metres:
 - **Terrain:** an RTIN mesh of the ground model over a tile, sampled on a
   ``(2^k+1)^2`` lattice in grid coordinates. Each vertex sits on its node
   column at the ground's ellipsoidal height.
-- **Buildings:** LOD1 extrusions. Roofs are constrained-Delaunay triangulated
-  at roof height; walls run from base to roof along the local vertical.
+- **Buildings:** extrusions from the underside (the base, or a raised part's
+  min height) to the eaves, with mapped roof shapes
+  (:mod:`map3d.layers.roofs`): the footprint is triangulated along the roof's
+  creases and lifted onto its height field; curved roofs share vertices so
+  they shade smoothly, faceted ones keep sharp edges. Walls rise to meet the
+  roof at gable and barrel ends. Raised parts get a downward-facing underside.
+  Flat roofs are constrained-Delaunay triangulated at roof height.
 - **Decks:** slabs whose top follows the deck profile (ground interpolated
   between the bridge ends + level height), with an underside and side walls.
 - **Textures:** one conceptual land-class palette per tile, projected top-down.
@@ -23,6 +28,7 @@ import numpy as np
 import numpy.typing as npt
 import pyproj
 import shapely
+from rasterio.transform import Affine
 
 from map3d.layers.decks import DECK_THICKNESS_m, deckTopAboveGround_m
 from map3d.layers.landCover import (
@@ -30,9 +36,18 @@ from map3d.layers.landCover import (
     CLASS_DECK,
     CLASS_RAIL,
     CLASS_ROAD,
-    remapClasses,
+    keepsRaster,
 )
-from map3d.mesh.buildingAppearance import NEUTRAL_ROOF, BuildingAppearance, facadeUv
+from map3d.layers.lofts import Loft
+from map3d.layers.pixels import rasterizeAffine
+from map3d.layers.roofs import Roof
+from map3d.layers.wheels import Wheel
+from map3d.mesh.buildingAppearance import (
+    NEUTRAL_ROOF,
+    BuildingAppearance,
+    FACADE_BAY_WIDTH_m,
+    FACADE_FLOOR_HEIGHT_m,
+)
 from map3d.mesh.gltf import MeshPart, encodePng
 from map3d.mesh.martini import checkGridSize, rtinErrors, rtinMesh
 from map3d.mesh.trees import MIN_TREE_HEIGHT_m
@@ -97,6 +112,9 @@ _OVERLAY_STYLE = {
     CLASS_DECK: "deck",
     CLASS_RAIL: "rail",
 }
+
+
+_MIN_WALL_m = 0.05  # wall segments lower than this (where a roof meets the eaves) are skipped
 
 
 @dataclass(frozen=True)
@@ -182,7 +200,7 @@ def buildingParts(
     extent: TileExtent,
     appearance: BuildingAppearance,
 ) -> tuple[MeshPart, MeshPart]:
-    """LOD1 extrusions of the selected buildings.
+    """Extrusions of the selected buildings, with their roof shapes.
 
     Args:
         scene: Built scene.
@@ -191,30 +209,361 @@ def buildingParts(
         appearance: Per-building facade tints (imagery-derived or neutral).
 
     Returns:
-        ``(roofs, walls)``: textured roofs and textured, vertex-tinted walls.
-        Wall UVs repeat procedural window bays and floor bands at physical scale.
+        ``(roofs, walls)``: textured roofs (and undersides of raised parts) and
+        textured, vertex-tinted walls. Wall UVs repeat procedural window bays
+        and floor bands at physical scale.
     """
     if indices.size == 0:
         return MeshPart.empty(withUv=True), MeshPart.empty(withUv=True, withColors=True)
     b = scene.models.buildings
-    geoms = b.geometries[indices]
+    roofs: list[MeshPart] = []
+    walls: list[MeshPart] = []
+    loftOf = b.loftOf
+    for i in indices:
+        k = loftOf.get(int(i))
+        if k is not None and b.lofts[k].members[0] == i:  # a loft is drawn by its bottom part
+            cap, side = _loftParts(scene, b.lofts[k], extent, appearance.wallColors[i])
+            roofs.append(cap)
+            walls.append(side)
+    wheelOf = b.wheelOf
+    for i in indices:
+        k = wheelOf.get(int(i))
+        if k is not None and b.wheels[k].members[0] == i:  # drawn once, by its first span
+            walls.append(_wheelParts(scene, b.wheels[k]))
+    indices = np.array(
+        [i for i in indices if int(i) not in loftOf and int(i) not in wheelOf], dtype=np.int64
+    )
+    shaped = np.array([b.roofs[i] is not None for i in indices], dtype=bool)
+    flat = indices[~shaped]
+    if flat.size:
+        geoms = b.geometries[flat]
+        undulation = _undulation(scene, geoms)
+        roofEll = b.roofOrthometric_m[flat] + undulation
+        bottomEll = b.bottomOrthometric_m[flat] + undulation
+        roofs.append(_flatFaces(scene, geoms, roofEll, extent, up=True))
+        raised = b.minHeight_m[flat] > 0.0
+        if raised.any():
+            roofs.append(_flatFaces(scene, geoms[raised], bottomEll[raised], extent, up=False))
+        walls.append(
+            _polygonWalls(
+                scene.geometry.frame,
+                geoms,
+                bottomEll,
+                roofEll,
+                appearance.wallColors[flat],
+                b.floorHeight_m[flat],
+            )
+        )
+    for i in indices[shaped]:
+        roof = b.roofs[i]
+        assert roof is not None
+        und = float(_undulation(scene, b.geometries[i : i + 1])[0])
+        bottomEll = float(b.bottomOrthometric_m[i]) + und
+        eaveEll = float(b.eaveOrthometric_m[i]) + und
+        roofs.append(_shapedRoof(scene, roof, eaveEll, extent))
+        if b.minHeight_m[i] > 0.0:
+            roofs.append(
+                _flatFaces(scene, b.geometries[i : i + 1], np.array([bottomEll]), extent, up=False)
+            )
+        walls.append(
+            _shapedWalls(
+                scene, roof, bottomEll, eaveEll, appearance.wallColors[i], b.floorHeight_m[i]
+            )
+        )
+    return MeshPart.concatenate(roofs), MeshPart.concatenate(walls)
+
+
+WHEEL_COLOR = (236, 238, 240)
+CAPSULE_COLOR = (176, 206, 226)
+_WHEEL_SEGMENTS = 72
+_WHEEL_SPOKES = 28
+_WHEEL_CAPSULES = 28
+
+
+def _wheelParts(scene: Scene, wheel: Wheel) -> MeshPart:
+    """An observation wheel: rim, spokes, hub, capsules and an A-frame of support legs.
+
+    The rim's centre, radius and width come from the mapped spans; spokes,
+    capsules and legs are illustrative (counts and sizes typical of large
+    observation wheels). Drawn in the plain facade style (UVs on a blank panel).
+    """
+    lon0, lat0 = wheel.hub_deg
+    kx, ky = _metresPerDegree(lat0)
+    und = float(scene.models.ground.undulation_m(np.array([lat0]), np.array([lon0]))[0])
+    axis = np.array([*wheel.axis, 0.0])
+    normal = np.array([-wheel.axis[1], wheel.axis[0], 0.0])
+    up = np.array([0.0, 0.0, 1.0])
+    hub = np.array([0.0, 0.0, wheel.hubHeight_m])
+    r, w = wheel.radius_m, max(wheel.width_m, 2.0)
+
+    def rim(phi: FloatArray, radius: float) -> FloatArray:
+        points: FloatArray = hub + radius * (
+            np.cos(phi)[:, None] * axis + np.sin(phi)[:, None] * up
+        )
+        return points
+
+    beams: list[tuple[FloatArray, FloatArray, float, float, FloatArray, tuple[int, int, int]]] = []
+    phi = np.linspace(0.0, 2.0 * np.pi, _WHEEL_SEGMENTS + 1)
+    ring = rim(phi, r)
+    for p0, p1 in zip(ring[:-1], ring[1:], strict=True):
+        beams.append((p0, p1, 0.5 * w, 1.2, normal, WHEEL_COLOR))
+    spokes = rim(np.linspace(0.0, 2.0 * np.pi, _WHEEL_SPOKES, endpoint=False), r)
+    for side in (-0.4, 0.4):
+        for p in spokes:
+            beams.append((hub + side * w * normal, p, 0.15, 0.15, normal, WHEEL_COLOR))
+    beams.append((hub - 0.8 * w * normal, hub + 0.8 * w * normal, 3.0, 3.0, axis, WHEEL_COLOR))
+    capsules = rim(np.linspace(0.0, 2.0 * np.pi, _WHEEL_CAPSULES, endpoint=False), r + 2.5)
+    for p in capsules:
+        tangent = np.cross(normal, (p - hub) / np.linalg.norm(p - hub))
+        beams.append((p - 2.2 * tangent, p + 2.2 * tangent, 1.6, 1.8, normal, CAPSULE_COLOR))
+    for along in (-0.3, 0.3):
+        foot = np.array([0.0, 0.0, 0.0]) + along * r * axis + 0.25 * r * normal
+        foot[2] = wheel.hubHeight_m - r - 5.0
+        beams.append((hub + 0.8 * w * normal, foot, 1.5, 1.5, axis, WHEEL_COLOR))
+    parts = [_beam(scene, lon0, lat0, kx, ky, und, *beam) for beam in beams]
+    return MeshPart.concatenate(parts)
+
+
+def _beam(
+    scene: Scene,
+    lon0: float,
+    lat0: float,
+    kx: float,
+    ky: float,
+    und: float,
+    p0: FloatArray,
+    p1: FloatArray,
+    halfWidth: float,
+    halfDepth: float,
+    side: FloatArray,
+    colour: tuple[int, int, int],
+) -> MeshPart:
+    """A box from ``p0`` to ``p1`` (local metres: east, north, height), ``side`` setting its width axis."""
+    d = p1 - p0
+    d = d / max(float(np.linalg.norm(d)), 1e-9)
+    e1 = side - (side @ d) * d
+    n1 = float(np.linalg.norm(e1))
+    e1 = e1 / n1 if n1 > 1e-6 else np.array([0.0, 0.0, 1.0])
+    e2 = np.cross(d, e1)
+    offsets = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    corners = np.array(
+        [p + a * halfWidth * e1 + b * halfDepth * e2 for p in (p0, p1) for a, b in offsets]
+    )
+    e, n, u = scene.geometry.frame.geodeticToEnu(
+        corners[:, 1] / ky + lat0, corners[:, 0] / kx + lon0, corners[:, 2] + und
+    )
+    pos = np.column_stack([e, n, u])
+    faces = [(0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7), (0, 3, 2, 1), (4, 5, 6, 7)]
+    tris = np.array([t for a, b, c, q in faces for t in ((a, b, c), (a, c, q))], dtype=np.uint32)
+    return MeshPart(
+        pos,
+        tris,
+        uv=np.full((8, 2), 0.5, dtype=np.float32),
+        colors=np.tile(np.array(colour, dtype=np.uint8), (8, 1)),
+    )
+
+
+_LOFT_SIDES = 36  # outline samples per loft ring
+_LOFT_TRUNK = 0.4  # trunk radius (of the lowest ring's) for stacks with no trunk mapped
+
+
+def _loftParts(
+    scene: Scene, loft: Loft, extent: TileExtent, colour: npt.NDArray[np.uint8]
+) -> tuple[MeshPart, MeshPart]:
+    """A lofted stack: one smooth side surface through its parts' outlines, and caps.
+
+    The profile runs from the bottom part's underside to its top, then to the
+    top of each part above, each ring taking that part's outline (sampled
+    along rays from the shared centre). A raised stack with no trunk mapped
+    stands on a trunk from the ground, :data:`_LOFT_TRUNK` of its lowest
+    ring's radius. Ring vertices are shared, so the
+    surface shades smoothly.
+
+    Returns:
+        ``(caps, side)``: the top cap, textured top-down; the side, with
+        lattice facade UVs and the stack's tint.
+    """
+    b = scene.models.buildings
+    members = list(loft.members)
+    lon0, lat0 = loft.centre_deg
+    kx, ky = _metresPerDegree(lat0)
+    und = float(scene.models.ground.undulation_m(np.array([lat0]), np.array([lon0]))[0])
+    theta = np.linspace(0.0, 2.0 * np.pi, _LOFT_SIDES + 1)
+    radii = [_raysToOutline(b.geometries[i], lon0, lat0, kx, ky, theta) for i in members]
+    profile = [float(b.bottomOrthometric_m[members[0]])] + [
+        float(b.roofOrthometric_m[i]) for i in members
+    ]
+    rings = [radii[0], *radii]
+    if b.minHeight_m[members[0]] > 0.0:
+        # No trunk mapped: stand the stack on one from the ground.
+        trunk = _LOFT_TRUNK * float(np.mean(radii[0])) * np.ones_like(theta)
+        profile = [float(b.baseOrthometric_m[members[0]]), *profile]
+        rings = [trunk, trunk, *radii]
+    z: FloatArray = np.maximum.accumulate(np.array(profile)) + und
+    frame = scene.geometry.frame
+    levels, cols = len(z), theta.size
+    x = np.concatenate([r * np.cos(theta) for r in rings])
+    y = np.concatenate([r * np.sin(theta) for r in rings])
+    e, n, u = frame.geodeticToEnu(y / ky + lat0, x / kx + lon0, np.repeat(z, cols))
+    pos = np.column_stack([e, n, u])
+    grid = np.arange(levels * cols, dtype=np.uint32).reshape(levels, cols)
+    a, b0 = grid[:-1, :-1].ravel(), grid[:-1, 1:].ravel()
+    c, d = grid[1:, 1:].ravel(), grid[1:, :-1].ravel()
+    tris = np.concatenate([np.column_stack([a, b0, c]), np.column_stack([a, c, d])])
+    meanRadius = float(np.mean([np.mean(r) for r in rings]))
+    bays = max(1.0, round(2.0 * np.pi * meanRadius / FACADE_BAY_WIDTH_m))
+    uv = np.column_stack(
+        [
+            np.tile(np.linspace(0.0, bays, cols), levels),
+            np.repeat((z[-1] - z) / FACADE_FLOOR_HEIGHT_m, cols),
+        ]
+    ).astype(np.float32)
+    side = MeshPart(
+        pos,
+        tris.astype(np.uint32),
+        uv=uv,
+        colors=np.tile(np.asarray(colour, np.uint8), (pos.shape[0], 1)),
+    )
+    caps = [_loftCap(scene, rings[-1], z[-1], lon0, lat0, kx, ky, theta, extent, up=True)]
+    return MeshPart.concatenate(caps), side
+
+
+def _loftCap(
+    scene: Scene,
+    radius: FloatArray,
+    heightEll: float,
+    lon0: float,
+    lat0: float,
+    kx: float,
+    ky: float,
+    theta: FloatArray,
+    extent: TileExtent,
+    up: bool,
+) -> MeshPart:
+    """A loft ring closed by a fan from its centre."""
+    x = np.concatenate([[0.0], radius[:-1] * np.cos(theta[:-1])])
+    y = np.concatenate([[0.0], radius[:-1] * np.sin(theta[:-1])])
+    e, n, u = scene.geometry.frame.geodeticToEnu(
+        y / ky + lat0, x / kx + lon0, np.full(x.size, heightEll)
+    )
+    pos = np.column_stack([e, n, u])
+    m = theta.size - 1
+    j = np.arange(1, m + 1, dtype=np.uint32)
+    tris = np.column_stack([np.zeros(m, dtype=np.uint32), j, np.roll(j, -1)])
+    gx, gy = scene.geometry.enuToGrid(e, n)
+    return MeshPart(pos, _upward(pos, tris, up=up), extent.uv(gx, gy))
+
+
+def _raysToOutline(
+    footprint: Any, lon0: float, lat0: float, kx: float, ky: float, theta: FloatArray
+) -> FloatArray:
+    """Distance (m) from the centre to a footprint's outline along each ray (farthest crossing)."""
+    ring = shapely.get_exterior_ring(_largest(footprint))
+    local = shapely.transform(ring, lambda xy: (xy - (lon0, lat0)) * (kx, ky))
+    far = 4.0 * float(np.max(np.abs(shapely.get_coordinates(local)))) + 1.0
+    rays = shapely.linestrings(
+        np.stack(
+            [
+                np.zeros((theta.size, 2)),
+                np.column_stack([far * np.cos(theta), far * np.sin(theta)]),
+            ],
+            axis=1,
+        )
+    )
+    hits = shapely.intersection(rays, local)
+    out = np.zeros(theta.size)
+    for k, hit in enumerate(hits):
+        pts = shapely.get_coordinates(hit)
+        out[k] = float(np.max(np.hypot(pts[:, 0], pts[:, 1]))) if pts.size else 0.0
+    return out
+
+
+def _largest(geom: Any) -> Any:
+    parts = shapely.get_parts(geom)
+    return parts[int(np.argmax(shapely.area(parts)))]
+
+
+def _metresPerDegree(lat_deg: float) -> tuple[float, float]:
+    a, e2 = 6378137.0, 6.69437999014e-3
+    phi = np.radians(lat_deg)
+    w = np.sqrt(1.0 - e2 * np.sin(phi) ** 2)
+    return (
+        float(np.radians(1.0) * a / w * np.cos(phi)),
+        float(np.radians(1.0) * a * (1.0 - e2) / w**3),
+    )
+
+
+def _undulation(scene: Scene, geoms: npt.NDArray[np.object_]) -> FloatArray:
     centroids = shapely.centroid(geoms)
-    undulation = scene.models.ground.undulation_m(
+    result: FloatArray = scene.models.ground.undulation_m(
         shapely.get_y(centroids), shapely.get_x(centroids)
     )
-    roofEll = b.roofOrthometric_m[indices] + undulation
-    baseEll = b.baseOrthometric_m[indices] + undulation
-    frame = scene.geometry.frame
+    return result
 
+
+def _flatFaces(
+    scene: Scene,
+    geoms: npt.NDArray[np.object_],
+    heightEll: FloatArray,
+    extent: TileExtent,
+    up: bool,
+) -> MeshPart:
+    """Footprints triangulated at a flat height, facing up (roofs) or down (undersides)."""
     corners, cornerOwner = _triCorners(geoms)
-    e, n, u = frame.geodeticToEnu(corners[:, 1], corners[:, 0], roofEll[cornerOwner])
-    roofPos = np.column_stack([e, n, u])
-    roofTris = np.arange(roofPos.shape[0], dtype=np.uint32).reshape(-1, 3)
+    e, n, u = scene.geometry.frame.geodeticToEnu(
+        corners[:, 1], corners[:, 0], heightEll[cornerOwner]
+    )
+    pos = np.column_stack([e, n, u])
+    tris = np.arange(pos.shape[0], dtype=np.uint32).reshape(-1, 3)
     gx, gy = scene.geometry.enuToGrid(e, n)
-    roofs = MeshPart(roofPos, _upward(roofPos, roofTris), extent.uv(gx, gy))
+    return MeshPart(pos, _upward(pos, tris, up=up), extent.uv(gx, gy))
 
-    walls = _walls(frame, geoms, baseEll, roofEll, appearance.wallColors[indices])
-    return roofs, walls
+
+def _shapedRoof(scene: Scene, roof: Roof, eaveEll: float, extent: TileExtent) -> MeshPart:
+    """A roof's triangulation lifted onto its height field."""
+    corners = roof.triangles().reshape(-1, 2)
+    tris = np.arange(corners.shape[0], dtype=np.uint32).reshape(-1, 3)
+    if roof.curved:
+        # Shared vertices give curved roofs smooth normals.
+        _, first, inverse = np.unique(
+            np.round(corners, 4), axis=0, return_index=True, return_inverse=True
+        )
+        corners = corners[first]
+        tris = inverse.reshape(-1, 3).astype(np.uint32)
+        tris = tris[
+            (tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 0] != tris[:, 2])
+        ]
+    rise = roof.rise(corners[:, 0], corners[:, 1])
+    lon, lat = roof.toLonLat(corners[:, 0], corners[:, 1])
+    e, n, u = scene.geometry.frame.geodeticToEnu(lat, lon, eaveEll + rise)
+    pos = np.column_stack([e, n, u])
+    gx, gy = scene.geometry.enuToGrid(e, n)
+    return MeshPart(pos, _upward(pos, tris), extent.uv(gx, gy))
+
+
+def _shapedWalls(
+    scene: Scene,
+    roof: Roof,
+    bottomEll: float,
+    eaveEll: float,
+    colour: npt.NDArray[np.uint8],
+    floorHeight_m: float,
+) -> MeshPart:
+    """Walls from the underside up to the eaves, rising to meet the roof at gable ends."""
+    start, end = roof.outlineSegments()
+    if start.shape[0] == 0:
+        return MeshPart.empty(withUv=True, withColors=True)
+    segments = shapely.linestrings(np.stack([start, end], axis=1))
+    chains = shapely.get_parts(shapely.line_merge(shapely.union_all(segments)))
+    parts: list[MeshPart] = []
+    for chain in chains:
+        xy = shapely.get_coordinates(chain)
+        lon, lat = roof.toLonLat(xy[:, 0], xy[:, 1])
+        top = eaveEll + roof.rise(xy[:, 0], xy[:, 1])
+        parts.append(
+            _wallChain(scene.geometry.frame, lon, lat, bottomEll, top, colour, floorHeight_m)
+        )
+    return MeshPart.concatenate(parts) if parts else MeshPart.empty(withUv=True, withColors=True)
 
 
 def deckParts(
@@ -366,6 +715,7 @@ def renderTexture(
 
     - **Land cover:** the source raster's classes coloured and sampled
       bilinearly, so its coarse pixels blend softly (grid classes if absent).
+      Land-cover polygons (mapped water, ...) are drawn crisply over it.
     - **Crisp overlays** from the grid's ``landClass`` layer: roads, rail, decks
       and building roofs.
     - **Under trees:** a soft green wherever the canopy is at least
@@ -409,7 +759,7 @@ def _softLandCover(scene: Scene, lat: FloatArray, lon: FloatArray) -> FloatArray
         return rgb
     landLut = _styleLut(_LAND_COVER_STYLE)
     valid = np.isfinite(window.values)
-    codes = remapClasses(np.where(valid, window.values, 0).astype(np.int64), window.sourceId)
+    codes = scene.models.landCover.rasterClasses(np.where(valid, window.values, 0))
     for k in range(3):
         band = RasterWindow(
             np.where(valid, landLut[codes, k], np.nan),
@@ -441,6 +791,9 @@ def _conceptTexture(
     # Land cover is soft anyway: sample it at the texture resolution, then repeat.
     soft = np.repeat(np.repeat(_softLandCover(scene, lat, lon), k, axis=0), k, axis=1)
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
+    cover = _coverClasses(scene, extent, size * k)
+    crisp = (cover > 0) & ~keepsRaster(cover, classes)
+    rgb[crisp] = _styleLut(_LAND_COVER_STYLE)[cover[crisp]]
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
     featureIds = np.asarray(scene.layers["featureId"])[row, col]
@@ -455,6 +808,33 @@ def _conceptTexture(
     averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
     out: npt.NDArray[np.uint8] = np.clip(np.round(averaged), 0, 255).astype(np.uint8)
     return out
+
+
+def _coverClasses(scene: Scene, extent: TileExtent, n: int) -> npt.NDArray[np.uint8]:
+    """Land-cover polygon classes burned at ``n x n`` texture samples (0 = none)."""
+    landCover = scene.models.landCover
+    shapes = landCover.coverShapes
+    if shapes.size == 0:
+        return np.zeros((n, n), dtype=np.uint8)
+    geometry = scene.geometry
+    col, row = geometry.gridToPixel(
+        np.array([extent.x0, extent.x1, extent.x0]), np.array([extent.y1, extent.y1, extent.y0])
+    )
+    # Texture (column, row) -> grid pixel space; texture row 0 is the far +y edge.
+    transform = Affine(
+        (col[1] - col[0]) / n,
+        (col[2] - col[0]) / n,
+        col[0],
+        (row[1] - row[0]) / n,
+        (row[2] - row[0]) / n,
+        row[0],
+    )
+    box = shapely.box(min(col), min(row), max(col), max(row))
+    hit = np.flatnonzero(shapely.intersects(shapes, box))
+    if hit.size == 0:
+        return np.zeros((n, n), dtype=np.uint8)
+    pairs = zip(shapes[hit], landCover.coverClasses[hit].tolist(), strict=True)
+    return rasterizeAffine(pairs, (n, n), transform, allTouched=False, dtype="uint8")
 
 
 @functools.cache
@@ -509,26 +889,121 @@ def _ringEdges(
     return coords[a], coords[a + 1], ringOwner[coordRing[a]]
 
 
-def _walls(
+_SMOOTH_TURN_deg = 30.0  # outline corners gentler than this shade smoothly
+
+
+def _polygonWalls(
     frame: Any,
     geoms: npt.NDArray[np.object_],
     baseEll: FloatArray,
     roofEll: FloatArray,
     colors: npt.NDArray[np.uint8],
+    floorHeight_m: FloatArray,
 ) -> MeshPart:
-    start, end, owner = _ringEdges(geoms)
+    """Walls of flat-roofed buildings, one chain per outline ring."""
+    rings, owner = shapely.get_rings(geoms, return_index=True)
+    parts: list[MeshPart] = []
+    for ring, i in zip(rings, owner, strict=True):
+        xy = shapely.get_coordinates(ring)
+        parts.append(
+            _wallChain(
+                frame,
+                xy[:, 0],
+                xy[:, 1],
+                float(baseEll[i]),
+                np.full(xy.shape[0], roofEll[i]),
+                colors[i],
+                float(floorHeight_m[i]),
+            )
+        )
+    return MeshPart.concatenate(parts) if parts else MeshPart.empty(withUv=True, withColors=True)
 
-    def enu(lonLat: FloatArray, h: FloatArray) -> FloatArray:
-        e, n, u = frame.geodeticToEnu(lonLat[:, 1], lonLat[:, 0], h)
-        return np.column_stack([e, n, u])
 
-    p0 = enu(start, baseEll[owner])
-    p1 = enu(end, baseEll[owner])
-    p2 = enu(end, roofEll[owner])
-    p3 = enu(start, roofEll[owner])
-    length_m = np.linalg.norm(p1 - p0, axis=1)
-    height_m = np.maximum(roofEll - baseEll, 0.0)[owner]
-    return _quads(p0, p1, p2, p3, colors[owner], facadeUv(length_m, height_m))
+def _wallChain(
+    frame: Any,
+    lon: FloatArray,
+    lat: FloatArray,
+    bottomEll: float,
+    topEll: FloatArray,
+    colour: npt.NDArray[np.uint8],
+    floorHeight_m: float,
+) -> MeshPart:
+    """Walls along one outline chain (closed if its ends meet), from ``bottomEll`` to ``topEll``.
+
+    Corners sharper than :data:`_SMOOTH_TURN_deg` split the chain into runs.
+    Within a run, neighbouring wall quads share vertices, so curved facades
+    shade smoothly, and window bays run on continuously (a whole number of
+    bays per run). Floors count up from the bottom with ``floorHeight_m``
+    (about 3 m if NaN), so window rows stay level where the top slopes.
+    """
+    kx, ky = _metresPerDegree(float(np.mean(lat)))
+    pts = np.column_stack([lon, lat])
+    closed = pts.shape[0] > 2 and np.allclose(pts[0], pts[-1], rtol=0.0, atol=1e-12)
+    seg = np.diff(pts, axis=0) * (kx, ky)
+    keep = np.linalg.norm(seg, axis=1) > 1e-3  # drop repeated points
+    idx = np.concatenate([[0], np.flatnonzero(keep) + 1])
+    pts, top, seg = pts[idx], np.asarray(topEll)[idx], seg[keep]
+    m = seg.shape[0]
+    if m == 0:
+        return MeshPart.empty(withUv=True, withColors=True)
+    heading = np.arctan2(seg[:, 1], seg[:, 0])
+    # Turn at each vertex between two segments (vertex j sits between seg j-1 and j).
+    turn = np.abs((np.diff(heading) + np.pi) % (2.0 * np.pi) - np.pi)
+    breaks = np.concatenate([[True], np.degrees(turn) >= _SMOOTH_TURN_deg, [True]])
+    if closed:
+        closing = abs((heading[0] - heading[-1] + np.pi) % (2.0 * np.pi) - np.pi)
+        sharp = np.flatnonzero(breaks[1:-1]) + 1
+        if np.degrees(closing) < _SMOOTH_TURN_deg and sharp.size:
+            # Start the chain at a sharp corner, so the closing vertex is shared.
+            k = int(sharp[0])
+            pts = np.vstack([pts[k:-1], pts[: k + 1]])
+            top = np.concatenate([top[k:-1], top[: k + 1]])
+            seg = np.roll(seg, -k, axis=0)
+            turn = np.roll(np.append(turn, closing), -k)[:-1]
+            breaks = np.concatenate([[True], np.degrees(turn) >= _SMOOTH_TURN_deg, [True]])
+    lengths = np.linalg.norm(seg, axis=1)
+    height = np.maximum(top - bottomEll, 0.0)
+    parts: list[MeshPart] = []
+    starts = np.flatnonzero(breaks)
+    for a, b in zip(starts[:-1], starts[1:], strict=True):
+        run = slice(a, b + 1)  # vertices a..b, segments a..b-1
+        if np.all(height[run] < _MIN_WALL_m):
+            continue
+        cum = np.concatenate([[0.0], np.cumsum(lengths[a:b])])
+        bays = max(1.0, float(np.rint(cum[-1] / FACADE_BAY_WIDTH_m)))
+        tallest = float(np.max(height[run]))
+        storey = floorHeight_m if np.isfinite(floorHeight_m) else _autoStorey(tallest)
+        v = len(cum)
+        e0, n0, u0 = frame.geodeticToEnu(pts[run, 1], pts[run, 0], np.full(v, bottomEll))
+        e1, n1, u1 = frame.geodeticToEnu(pts[run, 1], pts[run, 0], top[run])
+        pos = np.concatenate([np.column_stack([e0, n0, u0]), np.column_stack([e1, n1, u1])])
+        uCoord = cum / cum[-1] * bays if cum[-1] > 0 else np.zeros(v)
+        uv = np.column_stack(
+            [
+                np.concatenate([uCoord, uCoord]),
+                np.concatenate([np.full(v, tallest), tallest - height[run]]) / storey,
+            ]
+        ).astype(np.float32)
+        lo = np.arange(v - 1, dtype=np.uint32)
+        hi = lo + np.uint32(v)
+        tris = np.concatenate(
+            [np.column_stack([lo, lo + 1, hi + 1]), np.column_stack([lo, hi + 1, hi])]
+        )
+        parts.append(
+            MeshPart(
+                pos,
+                tris.astype(np.uint32),
+                uv=uv,
+                colors=np.tile(np.asarray(colour, dtype=np.uint8), (2 * v, 1)),
+            )
+        )
+    return MeshPart.concatenate(parts) if parts else MeshPart.empty(withUv=True, withColors=True)
+
+
+def _autoStorey(height_m: float) -> float:
+    """A storey height near :data:`FACADE_FLOOR_HEIGHT_m` that fits a whole number of floors."""
+    floors = max(1.0, float(np.rint(height_m / FACADE_FLOOR_HEIGHT_m)))
+    return max(height_m / floors, 1e-6)
 
 
 def _quads(

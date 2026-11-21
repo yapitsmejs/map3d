@@ -8,9 +8,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import shapely
 from _support import headingAxes
 
 from map3d.layers.provenance import HeightSource
+from map3d.pack.geoparquet import writeGeoParquet
+from map3d.pack.ingest import ingestFiles
 from map3d.pack.manifest import Manifest
 from map3d.pack.reader import Pack
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
@@ -90,9 +93,11 @@ def testEllipsoidDatum_addsUndulation(plane: SyntheticScene, built: Scene):
 def testBuildings_raiseSurfaceAndRecordProvenance(built: Scene):
     r, c = _rc(built, -160.0, -100.0)  # inside B0 (30 m, explicit height)
     assert built.layers["featureId"][r, c] == 1
-    assert built.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(36.5, abs=1e-3)
+    # 30 m above the median ground under B0: the plane at its centre, 7.8 m.
+    top = built.layers["surfaceHeight_datum_m"][r, c]
+    assert top == pytest.approx(37.8, abs=0.05)
     ground = built.layers["groundHeight_datum_m"][r, c]
-    assert built.layers["buildingHeight_m"][r, c] == pytest.approx(36.5 - ground, abs=1e-3)
+    assert built.layers["buildingHeight_m"][r, c] == pytest.approx(top - ground, abs=1e-3)
     assert built.layers["heightSource"][r, c] == HeightSource.EXPLICIT_HEIGHT
     assert built.layers["nativeResolution_m"][r, c] == 0.0
 
@@ -399,12 +404,6 @@ def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):
     the viaduct's own slab top samples the same class, so a road bridge
     reads as a road on both layers.
     """
-    import shapely
-
-    from map3d.layers.provenance import HeightSource
-    from map3d.pack.geoparquet import writeGeoParquet
-    from map3d.pack.ingest import ingestFiles
-
     pack = tmp_path / "cross.pack"
     shutil.copytree(plane.packDir, pack)
     manifest = Manifest.load(pack)
@@ -437,3 +436,37 @@ def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):
     assert scene.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED  # surface = deck
     r2, c2 = _rc(scene, 0.0, 200.0)  # on the bridge, off the ground road
     assert scene.layers["landClass"][r2, c2] == 210  # the bridge's own corridor
+
+
+def testRaisedBuildingPart_isAnElevatedLevelOverOpenGround(plane: SyntheticScene, tmp_path: Path):
+    pack = tmp_path / "park.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def box(e0: float, n0: float, e1: float, n1: float) -> shapely.Polygon:
+        lat, lon, _ = plane.frame.columnPointAtHeight(
+            np.array([e0, e1, e1, e0]), np.array([n0, n0, n1, n1]), 0.0
+        )
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    writeGeoParquet(
+        tmp_path / "o.parquet",
+        np.array([box(-360, 300, -340, 320), box(-370, 300, -230, 320)], dtype=object),
+        {
+            "sourceFeatureId": ["tower", "park"],
+            "height_m": [100.0, 110.0],
+            "numFloors": [None, None],
+            "minHeight_m": [None, 100.0],
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp_path / "o.parquet"])
+    scene = buildScene(_request(plane), pack)
+    free, onTower = _rc(scene, -280.0, 310.0), _rc(scene, -350.0, 310.0)
+    surface = scene.layers["surfaceHeight_datum_m"]
+    ground = scene.layers["groundHeight_datum_m"]
+    bottom, top = scene.layers["deckBottomHeight_datum_m"], scene.layers["deckTopHeight_datum_m"]
+    assert surface[free] == pytest.approx(top[(0, *free)])
+    assert bottom[(0, *free)] - ground[free] == pytest.approx(100.0, abs=2.5)  # sloped ground
+    assert scene.layers["landClass"][free] == 200
+    assert scene.layers["buildingHeight_m"][free] == pytest.approx(surface[free] - ground[free])
+    assert np.isnan(top[(0, *onTower)])  # the park rests on the tower: one solid column
+    assert surface[onTower] == pytest.approx(surface[free], abs=1.5)
