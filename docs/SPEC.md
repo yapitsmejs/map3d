@@ -155,8 +155,9 @@ Also included: `features`, a table with one row per feature (`featureId`,
 
 ### 6.2 `.npz` + JSON sidecar
 
-- `scene.npz` holds every layer above (deck layers in compressed form; they
-  are mostly NaN).
+- `scene.npz` holds every layer above, uncompressed by default
+  (`Scene.writeNpz(compress=True)` zlib-compresses every layer; deck layers
+  are mostly NaN and compress well).
 - `scene.json` holds:
   - the echoed request;
   - the frame: center LLA and ECEF, `gridAxes_ENU`, the ENU→ECEF rotation,
@@ -261,16 +262,17 @@ and trees over them draw as objects, not as the surface.
   - **Terrain is the true ground.** Vegetation is never draped as a surface
     (that made trees look like green mounds); it is drawn as trees.
   - **Trees** (`withTrees=True`, the default; `map3d.mesh.trees`): one rounded
-    crown (icosphere, 80 triangles, three shades of green) on a trunk per tree,
+    crown (icosphere, 320 triangles, three shades of green) on a trunk per tree,
     standing on the ground model:
     - **Mapped tree points** (`trees` role) first, with crown radius
-      0.3 h + 1 m (2–8 m).
+      0.3 h + 1 m (2–17.5 m, i.e. at most a 35 m spread).
     - **Canopy raster:** lightly smoothed (2 m FWHM); treetops are pixels
-      ≥ 2 m tall that are the highest within 1.5 m. Treetops within half a
-      crown of a taller one are merged. Every canopy pixel then joins the
+      ≥ 2 m tall that are the highest within 1.5 m. Treetops within one
+      allometric crown radius (0.3 h + 1 m) of a taller one are merged. Every canopy pixel then joins the
       nearest treetop it is connected to through canopy (≤ 6 m away), and a
-      crown's radius is that of a disc with its region's area (1.5–6 m, at most
-      0.6 h + 1.5 m). Canopy no treetop reaches (smooth woods) is seeded again
+      crown's radius is the geometric mean of a disc with its region's area
+      (1.5–6 m, at most 0.6 h + 1.5 m) and the allometric radius, so tall trees
+      keep a crown that fits their height (up to the 17.5 m cap). Canopy no treetop reaches (smooth woods) is seeded again
       at its tallest points, a crown apart (up to 4 rounds, until < 1% is
       left). Crowns thus add up to the canopy without sprouting mini-trees on
       crown edges.
