@@ -122,6 +122,9 @@ node's cell footprint (cell-max):
   any feature touching the cell contributes.
 - Raster sources are resampled (bilinear for heights, nearest for classes)
   onto a supersampled lattice, then max-pooled per cell.
+- **Exception, ground:** at transport nodes (class road or rail), the ground
+  is the value sampled at the node's own footprint — the graded corridor —
+  not the cell max of its embankment and roadside vegetation.
 - If the requested spacing is finer than a source's native resolution, the
   source is interpolated and a **warning** is logged and recorded in metadata.
   No error is raised.

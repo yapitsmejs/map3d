@@ -124,6 +124,77 @@ def testCanopy_raisesSurfaceWithCanopyProvenance(built: Scene):
     assert built.layers["landClass"][r, c] == 10
 
 
+def testGround_corridorNodesUsePointSample(tmp_path: Path):
+    """Ground at road/rail nodes is the corridor grade (point sample), not the cell max.
+
+    Cell-max pooling biases toward embankment and roadside vegetation; along a
+    transport corridor the ground *is* the graded road, so corridor nodes take
+    the ground sampled at their own footprint.
+    """
+    import shapely
+
+    from map3d.pack.geoparquet import writeGeoParquet
+    from map3d.pack.ingest import ingestFiles
+
+    hill = makeSyntheticPack(tmp_path / "h1.pack", terrain="hill")
+
+    def lineAt(n0: float) -> None:
+        t = np.linspace(0.0, 1.0, 9)
+        lat, lon, _ = hill.frame.columnPointAtHeight(-400.0 + t * 800.0, np.full(9, n0), 0.0)
+        writeGeoParquet(
+            tmp_path / "t.parquet",
+            np.array([shapely.LineString(np.column_stack([lon, lat]))], dtype=object),
+            {
+                "sourceFeatureId": ["r0"],
+                "kind": ["road"],
+                "isBridge": [False],
+                "level": [0],
+                "width_m": [20.0],
+            },
+        )
+
+    withRoad = tmp_path / "road.pack"
+    shutil.copytree(hill.packDir, withRoad)
+    manifest = Manifest.load(withRoad)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(withRoad)
+    lineAt(-200.0)  # an at-grade road across the hill's flank (sloping ground)
+    ingestFiles(withRoad, "overtureTransportation", [tmp_path / "t.parquet"])
+
+    bare = tmp_path / "bare.pack"
+    shutil.copytree(hill.packDir, bare)
+    manifest = Manifest.load(bare)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(bare)
+
+    sceneRoad = buildScene(_request(hill, s=10.0), withRoad)
+    sceneBare = buildScene(_request(hill, s=10.0), bare)
+    r, c = _rc(sceneRoad, 0.0, -200.0)
+    gRoad = sceneRoad.layers["groundHeight_datum_m"][r, c]
+    gBare = sceneBare.layers["groundHeight_datum_m"][r, c]
+    # the road node's ground is its own footprint's terrain, below the cell max
+    lat, lon = _nodeLatLon(sceneRoad, r, c)
+    pointGround = float(
+        np.asarray(sceneRoad.models.ground.orthometricAt(np.array([[lat]]), np.array([[lon]])))[
+            0, 0
+        ]
+    )
+    assert gRoad == pytest.approx(pointGround, abs=1e-6)
+    assert gBare - gRoad > 0.1
+    # off the corridor, the cell max is unchanged
+    r2, c2 = _rc(sceneRoad, 0.0, -150.0)
+    assert sceneRoad.layers["groundHeight_datum_m"][r2, c2] == pytest.approx(
+        sceneBare.layers["groundHeight_datum_m"][r2, c2], abs=1e-6
+    )
+
+
+def _nodeLatLon(scene: Scene, r: int, c: int) -> tuple[float, float]:
+    from map3d.layers.columns import ChunkColumns
+
+    lat, lon = ChunkColumns(scene.geometry, slice(r, r + 1), slice(c, c + 1)).nodeLatLon()
+    return float(lat[0, 0]), float(lon[0, 0])
+
+
 def testCanopy_doesNotWinRoadCorridors(plane: SyntheticScene, tmp_path: Path):
     """Canopy over a ground-level road never tops the surface: the road stays at grade.
 

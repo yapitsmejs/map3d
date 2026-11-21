@@ -417,9 +417,14 @@ def _buildChunk(
 ) -> int:
     columns = ChunkColumns(geometry, rows, cols)
     ground, buildings = models.ground, models.buildings
-    groundH = ground.cellMaxOrthometric(columns, geometry.gridSpacing_m)
-    canopy = models.canopy.cellMax(columns)
     classes = models.landCover.classes(columns)
+    groundH = ground.cellMaxOrthometric(columns, geometry.gridSpacing_m)
+    corridor = np.isin(classes, (CLASS_ROAD, CLASS_RAIL))
+    if corridor.any():
+        # The ground at a transport node is the graded corridor, not the cell
+        # max of its embankment and roadside vegetation.
+        groundH = np.where(corridor, ground.orthometricAt(*columns.nodeLatLon()), groundH)
+    canopy = models.canopy.cellMax(columns)
     ids = rasterizeBuildings(buildings, geometry, rows, cols)
     decks = rasterizeDecks(models.decks, geometry, columns, ground, request.maxDeckLevels)
 
