@@ -22,7 +22,7 @@ def testSyntheticPack_opensAndCoversCenter(scene):
     assert pack.verify() == []
     warnings = pack.checkCoverage(scene.sceneBounds_deg(halfSize_m=500.0))
     roles = {w.split("'")[1] for w in warnings}
-    assert roles == {"buildingHeightRaster", "imagery"}
+    assert roles == {"buildingHeightRaster", "dsmHeight", "imagery"}
 
 
 def testSyntheticPack_groundMatchesAnalyticTerrain(scene):

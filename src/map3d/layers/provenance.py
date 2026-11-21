@@ -20,6 +20,7 @@ class HeightSource(IntEnum):
     DEFAULT_HEIGHT = 7
     CANOPY = 8
     DECK_ESTIMATED = 9
+    DECK_RESIDUAL = 10
 
 
 def heightSourceTable() -> dict[str, int]:
