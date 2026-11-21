@@ -46,10 +46,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONCEPT_COLORS",
-    "DECK_COLOR",
     "PIER_COLOR",
     "PIER_SPACING_m",
-    "WALL_COLOR",
     "TileExtent",
     "buildingParts",
     "deckParts",
@@ -369,17 +367,8 @@ def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64], extent: TileExt
 
     Piers belong to the tile their position falls in, so a deck spanning
     several tiles does not duplicate them.
-
-    Args:
-        scene: Built scene.
-        d: The deck set.
-        indices: Deck indices in this tile.
-        extent: Tile extent; piers outside it belong to another tile.
-
-    Returns:
-        Coloured mesh part of pier side quads (empty when no deck needs piers).
     """
-    parts: list[MeshPart] = [MeshPart.empty(withColors=True)]
+    parts: list[MeshPart] = []
     geometry = scene.geometry
     for k in indices:
         line = d.centerlines[k]

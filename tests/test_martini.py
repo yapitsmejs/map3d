@@ -16,7 +16,6 @@ def _hill(size: int) -> np.ndarray:
 
 def _meshHeightsAtGrid(terrain: np.ndarray, verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
     """Linear interpolation of the mesh at every grid point (barycentric)."""
-    size = terrain.shape[0]
     out = np.full(terrain.shape, np.nan)
     z = terrain[verts[:, 1], verts[:, 0]]
     for a, b, c in tris:
@@ -30,7 +29,6 @@ def _meshHeightsAtGrid(terrain: np.ndarray, verts: np.ndarray, tris: np.ndarray)
         l2 = 1 - l0 - l1
         inside = (l0 >= -1e-9) & (l1 >= -1e-9) & (l2 >= -1e-9)
         out[gy[inside], gx[inside]] = (l0 * z[a] + l1 * z[b] + l2 * z[c])[inside]
-    assert size > 0
     return out
 
 

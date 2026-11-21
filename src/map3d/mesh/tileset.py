@@ -197,19 +197,13 @@ def _writeTile(
         if len(b)
         else np.array([], dtype=np.int64)
     )
-    # Decks are drawn in EVERY tile they intersect (clipped to it): a slab
-    # longer than a tile must not sample one tile's texture outside [0, 1].
+    # Decks are drawn in every tile they intersect, clipped to it (see deckParts).
     selD = (
         _decksIntersecting(scene, ix, iy, n, sx, sy, r)
         if level >= depth - 1 and len(scene.models.decks)
         else np.array([], dtype=np.int64)
     )
-    terrain = terrainPart(
-        scene,
-        extent,
-        params.terrainGridSize,
-        terrainError if level < depth else params.leafTerrainError_m,
-    )
+    terrain = terrainPart(scene, extent, params.terrainGridSize, terrainError)
     roofs, walls = buildingParts(scene, selB, extent, appearance=params.buildingAppearance)
     tops, sides = deckParts(scene, selD, extent)
     textured = MeshPart.concatenate([terrain, roofs, tops])
@@ -234,9 +228,7 @@ def _writeTile(
     lo, hi = positions.min(axis=0) - _BOX_PAD_m, positions.max(axis=0) + _BOX_PAD_m
     tile: dict[str, Any] = {
         "boundingVolume": {"box": _box(lo, hi)},
-        "geometricError": 0.0
-        if level >= depth
-        else max(terrainError, minBuildingHeight_m(level, depth)),
+        "geometricError": 0.0 if level >= depth else max(terrainError, minHeight),
         "content": {"uri": uri},
     }
     if level < depth:

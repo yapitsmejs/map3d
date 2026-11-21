@@ -28,8 +28,7 @@ def scene(plane: SyntheticScene) -> Scene:
     )
 
 
-def _full(scene: Scene) -> scenery.TileExtent:
-    return scenery.TileExtent(-500.0, 500.0, -500.0, 500.0)
+FULL = scenery.TileExtent(-500.0, 500.0, -500.0, 500.0)  # the whole 1 km swath
 
 
 def testGridEnuRoundTrip(scene: Scene):
@@ -40,7 +39,7 @@ def testGridEnuRoundTrip(scene: Scene):
 
 
 def testTerrain_verticesSitOnGroundColumns(scene: Scene, plane: SyntheticScene):
-    part = scenery.terrainPart(scene, _full(scene), gridSize=33, maxError_m=0.0)
+    part = scenery.terrainPart(scene, FULL, gridSize=33, maxError_m=0.0)
     e, n, u = part.positions_ENU_m.T
     lat, lon, uRef = scene.geometry.frame.columnPointAtHeight(
         e, n, plane.terrainHeight_m(e, n) + 8.0
@@ -54,14 +53,14 @@ def testTerrain_verticesSitOnGroundColumns(scene: Scene, plane: SyntheticScene):
 
 
 def testTerrain_flatPlaneSimplifiesWithTolerance(scene: Scene):
-    exact = scenery.terrainPart(scene, _full(scene), gridSize=65, maxError_m=0.0)
-    coarse = scenery.terrainPart(scene, _full(scene), gridSize=65, maxError_m=0.5)
+    exact = scenery.terrainPart(scene, FULL, gridSize=65, maxError_m=0.0)
+    coarse = scenery.terrainPart(scene, FULL, gridSize=65, maxError_m=0.5)
     assert coarse.triangles.shape[0] < exact.triangles.shape[0]
 
 
 def testBuildings_roofAtRoofHeightAndWallsColored(scene: Scene):
     buildings = scene.models.buildings
-    roofs, walls = scenery.buildingParts(scene, np.array([0]), _full(scene))
+    roofs, walls = scenery.buildingParts(scene, np.array([0]), FULL)
     # Flat in ellipsoidal height, so corners differ by Earth curvature (mm) in ENU Up.
     lon, lat = np.asarray(buildings.geometries[0].exterior.coords).T
     expectedU = scene.geometry.frame.geodeticToEnu(lat, lon, buildings.roofOrthometric_m[0] + 8.0)[
@@ -80,7 +79,7 @@ def testBuildings_roofAtRoofHeightAndWallsColored(scene: Scene):
 
 
 def testDecks_slabFollowsProfile(scene: Scene, plane: SyntheticScene):
-    tops, sides = scenery.deckParts(scene, np.array([0]), _full(scene))
+    tops, sides = scenery.deckParts(scene, np.array([0]), FULL)
     assert not tops.isEmpty and not sides.isEmpty
     e, n, u = tops.positions_ENU_m.T
     # Top = ground at the vertex + the end-tapered profile: the synthetic
@@ -102,12 +101,12 @@ def testDecks_slabFollowsProfile(scene: Scene, plane: SyntheticScene):
 
 def testEmptySelections_giveEmptyParts(scene: Scene):
     empty = np.array([], dtype=np.int64)
-    assert all(p.isEmpty for p in scenery.buildingParts(scene, empty, _full(scene)))
-    assert all(p.isEmpty for p in scenery.deckParts(scene, empty, _full(scene)))
+    assert all(p.isEmpty for p in scenery.buildingParts(scene, empty, FULL))
+    assert all(p.isEmpty for p in scenery.deckParts(scene, empty, FULL))
 
 
 def testTexture_conceptualIsPng(scene: Scene):
-    png = scenery.renderTexture(scene, _full(scene), size=64)
+    png = scenery.renderTexture(scene, FULL, size=64)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
@@ -136,7 +135,7 @@ def _decodePng(data: bytes) -> np.ndarray:
     ],
 )
 def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
-    extent = _full(scene)
+    extent = FULL
     size = 500  # 2 m pixels
     rgb = _decodePng(scenery.renderTexture(scene, extent, size=size))
     assert rgb.shape == (size, size, 3)
@@ -151,7 +150,7 @@ def testTexture_imageryDerivedBuildingRoofColour(scene: Scene):
 
     appearance = BuildingAppearance.neutral(scene.models.buildings)
     appearance.roofColors[0] = [160, 100, 80]
-    rgb = _decodePng(scenery.renderTexture(scene, _full(scene), size=500, appearance=appearance))
+    rgb = _decodePng(scenery.renderTexture(scene, FULL, size=500, appearance=appearance))
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(-160.0), np.array(-100.0))
     np.testing.assert_array_equal(rgb[int(500 - gy) // 2, int(gx + 500) // 2], [160, 100, 80])
 
@@ -176,7 +175,7 @@ def testTexture_conceptualWithoutLandCoverUsesGridClasses(scene: Scene):
         scene.models, landCover=dataclasses.replace(scene.models.landCover, window=None)
     )
     bare = dataclasses.replace(scene, models=models)
-    rgb = _decodePng(scenery.renderTexture(bare, _full(scene), size=100))
+    rgb = _decodePng(scenery.renderTexture(bare, FULL, size=100))
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(100.0), np.array(-390.0))
     col, row = int((gx + 500) / 10), int((500 - gy) / 10)
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS["grass"])
@@ -188,7 +187,7 @@ def testDecks_piersGroundTheSlab(scene: Scene, plane: SyntheticScene):
 
     from map3d.mesh.scenery import PIER_COLOR, PIER_END_MARGIN_m, PIER_SPACING_m
 
-    tops, sides = scenery.deckParts(scene, np.array([0]), _full(scene))
+    tops, sides = scenery.deckParts(scene, np.array([0]), FULL)
     pierVertices = (sides.colors == np.array(PIER_COLOR, dtype=np.uint8)).all(axis=1)
     nPierQuads = int(pierVertices.sum()) // 4
     d = scene.models.decks
@@ -216,12 +215,7 @@ def testDecks_piersGroundTheSlab(scene: Scene, plane: SyntheticScene):
 
 
 def testDecks_slabClippedToTileKeepsUVsInRange(scene: Scene):
-    """A slab longer than the tile clips to it: UVs stay inside [0, 1].
-
-    Before clipping, a deck drawn in its centroid tile sampled the texture
-    outside [0, 1]; with CLAMP_TO_EDGE wrapping the out-of-tile bridge was
-    smeared with one edge pixel - visibly wrong colours along viaducts.
-    """
+    """A slab longer than the tile clips to it: UVs stay inside [0, 1]."""
     extent = scenery.TileExtent(0.0, 256.0, 128.0, 384.0)  # half of the bridge (n = 200)
     tops, sides = scenery.deckParts(scene, np.array([0]), extent)
     assert not tops.isEmpty

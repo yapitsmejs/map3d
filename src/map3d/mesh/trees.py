@@ -54,12 +54,9 @@ if TYPE_CHECKING:
     from map3d.scene import Scene
 
 __all__ = [
-    "MAX_CROWN_RADIUS_m",
     "MIN_CROWN_RADIUS_m",
-    "TREETOP_SPACING",
     "CROWN_COLORS",
     "MIN_TREE_HEIGHT_m",
-    "TREETOP_WINDOW_m",
     "TRUNK_COLOR",
     "TreeSet",
     "crownRadius_m",
@@ -97,8 +94,6 @@ class TreeSet:
     """Trees to draw, in scene coordinates.
 
     Attributes:
-        lat_deg: Latitude of each trunk.
-        lon_deg: Longitude of each trunk.
         e_m: ENU east of the trunk base.
         n_m: ENU north of the trunk base.
         baseU_m: ENU up of the trunk base (on the ground).
@@ -108,8 +103,6 @@ class TreeSet:
         crownRadius_m: Crown radius.
     """
 
-    lat_deg: FloatArray
-    lon_deg: FloatArray
     e_m: FloatArray
     n_m: FloatArray
     baseU_m: FloatArray
@@ -147,8 +140,6 @@ class TreeSet:
         classes = np.asarray(scene.layers["landClass"])[row, col]
         keep &= ~np.isin(classes, [CLASS_BUILDING, CLASS_DECK, CLASS_ROAD, CLASS_RAIL])
         return cls(
-            lat[keep],
-            lon[keep],
             e[keep],
             n[keep],
             u[keep],
@@ -239,15 +230,8 @@ def _treesFromSources(scene: Scene) -> tuple[FloatArray, FloatArray, FloatArray,
 def _segmentRaster(
     window: RasterWindow, pLat: FloatArray, pLon: FloatArray, pH: FloatArray
 ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
-    """Mapped points plus raster treetops, crowns sized from canopy area and height.
-
-    Treetops are deduplicated (:func:`packCrowns` with :data:`TREETOP_SPACING` of
-    the allometric radius), then every canopy pixel joins the nearest seed it is
-    connected to (:func:`growRegions`, within :data:`MAX_CROWN_RADIUS_m`); a
-    raster tree's crown radius blends a disc of its region's area with the
-    allometric radius for its height (geometric mean). Mapped
-    points keep the allometric radius (the raster may not show them).
-    """
+    """Mapped points plus raster treetops (see the module docstring); mapped points
+    keep the allometric radius (the raster may not show them)."""
     raw = window.values
     clean = np.where(np.isfinite(raw) & (raw >= 0) & (raw <= _MAX_VALID_m), raw, 0.0)
     smooth = smoothWindow(
@@ -278,8 +262,6 @@ def _segmentRaster(
     isRaster = seeds >= nPoints
     labels = np.full((nR, nC), -1, dtype=np.int32)
     _kernels.growRegions(seedRows, seedCols, canopyMask, pxY, pxX, MAX_CROWN_RADIUS_m, labels)
-    # Fill canopy that no treetop reaches (smooth woods): seed its tallest
-    # points a crown apart and grow again.
     total = max(int(canopyMask.sum()), 1)
     for _ in range(_FILL_ROUNDS):
         free = np.flatnonzero(canopyMask.ravel() & (labels.ravel() < 0))

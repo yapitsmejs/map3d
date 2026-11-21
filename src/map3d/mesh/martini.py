@@ -110,7 +110,6 @@ def rtinMesh(errors: FloatArray, maxError: float) -> tuple[IntArray, IntArray]:
     verts = np.zeros((size * size, 2), dtype=np.int64)
     nVerts = 0
     nTris = 0
-    top = 0
     stack[0] = (0, 0, tile, tile, tile, 0)
     stack[1] = (tile, tile, 0, 0, 0, tile)
     top = 2

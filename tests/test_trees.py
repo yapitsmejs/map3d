@@ -59,7 +59,6 @@ def testTrees_fillTheCanopyPatchWithFullHeightCrowns(trees: tr.TreeSet):
         (trees.crownRadius_m >= tr.MIN_CROWN_RADIUS_m)
         & (trees.crownRadius_m <= tr._CROWN_RADIUS_RANGE_m[1])
     )
-    assert len(trees) == trees.e_m.size
 
 
 def testTrees_includeMappedTreePointOnce(trees: tr.TreeSet):
@@ -76,11 +75,8 @@ def testTrees_onlyOnOpenGroundInsideTheSwath(trees: tr.TreeSet):
 
 
 def testTrees_standOnTheGround(trees: tr.TreeSet, scene: Scene, plane: SyntheticScene):
-    frame = scene.geometry.frame
     h = plane.terrainHeight_m(trees.e_m, trees.n_m) + plane.geoidUndulation_m
-    e, n, u = frame.geodeticToEnu(trees.lat_deg, trees.lon_deg, h)
-    np.testing.assert_allclose(e, trees.e_m, atol=0.01)
-    np.testing.assert_allclose(n, trees.n_m, atol=0.01)
+    _, _, u = scene.geometry.frame.columnPointAtHeight(trees.e_m, trees.n_m, h)
     np.testing.assert_allclose(trees.baseU_m, u, atol=0.05)
 
 

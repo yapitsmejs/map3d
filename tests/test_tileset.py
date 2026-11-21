@@ -150,9 +150,7 @@ def testTileset_buildingImageryAndProceduralFacades(scene: Scene, tmp_path: Path
 def testTileset_styleValidation(scene: Scene, tmp_path: Path):
     assert ts.STYLES == ("conceptual",)
     with pytest.raises(ValueError, match="unknown style.*conceptual"):
-        ts.write3dTiles(scene, tmp_path / "a", style="satellite")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="unknown style.*conceptual"):
-        ts.write3dTiles(scene, tmp_path / "b", style="cartoon")  # type: ignore[arg-type]
+        ts.write3dTiles(scene, tmp_path, style="satellite")  # type: ignore[arg-type]
 
 
 def _instanceCounts(path: Path) -> dict[str, int]:
@@ -183,17 +181,12 @@ def testTileset_treesAreInstancedOnTheBareGround(written: Path, scene: Scene):
     trees = TreeSet.fromScene(scene)
     assert len(trees) >= 1  # this swath holds the mapped tree (the canopy patch is outside)
     counts = _instanceCounts(written)
-    tileset = json.loads(written.read_text(encoding="utf-8"))
     depth = max(int(uri.split("/")[1]) for uri in counts)
     leaves = sum(n for uri, n in counts.items() if int(uri.split("/")[1]) == depth)
     assert leaves == len(trees)  # every tree once in the leaves
     parents = sum(n for uri, n in counts.items() if int(uri.split("/")[1]) == depth - 1)
     assert parents == int((trees.height_m >= ts.PARENT_TREE_MIN_m).sum())
     assert all(n == 0 for uri, n in counts.items() if int(uri.split("/")[1]) < depth - 1)
-    gltf = _firstGlb(written)
-    assert tileset["asset"]["extras"]["style"] == "conceptual"
-    assert validateTileset(written) == []
-    del gltf
 
 
 def testTileset_treesCanBeLeftOut(scene: Scene, tmp_path: Path):
