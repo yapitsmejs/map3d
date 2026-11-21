@@ -260,12 +260,17 @@ def buildingParts(
 def deckParts(
     scene: Scene, indices: npt.NDArray[np.int64], extent: TileExtent
 ) -> tuple[MeshPart, MeshPart]:
-    """Slabs for the selected decks.
+    """Slabs for the selected decks, clipped to the tile.
+
+    Each deck slab is clipped to ``extent`` so its UVs stay inside the
+    tile's texture: an unclipped slab longer than the tile would sample the
+    texture outside ``[0, 1]``, and with CLAMP_TO_EDGE wrapping its
+    out-of-tile portion would smear one edge pixel across the bridge.
 
     Args:
         scene: Built scene.
         indices: Deck indices (into ``scene.models.decks``).
-        extent: Tile extent (for deck-top UVs).
+        extent: Tile extent (for deck-top UVs and the clip).
 
     Returns:
         ``(tops, sides)``: textured deck tops; coloured undersides and edges.
@@ -273,7 +278,18 @@ def deckParts(
     if indices.size == 0:
         return MeshPart.empty(withUv=True), MeshPart.empty(withColors=True)
     d = scene.models.decks
-    shapes = d.pixelShapes[indices]
+    box = _extentBoxPx(scene, extent)
+    clipped = []
+    kept = []
+    for k in indices:
+        piece = shapely.intersection(d.pixelShapes[k], box)
+        if not piece.is_empty and shapely.area(piece) > 0.0:
+            clipped.append(piece)
+            kept.append(k)
+    if not clipped:
+        return MeshPart.empty(withUv=True), MeshPart.empty(withColors=True)
+    indices = np.asarray(kept, dtype=np.int64)
+    shapes = np.array(clipped, dtype=object)
     tris, owner = shapely.get_parts(
         shapely.constrained_delaunay_triangles(shapes), return_index=True
     )
@@ -304,27 +320,61 @@ def deckParts(
     upTop = _columnUp(scene, se, sn, endTop)
     upBottom = _columnUp(scene, se, sn, endTop - DECK_THICKNESS_m)
     m = a.size
+    # Segments lying on the clip box are tile cuts, not real slab edges:
+    # drawing their sides would raise a wall where the deck continues into
+    # the neighbouring tile.
+    cut = _onClipEdge(coords[a], coords[b], box)
+    keep = ~np.concatenate([cut, cut])
     sides = _quads(
-        np.column_stack([se[:m], sn[:m], upBottom[:m]]),
-        np.column_stack([se[m:], sn[m:], upBottom[m:]]),
-        np.column_stack([se[m:], sn[m:], upTop[m:]]),
-        np.column_stack([se[:m], sn[:m], upTop[:m]]),
+        np.column_stack([se[:m], sn[:m], upBottom[:m]])[keep[:m]],
+        np.column_stack([se[m:], sn[m:], upBottom[m:]])[keep[m:]],
+        np.column_stack([se[m:], sn[m:], upTop[m:]])[keep[m:]],
+        np.column_stack([se[:m], sn[:m], upTop[:m]])[keep[:m]],
         DECK_COLOR,
     )
-    return tops, MeshPart.concatenate([underside, sides, _piers(scene, d, indices)])
+    return tops, MeshPart.concatenate([underside, sides, _piers(scene, d, indices, extent)])
 
 
-def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64]) -> MeshPart:
+def _extentBoxPx(scene: Scene, extent: TileExtent) -> Any:
+    """The tile extent as a box in grid pixel coordinates."""
+    g = scene.geometry
+    s = g.gridSpacing_m
+    return shapely.box(
+        (extent.x0 + 0.5 * g.nCols * s) / s,
+        (extent.y0 + 0.5 * g.nRows * s) / s,
+        (extent.x1 + 0.5 * g.nCols * s) / s,
+        (extent.y1 + 0.5 * g.nRows * s) / s,
+    )
+
+
+def _onClipEdge(a: FloatArray, b: FloatArray, box: Any) -> npt.NDArray[np.bool_]:
+    """Which ring segments lie along the clip box edge (tile cuts)."""
+    x0, y0, x1, y1 = shapely.bounds(box)
+    tol = 1e-6
+    onEdge = (
+        (np.isclose(a[:, 0], x0, tol) & np.isclose(b[:, 0], x0, tol))
+        | (np.isclose(a[:, 0], x1, tol) & np.isclose(b[:, 0], x1, tol))
+        | (np.isclose(a[:, 1], y0, tol) & np.isclose(b[:, 1], y0, tol))
+        | (np.isclose(a[:, 1], y1, tol) & np.isclose(b[:, 1], y1, tol))
+    )
+    return np.asarray(onEdge, dtype=bool)
+
+
+def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64], extent: TileExtent) -> MeshPart:
     """Box piers grounding centreline decks over clear ground.
 
     Piers stand every :data:`PIER_SPACING_m` along the centerline (never
     within the end tapers), only where the slab's underside clears the ground
     by more than :data:`PIER_CLEARANCE_m`.
 
+    Piers belong to the tile their position falls in, so a deck spanning
+    several tiles does not duplicate them.
+
     Args:
         scene: Built scene.
         d: The deck set.
         indices: Deck indices in this tile.
+        extent: Tile extent; piers outside it belong to another tile.
 
     Returns:
         Coloured mesh part of pier side quads (empty when no deck needs piers).
@@ -350,6 +400,10 @@ def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64]) -> MeshPart:
         if not keep.any():
             continue
         e, n, topH, groundH = e[keep], n[keep], topH[keep], groundH[keep]
+        inTile = (e >= extent.x0) & (e <= extent.x1) & (n >= extent.y0) & (n <= extent.y1)
+        e, n, topH, groundH = e[inTile], n[inTile], topH[inTile], groundH[inTile]
+        if e.size == 0:
+            continue
         upPierTop = _columnUp(scene, e, n, topH - DECK_THICKNESS_m) + PIER_EMBED_m
         upGround = _columnUp(scene, e, n, groundH) - PIER_EMBED_m
         half = 0.5 * PIER_SIZE_m

@@ -143,8 +143,7 @@ def write3dTiles(
         facadePng=facadeTexture(),
     )
     buildingXY = _centroidsGrid(scene, scene.models.buildings.pixelGeometries)
-    deckXY = _centroidsGrid(scene, scene.models.decks.pixelShapes)
-    tileJson = _writeTile(scene, root, params, buildingXY, deckXY, 0, 0, 0)
+    tileJson = _writeTile(scene, root, params, buildingXY, 0, 0, 0)
     tileJson["transform"] = _enuToEcef(scene)
     tileJson["refine"] = "REPLACE"
     attribution = [s["attribution"] for s in scene.metadata.get("sources", [])]
@@ -179,7 +178,6 @@ def _writeTile(
     root: Path,
     params: _Params,
     buildingXY: FloatArray,
-    deckXY: FloatArray,
     level: int,
     ix: int,
     iy: int,
@@ -199,8 +197,10 @@ def _writeTile(
         if len(b)
         else np.array([], dtype=np.int64)
     )
+    # Decks are drawn in EVERY tile they intersect (clipped to it): a slab
+    # longer than a tile must not sample one tile's texture outside [0, 1].
     selD = (
-        np.flatnonzero(_inTile(deckXY, r, sx, sy, ix, iy, n))
+        _decksIntersecting(scene, ix, iy, n, sx, sy, r)
         if level >= depth - 1 and len(scene.models.decks)
         else np.array([], dtype=np.int64)
     )
@@ -246,7 +246,6 @@ def _writeTile(
                 root,
                 params,
                 buildingXY,
-                deckXY,
                 level + 1,
                 2 * ix + dx,
                 2 * iy + dy,
@@ -279,6 +278,23 @@ def _treesInTile(
     if level < depth:
         inTile &= trees.height_m >= PARENT_TREE_MIN_m
     return np.flatnonzero(inTile)
+
+
+def _decksIntersecting(
+    scene: Scene, ix: int, iy: int, n: int, sx: float, sy: float, r: TileExtent
+) -> npt.NDArray[np.int64]:
+    """Indices of decks whose footprint intersects a tile (pixel coords)."""
+    g = scene.geometry
+    s = g.gridSpacing_m
+    x0, y0 = r.x0 + ix * sx, r.y0 + iy * sy
+    box = shapely.box(
+        (x0 + 0.5 * g.nCols * s) / s,
+        (y0 + 0.5 * g.nRows * s) / s,
+        (x0 + sx + 0.5 * g.nCols * s) / s,
+        (y0 + sy + 0.5 * g.nRows * s) / s,
+    )
+    hits = shapely.intersects(scene.models.decks.pixelShapes, box)
+    return np.flatnonzero(hits)
 
 
 def _inTile(

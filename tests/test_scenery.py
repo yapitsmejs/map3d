@@ -213,3 +213,28 @@ def testDecks_piersGroundTheSlab(scene: Scene, plane: SyntheticScene):
     # every pier spans its slab underside: height = clearance (3 m .. 5.5 m)
     pierHeight = (pu[:, 2:] - pu[:, :2]).mean(axis=1)
     assert (pierHeight > 3.0).all() and (pierHeight <= 5.9).all()  # + 2x PIER_EMBED_m
+
+
+def testDecks_slabClippedToTileKeepsUVsInRange(scene: Scene):
+    """A slab longer than the tile clips to it: UVs stay inside [0, 1].
+
+    Before clipping, a deck drawn in its centroid tile sampled the texture
+    outside [0, 1]; with CLAMP_TO_EDGE wrapping the out-of-tile bridge was
+    smeared with one edge pixel - visibly wrong colours along viaducts.
+    """
+    extent = scenery.TileExtent(0.0, 256.0, 128.0, 384.0)  # half of the bridge (n = 200)
+    tops, sides = scenery.deckParts(scene, np.array([0]), extent)
+    assert not tops.isEmpty
+    u, v = tops.uv.T
+    assert (u >= -1e-6).all() and (u <= 1 + 1e-6).all()
+    assert (v >= -1e-6).all() and (v <= 1 + 1e-6).all()
+    # tile extents are in grid metres (this scene is rotated 20 degrees)
+    e, n, _ = tops.positions_ENU_m.T
+    gx, gy = scenery.enuToGrid(scene.geometry, e, n)
+    assert (gx >= extent.x0 - 1e-6).all() and (gx <= extent.x1 + 1e-6).all()
+    assert (gy >= extent.y0 - 1e-6).all() and (gy <= extent.y1 + 1e-6).all()
+
+    # a tile the deck does not touch yields no deck geometry
+    farAway = scenery.TileExtent(-500.0, -480.0, -500.0, -480.0)
+    tops2, sides2 = scenery.deckParts(scene, np.array([0]), farAway)
+    assert tops2.isEmpty and sides2.isEmpty
