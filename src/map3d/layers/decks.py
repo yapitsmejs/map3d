@@ -204,6 +204,7 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     ids: list[str] = []
     gradeLines: list[Any] = []
     gradeHalfWidth_px: list[float] = []
+    elevatedWayJoins: list[Any] = []
     for sourceId in sourcesForRole("transport"):
         if sourceId not in pack.manifest.sources:
             continue
@@ -229,6 +230,14 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
                 / s
                 for k, w in zip(kindsAll[grade], widthsAll[grade], strict=True)
             ]
+        elevatedWay = ~bridge & np.array(
+            [v is not None and int(v) >= 1 for v in levelsAll], dtype=bool
+        )
+        if elevatedWay.any():
+            wayLines = toPixelGeometries(sel.geometries[elevatedWay], 0.0, geometry)
+            elevatedWayJoins += list(shapely.get_point(wayLines, 0)) + list(
+                shapely.get_point(wayLines, -1)
+            )
         if not bridge.any():
             continue
         geoms = sel.geometries[bridge]
@@ -299,6 +308,8 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     taperStart, taperEnd = _endTapers(
         np.array(lines, dtype=object)[keep] if lines else np.array([], dtype=object),
         np.array(heights, dtype=np.float64)[keep],
+        geometry.gridSpacing_m,
+        elevatedWayJoins,
     )
     return DeckSet(
         pixelShapes=allShapes[keep],
@@ -315,13 +326,24 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
 
 
 def _endTapers(
-    centerlines: npt.NDArray[np.object_], levelHeight_m: FloatArray
+    centerlines: npt.NDArray[np.object_],
+    levelHeight_m: FloatArray,
+    gridSpacing_m: float,
+    elevatedWayJoins: list[Any],
 ) -> tuple[FloatArray, FloatArray]:
-    """Taper length at each deck end (0 where it joins another bridge piece).
+    """Taper length at each deck end (0 where it joins something elevated).
+
+    A free end tapers over the length that descends ``levelHeight_m`` to
+    :data:`END_RESIDUAL_m` at :data:`END_TAPER_GRADE`, capped at half the
+    piece so a short bridge still reaches its full height at the middle.
+    An end that coincides with another bridge piece or an elevated way
+    (non-bridge, level >= 1) keeps its full height.
 
     Args:
         centerlines: Pixel-space centerlines (``None`` for outline-only decks).
         levelHeight_m: Full deck-top height above ground per deck.
+        gridSpacing_m: Grid spacing, to convert pixel lengths to metres.
+        elevatedWayJoins: Pixel points where elevated ways end.
 
     Returns:
         ``(taperStart_m, taperEnd_m)`` per deck; 0 for outline-only decks.
@@ -331,18 +353,20 @@ def _endTapers(
     isCenter = np.array([line is not None for line in centerlines], dtype=bool)
     if not isCenter.any():
         return taperStart, taperEnd
+    center = centerlines[isCenter]
     full = np.maximum(levelHeight_m[isCenter] - END_RESIDUAL_m, 0.0) / END_TAPER_GRADE
-    starts = shapely.get_point(centerlines[isCenter], 0)
-    ends = shapely.get_point(centerlines[isCenter], -1)
-    points = np.concatenate([starts, ends])
+    full = np.minimum(full, 0.5 * shapely.length(center) * gridSpacing_m)
+    starts = shapely.get_point(center, 0)
+    ends = shapely.get_point(center, -1)
+    points = np.concatenate([starts, ends] + ([elevatedWayJoins] if elevatedWayJoins else []))
     coords = np.column_stack([shapely.get_x(points), shapely.get_y(points)])
-    n = coords.shape[0] // 2
-    # An end joined to another bridge piece's end keeps its full height.
+    n = center.size
+    # An end joined to another elevated piece or way keeps its full height.
     match = np.abs(coords[:, None, :] - coords[None, :, :]).max(axis=2) < _JOIN_TOLERANCE_px
     np.fill_diagonal(match, False)  # an end never joins itself
     joined = match.any(axis=1)
     taperStart[isCenter] = np.where(joined[:n], 0.0, full)
-    taperEnd[isCenter] = np.where(joined[n:], 0.0, full)
+    taperEnd[isCenter] = np.where(joined[n : 2 * n], 0.0, full)
     return taperStart, taperEnd
 
 

@@ -392,3 +392,35 @@ def testOutlineDeck_keepsDeckOverRoadUndercrossings(plane: SyntheticScene, tmp_p
     shape = decks.pixelShapes[outlines[0]]
     assert shapely.contains(shape, _pixelPoint(plane, geom, 0.0, 0.0))
     assert not shapely.contains(shape, _pixelPoint(plane, geom, 20.0, 0.0))
+
+
+def testRasterize_shortBridgeReachesFullHeight(plane: SyntheticScene, tmp_path: Path):
+    """The end taper never exceeds half the piece: short bridges keep their height."""
+    rows = [(_enuLine(plane, -50, 0, 50, 0), "road", True, 1, 8.0)]  # 100 m piece
+    pack = _packWithTransport(plane, tmp_path, rows)
+    geom = _geometry(plane)
+    ground = _ground(plane, geom, pack)
+    decks = dk.loadDecks(Pack.open(pack), geom, ground)
+    taper = (dk.ROAD_LEVEL_HEIGHT_m - dk.END_RESIDUAL_m) / dk.END_TAPER_GRADE
+    assert decks.taperStart_m.tolist() == [pytest.approx(50.0)]  # capped at half length
+    assert decks.taperStart_m[0] < taper
+    chunk = _raster(decks, geom, ground)
+    r, c = _rc(geom, 0.0, 0.0)
+    # full height (the node may sit up to 1 m down the ramp from the exact middle)
+    assert chunk.maxTop[r, c] > _plane(_nodeE(geom, r, c), _nodeN(geom, r, c)) + 6.5
+    # the uncapped 81 m taper would have peaked at only ~4.5 m
+
+
+def testLoad_joinedToElevatedWayKeepsFullHeight(plane: SyntheticScene, tmp_path: Path):
+    """A bridge end coinciding with an elevated (non-bridge, level 1) way stays full."""
+    rows = [
+        (_enuLine(plane, -300, 0, 0, 0), "road", True, 1, 8.0),
+        (_enuLine(plane, 0, 0, 300, 0), "road", False, 1, 8.0),
+    ]
+    pack = _packWithTransport(plane, tmp_path, rows)
+    geom = _geometry(plane)
+    decks = _load(plane, geom, pack)
+    assert len(decks) == 1
+    taper = (dk.ROAD_LEVEL_HEIGHT_m - dk.END_RESIDUAL_m) / dk.END_TAPER_GRADE
+    assert decks.taperStart_m.tolist() == [pytest.approx(taper)]  # free start tapers
+    assert decks.taperEnd_m.tolist() == [0.0]  # joined to the elevated way
