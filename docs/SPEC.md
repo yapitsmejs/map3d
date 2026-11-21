@@ -183,7 +183,10 @@ ESA WorldCover codes (10 tree, 20 shrub, 30 grass, 40 cropland, 50 built-up,
 60 bare, 70 snow/ice, 80 water, 90 wetland, 95 mangrove, 100 moss/lichen),
 extended with vector-derived classes: 200 building, 210 road, 220
 bridge/elevated deck, 230 rail. Precedence for the top surface is
-building > deck > road/rail > land cover. Canopy is excluded from the
+building > deck > road/rail > land cover, with one exception: a deck never
+relabels a road/rail corridor — the terrain under a viaduct keeps the road
+class beneath, and the viaduct's own top samples the same class (a road
+bridge reads as a road on both layers). Canopy is excluded from the
 surface competition wherever the class is road or rail (or a deck covers
 the node): the corridor renders at its own layer — roads sit on the ground,
 and trees over them draw as objects, not as the surface.

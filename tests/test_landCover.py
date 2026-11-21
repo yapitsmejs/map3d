@@ -128,3 +128,40 @@ def testFootways_doNotOverrideLandCover(plane: SyntheticScene, tmp_path: Path):
     ingestFiles(pack, "overtureTransportation", [tmp_path / "fw.parquet"])
     geom = _geometry(plane)
     assert _at(geom, _classes(pack, geom), 0.0, 0.0) == 30
+
+
+def testClasses_segmentEndsBurnWithRoundCaps(plane: SyntheticScene, tmp_path: Path):
+    """A node just past a road segment's end still burns (round cap, not flat).
+
+    With flat caps, the last node of a dead-end road projects past the
+    endpoint and falls outside the burn, painting raw land cover.
+    """
+    import shapely
+
+    from map3d.pack.geoparquet import writeGeoParquet
+
+    pack = tmp_path / "ends.pack"
+    shutil.copytree(plane.packDir, pack)
+    manifest = Manifest.load(pack)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(pack)
+    t = np.linspace(0.0, 1.0, 9)
+    lat, lon, _ = plane.frame.columnPointAtHeight(
+        -100.0 + t * 200.0, np.zeros(9), 0.0
+    )  # E-W road, e = -100..100
+    writeGeoParquet(
+        tmp_path / "t.parquet",
+        np.array([shapely.LineString(np.column_stack([lon, lat]))], dtype=object),
+        {
+            "sourceFeatureId": ["r0"],
+            "kind": ["road"],
+            "isBridge": [False],
+            "level": [0],
+            "width_m": [8.0],
+        },
+    )
+    ingestFiles(pack, "overtureTransportation", [tmp_path / "t.parquet"])
+    geom = _geometry(plane)
+    classes = _classes(pack, geom)
+    # the node whose centre projects ~1 m past the segment's east end
+    assert _at(geom, classes, 101.0, -1.0) == lc.CLASS_ROAD

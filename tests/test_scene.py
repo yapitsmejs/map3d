@@ -395,3 +395,50 @@ def testGroundSmoothing_defaultRecordedAndOverridable(plane: SyntheticScene, bui
     raw = buildScene(_request(plane, swath_m=200.0, s=10.0), plane.packDir, groundSmoothing_m=0.0)
     assert raw.metadata["groundSmoothing_m"] == 0.0
     assert raw.models.ground.smoothing_m == 0.0
+
+
+def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):
+    """A deck over a ground road paints the corridor, not the deck class.
+
+    The terrain under a viaduct shows the road beneath (class road/rail);
+    the viaduct's own slab top samples the same class, so a road bridge
+    reads as a road on both layers.
+    """
+    import shapely
+
+    from map3d.layers.provenance import HeightSource
+    from map3d.pack.geoparquet import writeGeoParquet
+    from map3d.pack.ingest import ingestFiles
+
+    pack = tmp_path / "cross.pack"
+    shutil.copytree(plane.packDir, pack)
+    manifest = Manifest.load(pack)
+    del manifest.sources["syntheticTransport"], manifest.sources["syntheticElevatedStructures"]
+    manifest.save(pack)
+    t = np.linspace(0.0, 1.0, 9)
+    latR, lonR, _ = plane.frame.columnPointAtHeight(-300.0 + t * 600.0, np.zeros(9), 0.0)
+    latB, lonB, _ = plane.frame.columnPointAtHeight(np.zeros(9), -300.0 + t * 600.0, 0.0)
+    writeGeoParquet(
+        tmp_path / "t.parquet",
+        np.array(
+            [
+                shapely.LineString(np.column_stack([lonR, latR])),
+                shapely.LineString(np.column_stack([lonB, latB])),
+            ],
+            dtype=object,
+        ),
+        {
+            "sourceFeatureId": ["ground", "bridge"],
+            "kind": ["road", "road"],
+            "isBridge": [False, True],
+            "level": [0, 1],
+            "width_m": [8.0, 8.0],
+        },
+    )
+    ingestFiles(pack, "overtureTransportation", [tmp_path / "t.parquet"])
+    scene = buildScene(_request(plane), pack)
+    r, c = _rc(scene, 0.0, 0.0)  # the crossing: ground road under the bridge
+    assert scene.layers["landClass"][r, c] == 210  # the corridor keeps its class
+    assert scene.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED  # surface = deck
+    r2, c2 = _rc(scene, 0.0, 200.0)  # on the bridge, off the ground road: deck
+    assert scene.layers["landClass"][r2, c2] == 220

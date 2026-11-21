@@ -147,7 +147,8 @@ class LandCoverModel:
             )
             lines = toPixelGeometries(selection.geometries[ground], 0.0, geometry)
             shapes.extend(
-                shapely.buffer(lines, 0.5 * widths / geometry.gridSpacing_m, cap_style="flat")
+                # round caps: a node just past a dead-end still burns as road
+                shapely.buffer(lines, 0.5 * widths / geometry.gridSpacing_m, cap_style="round")
             )
             classes.extend(CLASS_RAIL if k == "rail" else CLASS_ROAD for k in kinds)
         return cls(

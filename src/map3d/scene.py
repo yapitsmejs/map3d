@@ -484,7 +484,10 @@ def _buildChunk(
 
     deckOnTop = hasDeck & (~hasBuilding | (decks.maxTop > roofH))
     featureId = np.where(deckOnTop, len(buildings) + decks.maxDeck, ids)
-    landClass = np.where(hasDeck, np.uint8(CLASS_DECK), classes)
+    # A deck never relabels a road/rail corridor: the terrain under a viaduct
+    # keeps showing the road beneath, and the viaduct's slab top samples the
+    # same class (a road bridge reads as a road on both layers).
+    landClass = np.where(hasDeck & ~corridor, np.uint8(CLASS_DECK), classes)
     landClass = np.where(hasBuilding, np.uint8(CLASS_BUILDING), landClass).astype(np.uint8)
 
     (undulation,) = columns.mapNodes(lambda la, lo: (ground.undulation_m(la, lo),))
