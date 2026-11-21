@@ -34,7 +34,7 @@ __all__ = [
 DataKind = Literal["raster", "vector"]
 # Optional building columns: bottom of a raised part (height above ground, or
 # floors skipped), roof shape / height / facing bearing / ridge orientation,
-# and mapped facade / roof colours (``#RRGGBB`` or a colour name).
+# mapped facade / roof colours (``#RRGGBB`` or a colour name) and materials.
 BUILDING_3D_COLUMNS = (
     "minHeight_m",
     "minFloor",
@@ -44,6 +44,8 @@ BUILDING_3D_COLUMNS = (
     "roofOrientation",
     "facadeColor",
     "roofColor",
+    "facadeMaterial",
+    "roofMaterial",
 )
 VerticalReference = Literal["EGM2008", "WGS84", "aboveGround"]
 

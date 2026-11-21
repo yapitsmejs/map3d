@@ -94,6 +94,8 @@ class BuildingSet:
         roofs: Roof height field per building, ``None`` for flat roofs.
         facadeColor: Mapped facade colour (``#RRGGBB`` or a name), ``None`` if unmapped.
         roofColor: Mapped roof colour, ``None`` if unmapped.
+        facadeMaterial: Mapped facade material (e.g. ``glass``), ``None`` if unmapped.
+        roofMaterial: Mapped roof material (e.g. ``roof_tiles``), ``None`` if unmapped.
         groundCorrection: Ground cap applied under buildings, if any.
     """
 
@@ -111,6 +113,8 @@ class BuildingSet:
     roofs: tuple[Roof | None, ...]
     facadeColor: npt.NDArray[np.object_]
     roofColor: npt.NDArray[np.object_]
+    facadeMaterial: npt.NDArray[np.object_]
+    roofMaterial: npt.NDArray[np.object_]
     groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
@@ -236,6 +240,8 @@ def loadBuildings(
         roofs=roofs,
         facadeColor=fused.facadeColor[keep],
         roofColor=fused.roofColor[keep],
+        facadeMaterial=fused.facadeMaterial[keep],
+        roofMaterial=fused.roofMaterial[keep],
         groundCorrection=correction,
     )
 
@@ -416,6 +422,8 @@ class _Fused:
     roofOrientations: npt.NDArray[np.object_]
     facadeColor: npt.NDArray[np.object_]
     roofColor: npt.NDArray[np.object_]
+    facadeMaterial: npt.NDArray[np.object_]
+    roofMaterial: npt.NDArray[np.object_]
 
 
 def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
@@ -443,6 +451,8 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         cols["roofOrientations"].extend(_optionalObject(table, "roofOrientation")[idx])
         cols["facadeColor"].extend(_optionalObject(table, "facadeColor")[idx])
         cols["roofColor"].extend(_optionalObject(table, "roofColor")[idx])
+        cols["facadeMaterial"].extend(_optionalObject(table, "facadeMaterial")[idx])
+        cols["roofMaterial"].extend(_optionalObject(table, "roofMaterial")[idx])
     return _Fused(
         geoms=np.array(geoms, dtype=object),
         sourceIds=np.array(cols["sourceIds"], dtype=np.str_),
@@ -458,6 +468,8 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         roofOrientations=np.array(cols["roofOrientations"], dtype=object),
         facadeColor=np.array(cols["facadeColor"], dtype=object),
         roofColor=np.array(cols["roofColor"], dtype=object),
+        facadeMaterial=np.array(cols["facadeMaterial"], dtype=object),
+        roofMaterial=np.array(cols["roofMaterial"], dtype=object),
     )
 
 

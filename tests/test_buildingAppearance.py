@@ -137,3 +137,51 @@ def testBuildingAppearance_mappedColoursWinOverImagery(scene: Scene, tmp_path: P
     assert red[0] > red[1] + 60 and red[1] == red[2]
     hue, light, sat = colorsys.rgb_to_hls(*(red / 255.0))
     assert sat == pytest.approx(MAPPED_MAX_SATURATION, abs=0.01)
+
+
+def testFacadeStyles_glassMetalAndLowRaisedParts(scene: Scene):
+    import dataclasses
+
+    from map3d.mesh.buildingAppearance import FacadeStyle, facadeStyles
+
+    b = scene.models.buildings
+    n = len(b)
+    assert n == 3
+    styled = dataclasses.replace(
+        b,
+        facadeMaterial=np.array(["glass", " Metal", None], dtype=object),
+        minHeight_m=np.array([0.0, 0.0, b.height_m[2] - 4.0]),
+    )
+    assert list(facadeStyles(styled)) == [FacadeStyle.GLASS, FacadeStyle.PLAIN, FacadeStyle.PLAIN]
+    assert list(facadeStyles(b)) == [FacadeStyle.WINDOWS] * 3
+    appearance = BuildingAppearance.neutral(b).withMappedColors(styled)
+    assert appearance.styleCounts() == {"windows": 0, "glass": 1, "plain": 2}
+
+
+def testRoofMaterial_givesATypicalColourUnlessAColourIsMapped(scene: Scene):
+    import dataclasses
+
+    b = scene.models.buildings
+    tiled = dataclasses.replace(
+        b,
+        roofMaterial=np.array(["roof_tiles", "roof_tiles", "unobtainium"], dtype=object),
+        roofColor=np.array([None, "#FFFFFF", None], dtype=object),
+    )
+    neutral = BuildingAppearance.neutral(b)
+    appearance = neutral.withMappedColors(tiled)
+    r, g, bl = appearance.roofColors[0].astype(int)
+    assert r > g + 40 and r > bl + 40  # terracotta
+    np.testing.assert_array_equal(appearance.roofColors[1], [242, 242, 242])  # colour wins
+    np.testing.assert_array_equal(appearance.roofColors[2], neutral.roofColors[2])  # unknown
+    assert appearance.mappedCount == 2
+
+
+def testFacadeTextures_threeDistinctRepeatingTiles():
+    from map3d.mesh.buildingAppearance import FacadeStyle, facadeTextureFor
+
+    tiles = [decodePng(facadeTextureFor(s)) for s in FacadeStyle]
+    assert all(t.shape == (96, 96, 3) for t in tiles)
+    windows, glass, plain = tiles
+    assert glass[..., 2].mean() > glass[..., 0].mean()  # glass is bluish
+    assert plain.std() < windows.std() and plain.std() < glass.std()  # plain is plain
+    np.testing.assert_array_equal(windows, decodePng(facadeTexture()))

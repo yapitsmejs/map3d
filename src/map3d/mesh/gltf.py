@@ -7,7 +7,7 @@ normals so the shape reads through flat colours:
   texture (an embedded PNG).
 - **colored:** deck sides and piers, with per-vertex colours. Double-sided.
 - **facades:** building walls with repeating procedural texture UVs and
-  per-vertex tints. Double-sided.
+  per-vertex tints, one primitive per facade texture. Double-sided.
 
 Positions are ENU metres relative to the scene centre, written y-up as glTF
 requires: ``(x, y, z) = (E, U, -N)``. 3D Tiles rotates glTF content y-up ->
@@ -165,6 +165,7 @@ def writeGlb(
     instanced: Sequence[InstancedPart] = (),
     facades: MeshPart | None = None,
     facadeTexture: bytes | None = None,
+    otherFacades: Sequence[tuple[MeshPart, bytes]] = (),
 ) -> Path:
     """Write a GLB with a textured and/or a vertex-coloured primitive, plus instances.
 
@@ -177,6 +178,7 @@ def writeGlb(
             ``EXT_mesh_gpu_instancing`` (required by the file when present).
         facades: Optional textured wall part with UVs and optional vertex tints.
         facadeTexture: Repeating procedural facade PNG for ``facades``.
+        otherFacades: More wall parts, each with its own repeating facade PNG.
 
     Returns:
         The written path.
@@ -188,7 +190,10 @@ def writeGlb(
     hasColored = colored is not None and not colored.isEmpty
     hasFacades = facades is not None and not facades.isEmpty
     instances = [p for p in instanced if p.count and not p.mesh.isEmpty]
-    if not hasTextured and not hasColored and not hasFacades and not instances:
+    others = [(wall, png) for wall, png in otherFacades if not wall.isEmpty]
+    if any(wall.uv is None for wall, _ in others):
+        raise ValueError("the facade part needs uv coordinates and a facade texture")
+    if not hasTextured and not hasColored and not hasFacades and not instances and not others:
         raise ValueError("cannot write an empty GLB")
     if hasTextured and (textured is None or textured.uv is None or texture is None):
         raise ValueError("the textured part needs uv coordinates and a texture")
@@ -299,6 +304,9 @@ def writeGlb(
     if hasFacades and facades is not None and facadeTexture is not None:
         material = addTextureMaterial(facadeTexture, doubleSided=True, repeat=True)
         primitives.append(addPrimitive(facades, material))
+    for wall, png in others:
+        material = addTextureMaterial(png, doubleSided=True, repeat=True)
+        primitives.append(addPrimitive(wall, material))
     if hasColored and colored is not None:
         primitives.append(addPrimitive(colored, addMaterial(doubleSided=True)))
 

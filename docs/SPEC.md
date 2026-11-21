@@ -255,6 +255,14 @@ and trees over them draw as objects, not as the surface.
     vegetation-like samples are rejected. Footprints under one source pixel or
     with fewer than two usable samples keep neutral colours. Walls receive a
     coordinated lighter, desaturated tint with deterministic per-feature variation.
+  - **Facade styles** (from mapped OSM `building:material`, via Overture
+    `facade_material`): a glass curtain wall (mullions, spandrels, a sky
+    reflection) for `glass`; plain panels for `metal` and for raised parts under
+    6 m tall (canopies, link bridges, with no storeys to show); punched windows
+    otherwise. Each style is its own wall primitive and repeating PNG in a
+    tile. A mapped `roof:material` (tiles, grass, metal, glass, concrete, ...)
+    without a roof colour gives a typical roof colour, ahead of imagery. The
+    tileset records `facadeStyles` counts.
   - **Procedural facades:** a shared repeating PNG supplies framed and divided
     windows, sills and floor bands. UV repetition uses approximately 3 m window
     bays and floors derived from building height. These are illustrative, not
@@ -369,8 +377,10 @@ Overture):**
   Curved roofs (dome, onion, round) share vertices so they shade smoothly.
 - **Features table:** `minHeight_m` and `roofShape` per building (decks: their
   underside above ground, `flat`).
-- **Colours:** `facade_color` and `roof_color` are carried as optional
-  `facadeColor` / `roofColor` columns for the mesh palette (§7).
+- **Colours and materials:** `facade_color`, `roof_color`, `facade_material`
+  and `roof_material` are carried as optional `facadeColor` / `roofColor` /
+  `facadeMaterial` / `roofMaterial` columns for the mesh palette and facade
+  styles (§7).
 
 **Building height precedence (authoritative first):** local government data →
 OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` ×

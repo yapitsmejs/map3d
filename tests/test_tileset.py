@@ -115,6 +115,7 @@ def testTileset_buildingImageryAndProceduralFacades(scene: Scene, tmp_path: Path
         "imagerySource": "byoBuildingImagery",
         "imageryColoredBuildings": 3,
         "mappedColorBuildings": 0,
+        "facadeStyles": {"windows": 3, "glass": 0, "plain": 0},
         "buildingCount": 3,
     }
     assert any("ortho.tif" in text for text in tileset["asset"]["extras"]["attribution"])

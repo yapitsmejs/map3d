@@ -9,13 +9,19 @@ Colour precedence per building:
    with the map-like style (saturation at most :data:`MAPPED_MAX_SATURATION`):
    OSM's ``roof:colour=red`` arrives as ``#FF3333`` and is meant as roof tiles,
    not signal red.
+   A mapped **roof material** (tiles, grass, metal, glass, ...) without a
+   mapped roof colour gives a typical colour for it.
 2. **Imagery:** top-down imagery can inform roof colours, but it contains no
    reliable facade or window observations, so it is combined with coordinated
    wall colours. Low-resolution, dark, vegetated, or otherwise unreliable
    samples fall back to:
 3. the **neutral** conceptual palette.
 
-Windows and floor bands come from a repeatable, illustrative tile.
+Walls use one of three repeatable, illustrative facade tiles
+(:class:`FacadeStyle`): punched windows and floor bands (default), a glass
+curtain wall (mapped ``facade_material=glass``), or plain panels (mapped
+``metal``, and raised parts under :data:`PLAIN_RAISED_HEIGHT_m` tall such as
+canopies and link bridges, which have no storeys to show).
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import functools
 import hashlib
 import os
 from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -47,7 +54,10 @@ __all__ = [
     "NEUTRAL_ROOF",
     "NEUTRAL_WALL",
     "BuildingAppearance",
+    "FacadeStyle",
+    "PLAIN_RAISED_HEIGHT_m",
     "facadeTexture",
+    "facadeTextureFor",
     "facadeUv",
     "parseColor",
 ]
@@ -59,6 +69,7 @@ NEUTRAL_ROOF = (214, 214, 212)  # also the conceptual texture's roof colour
 NEUTRAL_WALL = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
 FACADE_BAY_WIDTH_m = 3.0
 MAPPED_MAX_SATURATION = 0.5  # HLS saturation cap for mapped colours
+PLAIN_RAISED_HEIGHT_m = 6.0  # raised parts lower than this get plain facades
 _MAPPED_LIGHTNESS = (0.15, 0.95)
 FACADE_FLOOR_HEIGHT_m = 3.0
 _MAX_SAMPLES_PER_BUILDING = 256
@@ -77,7 +88,8 @@ class BuildingAppearance:
         imageryDerived: Which buildings had reliable imagery samples.
         sourceId: Pack imagery source id, ``byoBuildingImagery``, or ``None``.
         attribution: Imagery attribution to add to the tileset, if any.
-        mapped: Which buildings have a mapped facade or roof colour.
+        mapped: Which buildings have a mapped facade or roof colour (or roof material).
+        facadeStyles: :class:`FacadeStyle` code per building (all windows if ``None``).
     """
 
     roofColors: ColorArray
@@ -86,6 +98,7 @@ class BuildingAppearance:
     sourceId: str | None = None
     attribution: str | None = None
     mapped: npt.NDArray[np.bool_] | None = None
+    facadeStyles: npt.NDArray[np.uint8] | None = None
 
     @property
     def coloredCount(self) -> int:
@@ -96,6 +109,15 @@ class BuildingAppearance:
     def mappedCount(self) -> int:
         """Number of buildings with a mapped facade or roof colour."""
         return 0 if self.mapped is None else int(self.mapped.sum())
+
+    def styleCounts(self) -> dict[str, int]:
+        """Number of buildings per facade style (``windows``, ``glass``, ``plain``)."""
+        styles = (
+            np.zeros(self.roofColors.shape[0], dtype=np.uint8)
+            if self.facadeStyles is None
+            else self.facadeStyles
+        )
+        return {s.name.lower(): int((styles == s).sum()) for s in FacadeStyle}
 
     def withMappedColors(self, buildings: BuildingSet) -> BuildingAppearance:
         """Apply the buildings' mapped facade and roof colours over these colours.
@@ -110,6 +132,8 @@ class BuildingAppearance:
         mapped = np.zeros(len(buildings), dtype=bool)
         for i in range(len(buildings)):
             roof = _harmonized(parseColor(buildings.roofColor[i]))
+            if roof is None:
+                roof = _harmonized(_ROOF_MATERIAL_COLORS.get(str(buildings.roofMaterial[i])))
             facade = _harmonized(parseColor(buildings.facadeColor[i]))
             if roof is not None:
                 roofs[i] = roof
@@ -121,7 +145,13 @@ class BuildingAppearance:
                 walls[i] = facade
             mapped[i] = roof is not None or facade is not None
         return BuildingAppearance(
-            roofs, walls, self.imageryDerived, self.sourceId, self.attribution, mapped
+            roofs,
+            walls,
+            self.imageryDerived,
+            self.sourceId,
+            self.attribution,
+            mapped,
+            facadeStyles(buildings),
         )
 
     @classmethod
@@ -251,6 +281,44 @@ def _fromImagery(
         attribution,
     )
 
+
+class FacadeStyle(IntEnum):
+    """Which illustrative facade tile a building's walls use."""
+
+    WINDOWS = 0
+    GLASS = 1
+    PLAIN = 2
+
+
+def facadeStyles(buildings: BuildingSet) -> npt.NDArray[np.uint8]:
+    """Facade style per building from its mapped material and shape.
+
+    Args:
+        buildings: Placed buildings.
+
+    Returns:
+        :class:`FacadeStyle` codes.
+    """
+    material = np.array([str(m).strip().lower() for m in buildings.facadeMaterial])
+    partHeight = buildings.height_m - buildings.minHeight_m
+    styles = np.full(len(buildings), FacadeStyle.WINDOWS, dtype=np.uint8)
+    styles[material == "metal"] = FacadeStyle.PLAIN
+    styles[(buildings.minHeight_m > 0.0) & (partHeight < PLAIN_RAISED_HEIGHT_m)] = FacadeStyle.PLAIN
+    styles[material == "glass"] = FacadeStyle.GLASS
+    return styles
+
+
+# Typical colours of mapped roof materials (OSM roof:material), harmonised on use.
+_ROOF_MATERIAL_COLORS = {
+    "roof_tiles": np.array([178, 92, 66], dtype=np.uint8),
+    "grass": np.array([138, 180, 102], dtype=np.uint8),
+    "metal": np.array([170, 178, 186], dtype=np.uint8),
+    "glass": np.array([176, 200, 216], dtype=np.uint8),
+    "concrete": np.array([198, 196, 190], dtype=np.uint8),
+    "wood": np.array([150, 116, 84], dtype=np.uint8),
+    "slate": np.array([96, 102, 110], dtype=np.uint8),
+    "thatch": np.array([186, 160, 110], dtype=np.uint8),
+}
 
 # CSS-style colour names seen in OSM building:colour / roof:colour.
 _NAMED_COLORS = {
@@ -398,4 +466,36 @@ def facadeTexture() -> bytes:
     image[22:66, 46:50] = 170  # vertical mullion
     image[68:73, 22:74] = 190  # sill
     image[-4:, :] = 220  # floor band
+    return encodePng(image)
+
+
+def facadeTextureFor(style: int) -> bytes:
+    """The repeating facade PNG of a :class:`FacadeStyle`."""
+    return {
+        FacadeStyle.WINDOWS: facadeTexture,
+        FacadeStyle.GLASS: _glassTexture,
+        FacadeStyle.PLAIN: _plainTexture,
+    }[FacadeStyle(style)]()
+
+
+@functools.lru_cache(maxsize=1)
+def _glassTexture() -> bytes:
+    """One illustrative curtain-wall bay: tall glass panes, thin mullions, a spandrel."""
+    size = _FACADE_TEXTURE_SIZE
+    shade = np.linspace(232, 196, size)[:, None]  # sky reflection: lighter at the top
+    image = np.empty((size, size, 3), dtype=np.uint8)
+    image[...] = np.stack([shade * 0.86, shade * 0.93, shade], axis=-1).astype(np.uint8)
+    image[:, :3] = image[:, -3:] = 150  # mullions at the bay edges
+    image[:, size // 2 - 1 : size // 2 + 1] = 172  # a light centre mullion
+    image[-12:] = (156, 164, 172)  # spandrel at the floor slab
+    image[-14:-12] = 140
+    return encodePng(image)
+
+
+@functools.lru_cache(maxsize=1)
+def _plainTexture() -> bytes:
+    """One plain cladding panel with faint joints."""
+    size = _FACADE_TEXTURE_SIZE
+    image = np.full((size, size, 3), 246, dtype=np.uint8)
+    image[:, :1] = image[:1] = 228  # panel joints
     return encodePng(image)
