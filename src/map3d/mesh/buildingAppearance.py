@@ -5,7 +5,10 @@ Colour precedence per building:
 1. **Mapped colours** (OSM ``building:colour`` / ``roof:colour`` via Overture's
    ``facade_color`` / ``roof_color``): a mapped facade colour sets the walls; a
    mapped roof colour sets the roof (and, without a mapped facade colour, the
-   coordinated wall tint).
+   coordinated wall tint). Mapped colours keep their hue but are harmonised
+   with the map-like style (saturation at most :data:`MAPPED_MAX_SATURATION`):
+   OSM's ``roof:colour=red`` arrives as ``#FF3333`` and is meant as roof tiles,
+   not signal red.
 2. **Imagery:** top-down imagery can inform roof colours, but it contains no
    reliable facade or window observations, so it is combined with coordinated
    wall colours. Low-resolution, dark, vegetated, or otherwise unreliable
@@ -40,6 +43,7 @@ if TYPE_CHECKING:
 __all__ = [
     "FACADE_BAY_WIDTH_m",
     "FACADE_FLOOR_HEIGHT_m",
+    "MAPPED_MAX_SATURATION",
     "NEUTRAL_ROOF",
     "NEUTRAL_WALL",
     "BuildingAppearance",
@@ -54,6 +58,8 @@ ColorArray = npt.NDArray[np.uint8]
 NEUTRAL_ROOF = (214, 214, 212)  # also the conceptual texture's roof colour
 NEUTRAL_WALL = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
 FACADE_BAY_WIDTH_m = 3.0
+MAPPED_MAX_SATURATION = 0.5  # HLS saturation cap for mapped colours
+_MAPPED_LIGHTNESS = (0.15, 0.95)
 FACADE_FLOOR_HEIGHT_m = 3.0
 _MAX_SAMPLES_PER_BUILDING = 256
 _MIN_FOOTPRINT_PIXELS = 1.0
@@ -103,8 +109,8 @@ class BuildingAppearance:
         roofs, walls = self.roofColors.copy(), self.wallColors.copy()
         mapped = np.zeros(len(buildings), dtype=bool)
         for i in range(len(buildings)):
-            roof = parseColor(buildings.roofColor[i])
-            facade = parseColor(buildings.facadeColor[i])
+            roof = _harmonized(parseColor(buildings.roofColor[i]))
+            facade = _harmonized(parseColor(buildings.facadeColor[i]))
             if roof is not None:
                 roofs[i] = roof
                 wallTint = _coordinatedColors(
@@ -297,6 +303,16 @@ def parseColor(value: object) -> ColorArray | None:
         return np.array([int(hexPart[k : k + 2], 16) for k in (0, 2, 4)], dtype=np.uint8)
     named = _NAMED_COLORS.get(text)
     return None if named is None else np.array(named, dtype=np.uint8)
+
+
+def _harmonized(rgb: ColorArray | None) -> ColorArray | None:
+    """A mapped colour with its saturation and lightness held to the map-like style."""
+    if rgb is None:
+        return None
+    hue, lightness, saturation = colorsys.rgb_to_hls(*(rgb.astype(np.float64) / 255.0))
+    lightness = float(np.clip(lightness, *_MAPPED_LIGHTNESS))
+    out = colorsys.hls_to_rgb(hue, lightness, min(saturation, MAPPED_MAX_SATURATION))
+    return np.clip(np.round(np.array(out) * 255.0), 0, 255).astype(np.uint8)
 
 
 def _footprintSamples(

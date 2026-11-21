@@ -238,7 +238,10 @@ and trees over them draw as objects, not as the surface.
   - **Mapped colours first:** OSM `building:colour` / `roof:colour` (Overture
     `facade_color` / `roof_color`, `#RRGGBB` or a common colour name) set a
     building's walls / roof as mapped; a mapped roof colour without a facade
-    colour also sets the coordinated wall tint. The tileset records
+    colour also sets the coordinated wall tint. Mapped colours keep their hue
+    but their HLS saturation is capped at 0.5 (lightness 0.15–0.95) to suit the
+    map-like style: OSM `roof:colour=red` (`#FF3333`, ~1,600 roofs around Marina
+    Bay) means roof tiles, not signal red. The tileset records
     `mappedColorBuildings`.
   - **Building palettes:** otherwise, robust median roof colours from interior imagery
     pixel centres, capped at 256 samples per building. Dark/shadowed and

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import colorsys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,11 @@ import numpy as np
 import pytest
 from _support import decodePng, sceneOver, writeOrtho
 
-from map3d.mesh.buildingAppearance import BuildingAppearance, facadeTexture
+from map3d.mesh.buildingAppearance import (
+    MAPPED_MAX_SATURATION,
+    BuildingAppearance,
+    facadeTexture,
+)
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
 from map3d.scene import Scene
 
@@ -111,7 +116,7 @@ def testBuildingAppearance_mappedColoursWinOverImagery(scene: Scene, tmp_path: P
 
     b = scene.models.buildings
     n = len(b)
-    facade = np.array(["#506674"] + [None] * (n - 1), dtype=object)
+    facade = np.array(["#506674"] + [None] * (n - 2) + ["#FF3333"], dtype=object)
     roof = np.array([None, "white"] + [None] * (n - 2), dtype=object)
     mapped = dataclasses.replace(
         scene,
@@ -122,9 +127,13 @@ def testBuildingAppearance_mappedColoursWinOverImagery(scene: Scene, tmp_path: P
     ortho = writeOrtho(scene, tmp_path / "ortho.tif", (170, 90, 60), size=400)
     imagery = BuildingAppearance.fromScene(scene, buildingImageryPath=ortho)
     appearance = BuildingAppearance.fromScene(mapped, buildingImageryPath=ortho)
-    assert appearance.mappedCount == 2
+    assert appearance.mappedCount == 3
     np.testing.assert_array_equal(appearance.wallColors[0], [80, 102, 116])  # mapped facade
     np.testing.assert_array_equal(appearance.roofColors[0], imagery.roofColors[0])  # imagery roof
-    np.testing.assert_array_equal(appearance.roofColors[1], [255, 255, 255])  # mapped roof
+    np.testing.assert_array_equal(appearance.roofColors[1], [242, 242, 242])  # mapped, toned
     assert not np.array_equal(appearance.wallColors[1], imagery.wallColors[1])  # re-coordinated
-    np.testing.assert_array_equal(appearance.wallColors[2], imagery.wallColors[2])  # unmapped
+    # Saturated mapped colours keep their hue but are toned to the style: muted red.
+    red = appearance.wallColors[n - 1].astype(int)
+    assert red[0] > red[1] + 60 and red[1] == red[2]
+    hue, light, sat = colorsys.rgb_to_hls(*(red / 255.0))
+    assert sat == pytest.approx(MAPPED_MAX_SATURATION, abs=0.01)
