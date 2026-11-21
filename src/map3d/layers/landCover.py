@@ -23,7 +23,6 @@ from map3d.layers.columns import ChunkColumns
 from map3d.layers.decks import corridorWidths_m
 from map3d.layers.pixels import burnChunk, toPixelGeometries
 from map3d.pack.reader import Pack, RasterWindow
-from map3d.pack.registry import sourcesForRole
 
 __all__ = [
     "CLASS_BUILDING",
@@ -109,9 +108,7 @@ class LandCoverModel:
         window = pack.readRaster(entry.sourceId, bounds) if entry is not None else None
         shapes: list[object] = []
         classes: list[int] = []
-        for sourceId in sourcesForRole("transport"):
-            if sourceId not in pack.manifest.sources:
-                continue
+        for sourceId in pack.sourcesFor("transport"):
             selection = pack.readVectors(
                 sourceId, bounds, columns=["kind", "isBridge", "level", "width_m"]
             )

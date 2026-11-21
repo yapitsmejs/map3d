@@ -47,7 +47,6 @@ from map3d.layers.provenance import (
 from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m, GroundModel
 from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
 from map3d.pack.reader import Pack
-from map3d.pack.registry import sourcesForRole
 from map3d.request import SceneRequest
 
 if TYPE_CHECKING:
@@ -530,9 +529,7 @@ def _usedSources(pack: Pack) -> list[SourceEntry]:
         if entry is not None:
             used.append(entry)
     for role in ("buildings", "transport", "elevatedStructures"):
-        used += [
-            pack.manifest.sources[s] for s in sourcesForRole(role) if s in pack.manifest.sources
-        ]
+        used += [pack.manifest.sources[s] for s in pack.sourcesFor(role)]
     return used
 
 

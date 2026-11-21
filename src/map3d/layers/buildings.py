@@ -34,7 +34,7 @@ from map3d.layers.pixels import burnChunk, toPixelGeometries
 from map3d.layers.provenance import HeightSource
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack, RasterWindow
-from map3d.pack.registry import getSource, sourcesForRole
+from map3d.pack.registry import getSource
 
 __all__ = [
     "DEFAULT_BUILDING_HEIGHT_m",
@@ -192,9 +192,7 @@ def _fuse(
     heights: list[float] = []
     floors: list[float] = []
     authoritative: list[bool] = []
-    for sourceId in sourcesForRole("buildings"):
-        if sourceId not in pack.manifest.sources:
-            continue
+    for sourceId in pack.sourcesFor("buildings"):
         selection = pack.readVectors(
             sourceId, bounds, columns=["sourceFeatureId", "height_m", "numFloors"]
         )

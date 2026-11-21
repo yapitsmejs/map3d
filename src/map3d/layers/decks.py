@@ -40,7 +40,6 @@ from map3d.layers.columns import ChunkColumns
 from map3d.layers.pixels import chunkBox, rasterizePixels, toPixelGeometries
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack
-from map3d.pack.registry import sourcesForRole
 
 __all__ = [
     "DECK_THICKNESS_m",
@@ -225,9 +224,7 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     gradeLines: list[Any] = []
     gradeHalfWidth_px: list[float] = []
     elevatedWayJoins: list[Any] = []
-    for sourceId in sourcesForRole("transport"):
-        if sourceId not in pack.manifest.sources:
-            continue
+    for sourceId in pack.sourcesFor("transport"):
         sel = pack.readVectors(
             sourceId, bounds, columns=["sourceFeatureId", "kind", "isBridge", "level", "width_m"]
         )
@@ -272,9 +269,7 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     outlineShapes: list[Any] = []
     outlineSources: list[str] = []
     outlineIds: list[str] = []
-    for sourceId in sourcesForRole("elevatedStructures"):
-        if sourceId not in pack.manifest.sources:
-            continue
+    for sourceId in pack.sourcesFor("elevatedStructures"):
         sel = pack.readVectors(sourceId, bounds, columns=["sourceFeatureId"])
         pixel = toPixelGeometries(shapely.make_valid(sel.geometries), 0.0, geometry)
         outlineShapes += list(pixel)
