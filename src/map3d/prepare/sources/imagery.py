@@ -19,11 +19,10 @@ from rasterio.errors import NotGeoreferencedWarning
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
 
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpSession
 
 __all__ = ["DEFAULT_YEAR", "DEFAULT_ZOOM", "fetchSentinel2Cloudless", "tileRange", "tileUrl"]
-
-Bounds = tuple[float, float, float, float]
 
 DEFAULT_YEAR = 2024
 DEFAULT_ZOOM = 14

@@ -77,12 +77,11 @@ def testAdaptHdb_joinsStoreysAndClips(tmp_path: Path):
         "blk_no,street,max_floor_lvl,year_completed\n101,YISHUN AVE 6,12,1990\n102,YISHUN AVE 6,9,1991\n103,YISHUN AVE 6,4,1992\n",
         encoding="utf-8",
     )
-    out, stats = dgs.adaptHdbBuildings(footprints, csvPath, BOUNDS, tmp_path / "out.parquet")
+    out = dgs.adaptHdbBuildings(footprints, csvPath, BOUNDS, tmp_path / "out.parquet")
     table, geoms = readGeoParquet(out)
     assert table.column("sourceFeatureId").to_pylist() == ["760101", "760102", "000007"]
     assert table.column("numFloors").to_pylist() == [12, 9, None]
     assert table.column("height_m").to_pylist() == [None, None, None]
-    assert stats == {"footprints": 3, "joined": 2}
 
 
 def testAdaptUraBuildings(tmp_path: Path):

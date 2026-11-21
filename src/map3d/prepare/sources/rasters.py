@@ -24,6 +24,7 @@ from pathlib import Path
 
 import rasterio.errors
 
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpRangeFile, HttpSession
 from map3d.prepare.rasterClip import clipRaster
 
@@ -45,8 +46,6 @@ __all__ = [
     "quadkeysCovering",
     "worldCoverUrl",
 ]
-
-Bounds = tuple[float, float, float, float]
 
 GLO30_BASE = "https://copernicus-dem-30m.s3.amazonaws.com"
 FABDEM_BASE = "https://data.bris.ac.uk/datasets/s5hqmjcdj8yo2ibzi9b4ew3sn"

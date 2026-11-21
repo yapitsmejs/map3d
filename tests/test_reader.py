@@ -60,7 +60,7 @@ def pack(tmp_path: Path, writeRaster, writeBuildings) -> Pack:
 
 def testOpen_exposesManifest(pack: Pack):
     assert pack.bounds_deg == BOUNDS
-    assert set(pack.sourceIds) == {"fabdem", "egm2008", "overtureBuildings"}
+    assert set(pack.manifest.sources) == {"fabdem", "egm2008", "overtureBuildings"}
 
 
 def testOpen_toleratesRetiredSources(pack: Pack, tmp_path: Path, writeRaster):

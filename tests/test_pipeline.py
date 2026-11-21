@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -124,12 +125,14 @@ def testContext_lazyS3AndRelease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     calls = {"fs": 0}
 
     def fakeFs(ca):
+        assert ca == Path("ca.pem")
         calls["fs"] += 1
         return "FS"
 
     monkeypatch.setattr(overture, "s3FileSystem", fakeFs)
     monkeypatch.setattr(overture, "latestRelease", lambda fs: "2026-11-18.0")
-    ctx = pipeline.PrepareContext(SG, tmp_path, session=None, year=2023)  # type: ignore[arg-type]
+    session = SimpleNamespace(caBundle=Path("ca.pem"))
+    ctx = pipeline.PrepareContext(SG, tmp_path, session=session, year=2023)  # type: ignore[arg-type]
     assert ctx.releaseBase() == "overturemaps-us-west-2/release/2026-11-18.0"
     ctx.s3()
     assert calls["fs"] == 1

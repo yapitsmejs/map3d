@@ -21,12 +21,11 @@ from typing import Any
 
 from rasterio.warp import transform_bounds
 
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpSession
 from map3d.prepare.rasterClip import clipRaster
 
 __all__ = ["BUCKET_HTTP", "fetchGoogleBuildings", "gsToHttps", "tilesIntersecting", "utmEpsgs"]
-
-Bounds = tuple[float, float, float, float]
 
 BUCKET = "open-buildings-temporal-data"
 BUCKET_HTTP = f"https://storage.googleapis.com/{BUCKET}"

@@ -22,7 +22,8 @@ BOUNDS = (103.6, 1.2, 104.1, 1.5)
 
 def _manifest() -> Manifest:
     manifest = Manifest.new(BOUNDS)
-    entry = SourceEntry.fromSpec(getSource("fabdem"), crs="EPSG:4326")
+    entry = SourceEntry.fromSpec(getSource("fabdem"))
+    entry.crs = "EPSG:4326"
     entry.files.append(PackFile("raster/fabdem/a.tif", "ab" * 32, 1234, (103.0, 1.0, 104.0, 2.0)))
     manifest.sources["fabdem"] = entry
     return manifest
@@ -46,11 +47,12 @@ def testSave_writesAttributionFile(tmp_path: Path):
 
 
 def testSourceEntry_copiesRegistryFields():
-    entry = SourceEntry.fromSpec(getSource("metaCanopy"), crs=None)
+    entry = SourceEntry.fromSpec(getSource("metaCanopy"))
     assert entry.role == "canopyHeight"
     assert entry.kind == "raster"
     assert entry.verticalReference == "aboveGround"
     assert entry.nativeResolution_m == 1.0
+    assert entry.crs is None
     assert entry.files == []
 
 
@@ -105,7 +107,7 @@ def testValidateBounds_degenerateOnlyWhenAllowed():
 
 def testAttribution_fillsAccessedDate(tmp_path: Path):
     manifest = Manifest.new(BOUNDS)
-    entry = SourceEntry.fromSpec(getSource("sgHdbBuildings"), crs=None)
+    entry = SourceEntry.fromSpec(getSource("sgHdbBuildings"))
     entry.accessedDate = "2026-11-20"
     manifest.sources["sgHdbBuildings"] = entry
     text = manifest.attributionMarkdown()
@@ -115,5 +117,5 @@ def testAttribution_fillsAccessedDate(tmp_path: Path):
 
 def testAttribution_unknownAccessedDate():
     manifest = Manifest.new(BOUNDS)
-    manifest.sources["sgHdbBuildings"] = SourceEntry.fromSpec(getSource("sgHdbBuildings"), crs=None)
+    manifest.sources["sgHdbBuildings"] = SourceEntry.fromSpec(getSource("sgHdbBuildings"))
     assert "accessed on (unknown date)" in manifest.attributionMarkdown()

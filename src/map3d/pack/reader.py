@@ -182,11 +182,6 @@ class Pack:
         """Declared pack coverage ``(minLon, minLat, maxLon, maxLat)``."""
         return self.manifest.bounds_deg
 
-    @property
-    def sourceIds(self) -> list[str]:
-        """Identifiers of the sources present in the pack."""
-        return list(self.manifest.sources)
-
     def primarySource(self, role: str) -> SourceEntry | None:
         """Highest-priority source present for a role.
 
@@ -379,9 +374,7 @@ def _extent(bounds: Bounds) -> Any:
     return shapely.envelope(shapely.multipoints([(minX, minY), (maxX, maxY)]))
 
 
-def _snapToGrid(
-    transform: Any, bounds: tuple[float, float, float, float], marginPixels: int
-) -> tuple[float, float, float, float]:
+def _snapToGrid(transform: Any, bounds: Bounds, marginPixels: int) -> Bounds:
     left, bottom, right, top = bounds
     x0, resX = transform.c, transform.a
     y0, resY = transform.f, -transform.e

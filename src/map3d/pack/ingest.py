@@ -86,7 +86,7 @@ def ingestFiles(
         expectedCrs = expectedCrs or item.crsWkt
         checked.append(item)
 
-    entry = existing or SourceEntry.fromSpec(spec, crs=None)
+    entry = existing or SourceEntry.fromSpec(spec)
     entry.crs = expectedCrs if spec.kind == "raster" else None
     entry.accessedDate = accessed
     targetDir = root / spec.kind / sourceId

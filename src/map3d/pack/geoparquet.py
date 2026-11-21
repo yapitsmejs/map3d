@@ -15,12 +15,12 @@ import pyarrow.parquet as pq
 import pyproj
 import shapely
 
+from map3d.pack.manifest import Bounds
+
 __all__ = ["GeoParquetInfo", "inspectGeoParquet", "readGeoParquet", "writeGeoParquet"]
 
 GEOMETRY_COLUMN = "geometry"
 _CRS84 = pyproj.CRS("OGC:CRS84")
-
-Bounds = tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)

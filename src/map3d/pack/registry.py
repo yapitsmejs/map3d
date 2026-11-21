@@ -43,14 +43,12 @@ class RoleSpec:
         kind: ``"raster"`` or ``"vector"``.
         required: Whether a scene cannot be built without it.
         requiredColumns: Canonical attribute columns (vector roles only).
-        description: Human-readable description.
     """
 
     role: str
     kind: DataKind
     required: bool
-    requiredColumns: tuple[str, ...]
-    description: str
+    requiredColumns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,46 +81,24 @@ class SourceSpec:
 ROLES: dict[str, RoleSpec] = {
     spec.role: spec
     for spec in (
-        RoleSpec("ground", "raster", True, (), "Bare-earth terrain height."),
-        RoleSpec("geoid", "raster", True, (), "Geoid undulation grid (EGM2008)."),
-        RoleSpec(
-            "buildings",
-            "vector",
-            False,
-            ("sourceFeatureId", "height_m", "numFloors"),
-            "Building footprints with optional height (m) / floor count.",
-        ),
-        RoleSpec(
-            "buildingHeightRaster",
-            "raster",
-            False,
-            (),
-            "Gridded building height above ground.",
-        ),
-        RoleSpec("canopyHeight", "raster", False, (), "Vegetation canopy height above ground."),
-        RoleSpec("landCover", "raster", False, (), "Land-cover class (ESA WorldCover codes)."),
+        RoleSpec("ground", "raster", True),  # bare-earth terrain height
+        RoleSpec("geoid", "raster", True),  # geoid undulation grid (EGM2008)
+        # footprints with optional height (m) / floor count
+        RoleSpec("buildings", "vector", False, ("sourceFeatureId", "height_m", "numFloors")),
+        RoleSpec("buildingHeightRaster", "raster", False),  # building height above ground
+        RoleSpec("canopyHeight", "raster", False),  # vegetation canopy height above ground
+        RoleSpec("landCover", "raster", False),  # land-cover class (ESA WorldCover codes)
+        # road/rail/footway centerlines with bridge flag, level and width
         RoleSpec(
             "transport",
             "vector",
             False,
             ("sourceFeatureId", "kind", "isBridge", "level", "width_m"),
-            "Road/rail/footway centerlines with bridge flag, level and width.",
         ),
-        RoleSpec(
-            "trees",
-            "vector",
-            False,
-            ("sourceFeatureId", "height_m"),
-            "Individual tree points with height.",
-        ),
-        RoleSpec(
-            "elevatedStructures",
-            "vector",
-            False,
-            ("sourceFeatureId", "structureType"),
-            "Footprints of flyovers/bridges/viaducts (location only; no deck heights).",
-        ),
-        RoleSpec("imagery", "raster", False, (), "RGB imagery for the mesh drape."),
+        RoleSpec("trees", "vector", False, ("sourceFeatureId", "height_m")),  # points + height
+        # flyover/bridge/viaduct footprints (location only; no deck heights)
+        RoleSpec("elevatedStructures", "vector", False, ("sourceFeatureId", "structureType")),
+        RoleSpec("imagery", "raster", False),  # RGB imagery for the mesh drape
     )
 }
 

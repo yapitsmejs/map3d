@@ -49,7 +49,7 @@ class PrepareContext:
     def s3(self) -> Any:
         """Anonymous S3 filesystem (created on first use, sharing the CA bundle)."""
         if self._s3 is None:
-            self._s3 = overture.s3FileSystem(getattr(self.session, "caBundle", None))
+            self._s3 = overture.s3FileSystem(self.session.caBundle)
         return self._s3
 
     def releaseBase(self) -> str:
@@ -69,13 +69,14 @@ def _sgDownload(ctx: PrepareContext, key: str) -> Path:
 
 
 def _sgHdb(ctx: PrepareContext) -> list[Path]:
-    out, _stats = dataGovSg.adaptHdbBuildings(
-        _sgDownload(ctx, "hdbBuildings"),
-        _sgDownload(ctx, "hdbPropertyInfo"),
-        ctx.bounds,
-        ctx.workDir("sgHdbBuildings") / "sgHdbBuildings.parquet",
-    )
-    return [out]
+    return [
+        dataGovSg.adaptHdbBuildings(
+            _sgDownload(ctx, "hdbBuildings"),
+            _sgDownload(ctx, "hdbPropertyInfo"),
+            ctx.bounds,
+            ctx.workDir("sgHdbBuildings") / "sgHdbBuildings.parquet",
+        )
+    ]
 
 
 FETCHERS: dict[str, Fetcher] = {

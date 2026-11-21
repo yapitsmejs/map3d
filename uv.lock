@@ -478,11 +478,13 @@ dev = [
     { name = "ruff" },
 ]
 prepare = [
+    { name = "certifi" },
     { name = "httpx" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", marker = "extra == 'prepare'" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'prepare'", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6" },

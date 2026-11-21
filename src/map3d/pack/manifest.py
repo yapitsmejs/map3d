@@ -124,12 +124,11 @@ class SourceEntry:
     accessedDate: str | None = None
 
     @classmethod
-    def fromSpec(cls, spec: SourceSpec, crs: str | None) -> SourceEntry:
-        """Create an empty entry from a registry spec.
+    def fromSpec(cls, spec: SourceSpec) -> SourceEntry:
+        """Create an empty entry (no CRS, no files) from a registry spec.
 
         Args:
             spec: The registry source spec.
-            crs: Raster CRS (WKT or authority string), or ``None``.
 
         Returns:
             The entry, with no files.
@@ -143,7 +142,7 @@ class SourceEntry:
             attribution=spec.attribution,
             nativeResolution_m=spec.nativeResolution_m,
             verticalReference=spec.verticalReference,
-            crs=crs,
+            crs=None,
         )
 
 

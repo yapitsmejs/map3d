@@ -109,11 +109,6 @@ def main() -> None:
     geometry = GridGeometry.fromRequest(request)
 
     pack = Pack.open(args.pack)
-    from map3d.layers.decks import loadDecks
-    from map3d.layers.terrain import GroundModel
-
-    ground = GroundModel.load(pack, geometry)
-    decks = loadDecks(pack, geometry, ground)
     if layers is None:
         scene = buildScene(request, pack)
         layers = {name: np.asarray(scene.layers[name]) for name in scene.layers}
@@ -121,7 +116,7 @@ def main() -> None:
             layers[f"features.{name}"] = np.asarray(values)
         scene.close()
 
-    report = _audit(pack, geometry, ground, decks, layers)
+    report = _audit(pack, geometry, layers)
     text = "\n".join(report)
     print(text)
     if args.out is not None:
@@ -143,13 +138,7 @@ def _loadScene(scenePath: Path) -> tuple[SceneRequest, dict[str, np.ndarray] | N
     return request, {name: np.asarray(z[name]) for name in z.files}
 
 
-def _audit(
-    pack: Pack,
-    geometry: GridGeometry,
-    ground: Any,
-    decks: Any,
-    layers: dict[str, np.ndarray],
-) -> list[str]:
+def _audit(pack: Pack, geometry: GridGeometry, layers: dict[str, np.ndarray]) -> list[str]:
     s = geometry.gridSpacing_m
     halfX, halfY = 0.5 * geometry.nCols * s, 0.5 * geometry.nRows * s
 

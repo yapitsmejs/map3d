@@ -24,6 +24,7 @@ from rasterio.transform import from_bounds
 from map3d.frames import LocalFrame
 from map3d.pack.geoparquet import writeGeoParquet
 from map3d.pack.ingest import ingestFiles
+from map3d.pack.manifest import Bounds
 
 __all__ = [
     "SyntheticBuilding",
@@ -131,7 +132,7 @@ class SyntheticScene:
         classes = np.where(n > _WATER_NORTH_OF_m, 80, 30)
         return np.where(_inBox(e, n, _CANOPY_BOX_m), 10, classes).astype(np.uint8)
 
-    def sceneBounds_deg(self, halfSize_m: float) -> tuple[float, float, float, float]:
+    def sceneBounds_deg(self, halfSize_m: float) -> Bounds:
         """Lon/lat bounds of the ENU square ``[-halfSize, halfSize]^2``.
 
         Args:
@@ -276,7 +277,7 @@ def _inBox(
 
 
 def _pixelCentersEnu(
-    frame: LocalFrame, bounds: tuple[float, float, float, float], shape: tuple[int, int]
+    frame: LocalFrame, bounds: Bounds, shape: tuple[int, int]
 ) -> tuple[FloatArray, FloatArray]:
     minLon, minLat, maxLon, maxLat = bounds
     rows, cols = shape
@@ -287,9 +288,7 @@ def _pixelCentersEnu(
     return e_m, n_m
 
 
-def _writeGeoTiff(
-    path: Path, values: npt.NDArray[np.generic], bounds: tuple[float, float, float, float]
-) -> None:
+def _writeGeoTiff(path: Path, values: npt.NDArray[np.generic], bounds: Bounds) -> None:
     rows, cols = values.shape
     with rasterio.open(
         path,
