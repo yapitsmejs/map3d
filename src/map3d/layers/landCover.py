@@ -124,17 +124,11 @@ class LandCoverModel:
             table = selection.table
             # Every road/rail corridor burns its class - bridges included, so a
             # viaduct's slab top paints as the road it carries. Footways (park
-            # paths, pavements) leave the underlying land cover alone, and
-            # tunnels are not surface roads.
+            # paths, pavements) leave the underlying land cover alone. Levels
+            # are not filtered: OSM tags level -1 on ordinary roads that dip
+            # under intersections, which must keep their surface paint.
             burn = np.array(
-                [
-                    kind != "footway" and level is not None and int(level) >= 0
-                    for kind, level in zip(
-                        table.column("kind").to_pylist(),
-                        table.column("level").to_pylist(),
-                        strict=True,
-                    )
-                ],
+                [kind != "footway" for kind in table.column("kind").to_pylist()],
                 dtype=bool,
             )
             if not burn.any():

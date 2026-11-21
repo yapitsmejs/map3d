@@ -198,7 +198,8 @@ and trees over them draw as objects, not as the surface.
   8 m), cell centres only, so the corridor class, the canopy carve and the
   deck buffers agree on where a road is. Bridges burn as the roads they
   carry, so a viaduct's slab top paints road grey; footways leave the land
-  cover alone and tunnels are not surface roads.
+  cover alone. Levels are not filtered: OSM tags level -1 on ordinary roads
+  that dip under intersections, which keep their surface paint.
 - **Canopy:** a raster (metres above ground) is cell-max pooled; tree points
   become crown discs of radius max(2 m, 0.25 × height). `surfaceHeight` takes
   ground + canopy where that is the highest candidate (provenance `CANOPY`).
