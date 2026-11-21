@@ -9,6 +9,7 @@ import numpy as np
 import pyproj
 import pytest
 import rasterio
+from _support import headingAxes
 
 from map3d.io.geotiffWriter import writeGeoTiff
 from map3d.pack.synthetic import makeSyntheticPack
@@ -19,8 +20,7 @@ from map3d.scene import Scene, buildScene
 @pytest.fixture(scope="module")
 def scene(tmp_path_factory: pytest.TempPathFactory) -> Scene:
     syn = makeSyntheticPack(tmp_path_factory.mktemp("g") / "p.pack")
-    h = math.radians(30.0)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(30.0)
     req = SceneRequest((syn.frame.lat0_deg, syn.frame.lon0_deg), 5.0, axes, 1280.0, 1300.0)
     return buildScene(req, syn.packDir)
 

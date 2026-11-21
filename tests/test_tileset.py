@@ -8,8 +8,7 @@ from pathlib import Path
 import numpy as np
 import pygltflib
 import pytest
-from _meshSupport import sceneOver, writeOrtho
-from _support import validateTileset
+from _support import sceneOver, validateTileset, writeOrtho
 
 from map3d.mesh import tileset as ts
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack

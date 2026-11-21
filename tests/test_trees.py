@@ -6,7 +6,7 @@ import dataclasses
 
 import numpy as np
 import pytest
-from _meshSupport import sceneOver
+from _support import sceneOver
 
 from map3d.mesh import trees as tr
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack

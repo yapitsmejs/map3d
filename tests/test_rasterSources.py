@@ -10,8 +10,7 @@ import httpx
 import numpy as np
 import pytest
 import rasterio
-from _packSupport import mockSession
-from _support import rangeServer
+from _support import mockSession, rangeServer
 
 from map3d.prepare.sources import rasters
 

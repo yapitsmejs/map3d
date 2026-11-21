@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from _meshSupport import decodePng, sceneOver
+from _support import decodePng, sceneOver
 
 from map3d.mesh import scenery
 from map3d.mesh.buildingAppearance import BuildingAppearance

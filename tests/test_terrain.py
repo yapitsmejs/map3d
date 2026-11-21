@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns
@@ -28,8 +29,7 @@ def hill(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 
 def _geometry(scene: SyntheticScene, heading_deg: float, swath_m: float, s: float) -> GridGeometry:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     lat, lon = scene.frame.lat0_deg, scene.frame.lon0_deg
     return GridGeometry.fromRequest(SceneRequest((lat, lon), s, axes, swath_m, swath_m))
 

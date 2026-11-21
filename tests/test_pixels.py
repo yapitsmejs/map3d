@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import shapely
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.pixels import toPixelGeometries
@@ -13,8 +12,7 @@ from map3d.request import SceneRequest
 
 
 def _geom(heading: float = 0.0) -> GridGeometry:
-    h = math.radians(heading)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading)
     return GridGeometry.fromRequest(SceneRequest((1.3, 103.8), 2.0, axes, 1000.0, 600.0))
 
 

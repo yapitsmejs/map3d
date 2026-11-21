@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 import shapely
-from _packSupport import mockSession
+from _support import mockSession
 
 from map3d.pack.geoparquet import readGeoParquet
 from map3d.prepare.sources import dataGovSg as dgs

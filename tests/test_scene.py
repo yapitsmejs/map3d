@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from _support import headingAxes
 
 from map3d.layers.provenance import HeightSource
 from map3d.pack.manifest import Manifest
@@ -25,8 +26,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 def _request(
     scene: SyntheticScene, heading_deg: float = 0.0, swath_m: float = 800.0, s: float = 4.0, **kw
 ) -> SceneRequest:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     return SceneRequest(
         (scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, swath_m, swath_m, **kw
     )

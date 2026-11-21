@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns, cellMax
@@ -13,8 +12,7 @@ from map3d.request import SceneRequest
 
 
 def _geom(heading_deg: float = 0.0, swath_m: float = 7000.0, s: float = 500.0) -> GridGeometry:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     req = SceneRequest((1.2834, 103.8607), s, axes, swath_m, swath_m)
     return GridGeometry.fromRequest(req)
 

@@ -7,8 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rasterio
-from _packSupport import mockSession, writeBands
-from _support import rangeServer
+from _support import mockSession, rangeServer, writeBands
 from rasterio.transform import from_bounds
 
 from map3d.prepare.rasterClip import clipRaster

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,7 @@ from typing import Any
 import numpy as np
 import pytest
 import shapely
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers import decks as dk
@@ -32,8 +32,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 def _geometry(
     scene: SyntheticScene, s: float = 2.0, heading: float = 0.0, swath: float = 1000.0
 ) -> GridGeometry:
-    h = math.radians(heading)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading)
     return GridGeometry.fromRequest(
         SceneRequest((scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, swath, swath)
     )

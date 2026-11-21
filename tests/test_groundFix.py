@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rasterio
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.buildings import loadBuildings
@@ -56,8 +56,7 @@ def mound(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 
 def _request(scene: SyntheticScene, heading_deg: float = 0.0, s: float = 2.0) -> SceneRequest:
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     return SceneRequest((scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, 1000.0, 1000.0)
 
 

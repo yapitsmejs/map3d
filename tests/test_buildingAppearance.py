@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from _meshSupport import decodePng, sceneOver, writeOrtho
+from _support import decodePng, sceneOver, writeOrtho
 
 from map3d.mesh.buildingAppearance import BuildingAppearance, facadeTexture
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack

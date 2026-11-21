@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import math
 import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
 import shapely
+from _support import headingAxes
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.buildings import (
@@ -35,8 +35,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 def _geometry(
     scene: SyntheticScene, heading_deg: float = 0.0, swath_m: float = 800.0, s: float = 2.0
 ):
-    h = math.radians(heading_deg)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
+    axes = headingAxes(heading_deg)
     req = SceneRequest((scene.frame.lat0_deg, scene.frame.lon0_deg), s, axes, swath_m, swath_m)
     return GridGeometry.fromRequest(req)
 

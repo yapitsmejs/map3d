@@ -6,24 +6,13 @@ import math
 
 import numpy as np
 import pytest
+from _support import headingAxes
 from hypothesis import given
 from hypothesis import strategies as st
 
 from map3d.request import SceneRequest
 
 IDENTITY = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-
-
-def _headingAxes(heading_deg: float) -> np.ndarray:
-    """Rows: grid x (right), grid y (forward at heading cw from North), z Up."""
-    h_rad = math.radians(heading_deg)
-    return np.array(
-        [
-            [math.cos(h_rad), -math.sin(h_rad), 0.0],
-            [math.sin(h_rad), math.cos(h_rad), 0.0],
-            [0.0, 0.0, 1.0],
-        ]
-    )
 
 
 def _make(**overrides: object) -> SceneRequest:
@@ -73,7 +62,7 @@ def testSceneRequest_nonIntegerRatioWithinRoundoffAccepted():
 
 @given(heading_deg=st.floats(-360.0, 360.0))
 def testSceneRequest_anyHeadingAccepted(heading_deg: float):
-    assert _make(gridAxes_ENU=_headingAxes(heading_deg)).nRows == 2000
+    assert _make(gridAxes_ENU=headingAxes(heading_deg)).nRows == 2000
 
 
 @pytest.mark.parametrize(
