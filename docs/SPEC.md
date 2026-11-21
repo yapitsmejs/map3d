@@ -235,7 +235,12 @@ and trees over them draw as objects, not as the surface.
   - **Crisp overlays from the grid:** grey roads, rail and decks, and a soft
     green on the ground under canopy ≥ 2 m (not on roads), so gaps between
     crowns and distant views read as wooded.
-  - **Building palettes:** robust median roof colours from interior imagery
+  - **Mapped colours first:** OSM `building:colour` / `roof:colour` (Overture
+    `facade_color` / `roof_color`, `#RRGGBB` or a common colour name) set a
+    building's walls / roof as mapped; a mapped roof colour without a facade
+    colour also sets the coordinated wall tint. The tileset records
+    `mappedColorBuildings`.
+  - **Building palettes:** otherwise, robust median roof colours from interior imagery
     pixel centres, capped at 256 samples per building. Dark/shadowed and
     vegetation-like samples are rejected. Footprints under one source pixel or
     with fewer than two usable samples keep neutral colours. Walls receive a
@@ -354,6 +359,8 @@ Overture):**
   Curved roofs (dome, onion, round) share vertices so they shade smoothly.
 - **Features table:** `minHeight_m` and `roofShape` per building (decks: their
   underside above ground, `flat`).
+- **Colours:** `facade_color` and `roof_color` are carried as optional
+  `facadeColor` / `roofColor` columns for the mesh palette (§7).
 
 **Building height precedence (authoritative first):** local government data →
 OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` ×

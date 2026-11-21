@@ -1,10 +1,18 @@
-"""Imagery-derived building palettes and explicitly procedural facade materials.
+"""Building palettes (mapped, imagery-derived or neutral) and procedural facade materials.
 
-Top-down imagery can inform roof colours, but it contains no reliable facade or
-window observations. This module therefore combines conservative roof sampling
-with coordinated wall colours and a repeatable, illustrative window/floor tile.
-Low-resolution, dark, vegetated, or otherwise unreliable samples fall back to the
-neutral conceptual palette.
+Colour precedence per building:
+
+1. **Mapped colours** (OSM ``building:colour`` / ``roof:colour`` via Overture's
+   ``facade_color`` / ``roof_color``): a mapped facade colour sets the walls; a
+   mapped roof colour sets the roof (and, without a mapped facade colour, the
+   coordinated wall tint).
+2. **Imagery:** top-down imagery can inform roof colours, but it contains no
+   reliable facade or window observations, so it is combined with coordinated
+   wall colours. Low-resolution, dark, vegetated, or otherwise unreliable
+   samples fall back to:
+3. the **neutral** conceptual palette.
+
+Windows and floor bands come from a repeatable, illustrative tile.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ __all__ = [
     "BuildingAppearance",
     "facadeTexture",
     "facadeUv",
+    "parseColor",
 ]
 
 FloatArray = npt.NDArray[np.float64]
@@ -62,6 +71,7 @@ class BuildingAppearance:
         imageryDerived: Which buildings had reliable imagery samples.
         sourceId: Pack imagery source id, ``byoBuildingImagery``, or ``None``.
         attribution: Imagery attribution to add to the tileset, if any.
+        mapped: Which buildings have a mapped facade or roof colour.
     """
 
     roofColors: ColorArray
@@ -69,11 +79,44 @@ class BuildingAppearance:
     imageryDerived: npt.NDArray[np.bool_]
     sourceId: str | None = None
     attribution: str | None = None
+    mapped: npt.NDArray[np.bool_] | None = None
 
     @property
     def coloredCount(self) -> int:
         """Number of buildings whose colours came from reliable imagery samples."""
         return int(self.imageryDerived.sum())
+
+    @property
+    def mappedCount(self) -> int:
+        """Number of buildings with a mapped facade or roof colour."""
+        return 0 if self.mapped is None else int(self.mapped.sum())
+
+    def withMappedColors(self, buildings: BuildingSet) -> BuildingAppearance:
+        """Apply the buildings' mapped facade and roof colours over these colours.
+
+        Args:
+            buildings: The buildings these colours belong to.
+
+        Returns:
+            A new appearance; unmapped buildings keep their colours.
+        """
+        roofs, walls = self.roofColors.copy(), self.wallColors.copy()
+        mapped = np.zeros(len(buildings), dtype=bool)
+        for i in range(len(buildings)):
+            roof = parseColor(buildings.roofColor[i])
+            facade = parseColor(buildings.facadeColor[i])
+            if roof is not None:
+                roofs[i] = roof
+                wallTint = _coordinatedColors(
+                    roof.astype(np.float64), str(buildings.sourceFeatureIds[i])
+                )
+                walls[i] = wallTint[1]
+            if facade is not None:
+                walls[i] = facade
+            mapped[i] = roof is not None or facade is not None
+        return BuildingAppearance(
+            roofs, walls, self.imageryDerived, self.sourceId, self.attribution, mapped
+        )
 
     @classmethod
     def neutral(cls, buildings: BuildingSet) -> BuildingAppearance:
@@ -107,11 +150,19 @@ class BuildingAppearance:
             buildingImageryPath: Optional higher-resolution RGB orthophoto.
 
         Returns:
-            Imagery-derived appearance, with neutral fallback per building.
+            Mapped colours where present, else imagery-derived, else neutral.
 
         Raises:
             ValueError: If a supplied file is absent or has fewer than three bands.
         """
+        return cls._fromImagerySources(scene, buildingImageryPath).withMappedColors(
+            scene.models.buildings
+        )
+
+    @classmethod
+    def _fromImagerySources(
+        cls, scene: Scene, buildingImageryPath: str | os.PathLike[str] | None
+    ) -> BuildingAppearance:
         buildings = scene.models.buildings
         bounds = scene.geometry.footprintBounds_deg(margin_m=scene.geometry.gridSpacing_m)
         if buildingImageryPath is not None:
@@ -193,6 +244,59 @@ def _fromImagery(
         sourceId,
         attribution,
     )
+
+
+# CSS-style colour names seen in OSM building:colour / roof:colour.
+_NAMED_COLORS = {
+    "white": (255, 255, 255),
+    "black": (0, 0, 0),
+    "grey": (128, 128, 128),
+    "gray": (128, 128, 128),
+    "lightgrey": (211, 211, 211),
+    "lightgray": (211, 211, 211),
+    "darkgrey": (169, 169, 169),
+    "darkgray": (169, 169, 169),
+    "silver": (192, 192, 192),
+    "red": (255, 0, 0),
+    "darkred": (139, 0, 0),
+    "maroon": (128, 0, 0),
+    "brown": (165, 42, 42),
+    "orange": (255, 165, 0),
+    "yellow": (255, 255, 0),
+    "beige": (245, 245, 220),
+    "tan": (210, 180, 140),
+    "cream": (255, 253, 208),
+    "green": (0, 128, 0),
+    "darkgreen": (0, 100, 0),
+    "olive": (128, 128, 0),
+    "teal": (0, 128, 128),
+    "blue": (0, 0, 255),
+    "lightblue": (173, 216, 230),
+    "navy": (0, 0, 128),
+    "purple": (128, 0, 128),
+    "pink": (255, 192, 203),
+}
+
+
+def parseColor(value: object) -> ColorArray | None:
+    """An sRGB colour from ``#RRGGBB``, ``#RGB`` or a common colour name.
+
+    Args:
+        value: Mapped colour value (``None`` or unparseable values give ``None``).
+
+    Returns:
+        ``uint8`` RGB, or ``None``.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower().replace(" ", "").replace("_", "")
+    hexPart = text[1:] if text.startswith("#") else text
+    if len(hexPart) in (3, 6) and all(c in "0123456789abcdef" for c in hexPart):
+        if len(hexPart) == 3:
+            hexPart = "".join(c * 2 for c in hexPart)
+        return np.array([int(hexPart[k : k + 2], 16) for k in (0, 2, 4)], dtype=np.uint8)
+    named = _NAMED_COLORS.get(text)
+    return None if named is None else np.array(named, dtype=np.uint8)
 
 
 def _footprintSamples(

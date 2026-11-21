@@ -81,6 +81,8 @@ def release(tmp_path: Path) -> str:
                 "roof_height": 8.0 if k else None,
                 "roof_direction": None,
                 "roof_orientation": None,
+                "facade_color": "#5D7877" if k else None,
+                "roof_color": None,
                 "is_underground": False,
                 "geometry": shapely.box(103.81 + 5e-4 * k, 1.29, 103.8105 + 5e-4 * k, 1.291),
             }
@@ -214,6 +216,8 @@ def testBuildings_canonicalAndFiltered(tmp_path: Path, release: str):
     assert table.column("roofShape").to_pylist() == [None, None, "dome"]
     assert table.column("roofHeight_m").to_pylist() == [None, None, 8.0]
     assert set(table.column_names) >= {"minFloor", "roofDirection_deg", "roofOrientation"}
+    assert table.column("facadeColor").to_pylist() == [None, None, "#5D7877"]
+    assert table.column("roofColor").to_pylist() == [None, None, None]
     assert geoms.shape == (3,)
 
 

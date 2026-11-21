@@ -6,8 +6,8 @@ row-group statistics, and writes the canonical pack schemas:
 
 - **buildings:** ``sourceFeatureId``, ``height_m``, ``numFloors``, plus the
   optional 3D columns ``minHeight_m``, ``minFloor``, ``roofShape``,
-  ``roofHeight_m``, ``roofDirection_deg`` and ``roofOrientation`` (OSM Simple 3D
-  Buildings tags). Where a building is mapped as **building parts**
+  ``roofHeight_m``, ``roofDirection_deg``, ``roofOrientation``, ``facadeColor``
+  and ``roofColor`` (OSM Simple 3D Buildings tags). Where a building is mapped as **building parts**
   (``building_part`` rows), the parts replace its outline, as Simple 3D
   Buildings renderers do. Underground buildings and parts are excluded.
 - **water:** polygonal water (ocean, reservoirs, rivers, ponds, pools) clipped
@@ -116,6 +116,8 @@ _CANONICAL = {
     "roof_height": "roofHeight_m",
     "roof_direction": "roofDirection_deg",
     "roof_orientation": "roofOrientation",
+    "facade_color": "facadeColor",
+    "roof_color": "roofColor",
 }
 _FLOAT_ATTRS = ("height", "min_height", "roof_height", "roof_direction")
 

@@ -92,6 +92,8 @@ class BuildingSet:
         minHeight_m: Bottom of a raised part above its base (0 = on the ground).
         roofShape: :class:`~map3d.layers.roofs.RoofShape` code (as mapped).
         roofs: Roof height field per building, ``None`` for flat roofs.
+        facadeColor: Mapped facade colour (``#RRGGBB`` or a name), ``None`` if unmapped.
+        roofColor: Mapped roof colour, ``None`` if unmapped.
         groundCorrection: Ground cap applied under buildings, if any.
     """
 
@@ -107,6 +109,8 @@ class BuildingSet:
     minHeight_m: FloatArray
     roofShape: npt.NDArray[np.uint8]
     roofs: tuple[Roof | None, ...]
+    facadeColor: npt.NDArray[np.object_]
+    roofColor: npt.NDArray[np.object_]
     groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
@@ -230,6 +234,8 @@ def loadBuildings(
         minHeight_m=minHeight[keep],
         roofShape=fused.roofShape[keep],
         roofs=roofs,
+        facadeColor=fused.facadeColor[keep],
+        roofColor=fused.roofColor[keep],
         groundCorrection=correction,
     )
 
@@ -408,6 +414,8 @@ class _Fused:
     roofHeights: FloatArray
     roofDirections: FloatArray
     roofOrientations: npt.NDArray[np.object_]
+    facadeColor: npt.NDArray[np.object_]
+    roofColor: npt.NDArray[np.object_]
 
 
 def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
@@ -433,6 +441,8 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         cols["roofHeights"].extend(_optionalFloat(table, "roofHeight_m")[idx])
         cols["roofDirections"].extend(_optionalFloat(table, "roofDirection_deg")[idx])
         cols["roofOrientations"].extend(_optionalObject(table, "roofOrientation")[idx])
+        cols["facadeColor"].extend(_optionalObject(table, "facadeColor")[idx])
+        cols["roofColor"].extend(_optionalObject(table, "roofColor")[idx])
     return _Fused(
         geoms=np.array(geoms, dtype=object),
         sourceIds=np.array(cols["sourceIds"], dtype=np.str_),
@@ -446,6 +456,8 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         roofHeights=np.array(cols["roofHeights"], dtype=np.float64),
         roofDirections=np.array(cols["roofDirections"], dtype=np.float64),
         roofOrientations=np.array(cols["roofOrientations"], dtype=object),
+        facadeColor=np.array(cols["facadeColor"], dtype=object),
+        roofColor=np.array(cols["roofColor"], dtype=object),
     )
 
 

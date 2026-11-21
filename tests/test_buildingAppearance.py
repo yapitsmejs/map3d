@@ -93,3 +93,38 @@ def testFacadeTexture_hasRepeatedWindowAndFloorBand():
     assert np.all(image[0, 0] == 255)
     assert image[30, 35].mean() < 100  # glass
     assert image[-2, 0].mean() < 240  # floor band
+
+
+def testParseColor_hexShortHexNamesAndJunk():
+    from map3d.mesh.buildingAppearance import parseColor
+
+    np.testing.assert_array_equal(parseColor("#5D7877"), [93, 120, 119])
+    np.testing.assert_array_equal(parseColor("5d7877"), [93, 120, 119])
+    np.testing.assert_array_equal(parseColor("#fa0"), [255, 170, 0])
+    np.testing.assert_array_equal(parseColor(" Light Grey "), [211, 211, 211])
+    for junk in (None, "", "#12345", "sparkly", 42):
+        assert parseColor(junk) is None
+
+
+def testBuildingAppearance_mappedColoursWinOverImagery(scene: Scene, tmp_path: Path):
+    import dataclasses
+
+    b = scene.models.buildings
+    n = len(b)
+    facade = np.array(["#506674"] + [None] * (n - 1), dtype=object)
+    roof = np.array([None, "white"] + [None] * (n - 2), dtype=object)
+    mapped = dataclasses.replace(
+        scene,
+        models=dataclasses.replace(
+            scene.models, buildings=dataclasses.replace(b, facadeColor=facade, roofColor=roof)
+        ),
+    )
+    ortho = writeOrtho(scene, tmp_path / "ortho.tif", (170, 90, 60), size=400)
+    imagery = BuildingAppearance.fromScene(scene, buildingImageryPath=ortho)
+    appearance = BuildingAppearance.fromScene(mapped, buildingImageryPath=ortho)
+    assert appearance.mappedCount == 2
+    np.testing.assert_array_equal(appearance.wallColors[0], [80, 102, 116])  # mapped facade
+    np.testing.assert_array_equal(appearance.roofColors[0], imagery.roofColors[0])  # imagery roof
+    np.testing.assert_array_equal(appearance.roofColors[1], [255, 255, 255])  # mapped roof
+    assert not np.array_equal(appearance.wallColors[1], imagery.wallColors[1])  # re-coordinated
+    np.testing.assert_array_equal(appearance.wallColors[2], imagery.wallColors[2])  # unmapped

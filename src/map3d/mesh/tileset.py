@@ -159,6 +159,7 @@ def write3dTiles(
                     "facades": "procedural; windows and floor bands are illustrative, not measured",
                     "imagerySource": appearance.sourceId,
                     "imageryColoredBuildings": appearance.coloredCount,
+                    "mappedColorBuildings": appearance.mappedCount,
                     "buildingCount": len(scene.models.buildings),
                 },
             },
