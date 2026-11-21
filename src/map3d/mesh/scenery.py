@@ -337,11 +337,9 @@ def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64], extent: TileExt
         lat, lon, _ = geometry.frame.columnPointAtHeight(e, n, 0.0)
         groundH = np.asarray(scene.models.ground.orthometricAt(lat, lon))
         keep = (topH - DECK_THICKNESS_m - groundH) > PIER_CLEARANCE_m
-        if not keep.any():
-            continue
+        # Tile extents are in grid metres; half-open so a pier on a tile edge is drawn once.
+        keep &= (gx >= extent.x0) & (gx < extent.x1) & (gy >= extent.y0) & (gy < extent.y1)
         e, n, topH, groundH = e[keep], n[keep], topH[keep], groundH[keep]
-        inTile = (e >= extent.x0) & (e <= extent.x1) & (n >= extent.y0) & (n <= extent.y1)
-        e, n, topH, groundH = e[inTile], n[inTile], topH[inTile], groundH[inTile]
         if e.size == 0:
             continue
         upPierTop = _columnUp(scene, e, n, topH - DECK_THICKNESS_m) + PIER_EMBED_m

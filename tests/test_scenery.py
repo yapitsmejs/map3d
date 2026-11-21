@@ -195,6 +195,27 @@ def testDecks_piersGroundTheSlab(scene: Scene, plane: SyntheticScene):
     assert (pierHeight > 3.0).all() and (pierHeight <= 5.9).all()  # + 2x PIER_EMBED_m
 
 
+def testDecks_piersBelongToTheTileTheyStandIn(scene: Scene):
+    """On a rotated grid, each pier is drawn once, by the tile (grid metres) it stands in."""
+    from map3d.mesh.scenery import PIER_COLOR
+
+    def pierCentresGrid(extent: scenery.TileExtent) -> np.ndarray:
+        _, sides = scenery.deckParts(scene, np.array([0]), extent)
+        isPier = (sides.colors == np.array(PIER_COLOR, dtype=np.uint8)).all(axis=1)
+        e, n = sides.positions_ENU_m[isPier, :2].reshape(-1, 16, 2).mean(axis=1).T  # 4 quads
+        return np.column_stack(scene.geometry.enuToGrid(e, n))
+
+    total = pierCentresGrid(FULL).shape[0]
+    found = 0
+    for x0, y0 in [(-500.0, -500.0), (0.0, -500.0), (-500.0, 0.0), (0.0, 0.0)]:
+        tile = scenery.TileExtent(x0, x0 + 500.0, y0, y0 + 500.0)
+        centres = pierCentresGrid(tile)
+        assert ((centres[:, 0] >= x0) & (centres[:, 0] <= x0 + 500.0)).all()
+        assert ((centres[:, 1] >= y0) & (centres[:, 1] <= y0 + 500.0)).all()
+        found += centres.shape[0]
+    assert total > 10 and found == total
+
+
 def testDecks_slabClippedToTileKeepsUVsInRange(scene: Scene):
     """A slab longer than the tile clips to it: UVs stay inside [0, 1]."""
     extent = scenery.TileExtent(0.0, 256.0, 128.0, 384.0)  # half of the bridge (n = 200)
