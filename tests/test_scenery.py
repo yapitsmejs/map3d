@@ -180,3 +180,36 @@ def testTexture_conceptualWithoutLandCoverUsesGridClasses(scene: Scene):
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(100.0), np.array(-390.0))
     col, row = int((gx + 500) / 10), int((500 - gy) / 10)
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS["grass"])
+
+
+def testDecks_piersGroundTheSlab(scene: Scene, plane: SyntheticScene):
+    """Centreline decks get piers from the ground up to the slab underside."""
+    import shapely
+
+    from map3d.mesh.scenery import PIER_COLOR, PIER_END_MARGIN_m, PIER_SPACING_m
+
+    tops, sides = scenery.deckParts(scene, np.array([0]), _full(scene))
+    pierVertices = (sides.colors == np.array(PIER_COLOR, dtype=np.uint8)).all(axis=1)
+    nPierQuads = int(pierVertices.sum()) // 4
+    d = scene.models.decks
+    line = d.centerlines[0]
+    length_m = shapely.length(line) * scene.geometry.gridSpacing_m
+    positions = np.arange(PIER_END_MARGIN_m, length_m - PIER_END_MARGIN_m, PIER_SPACING_m)
+    taper = (7.0 - 0.5) / 0.08  # END_RESIDUAL_m / END_TAPER_GRADE
+    topAbove = 0.5 + 6.5 * np.clip(np.minimum(positions, length_m - positions) / taper, 0, 1)
+    expected = int((topAbove - 1.5 > 3.0).sum())  # PIER_CLEARANCE_m, DECK_THICKNESS_m
+    assert nPierQuads == expected * 4  # four side quads per pier
+    assert expected > 10  # the middle of the slab is well clear of the ground
+    # pier feet sit on the terrain at their position
+    pe, pn, pu = sides.positions_ENU_m[pierVertices].T
+    pu = pu.reshape(-1, 4)  # per quad: two feet, two tops
+    fe = pe.reshape(-1, 4)[:, :2].ravel()
+    fn = pn.reshape(-1, 4)[:, :2].ravel()
+    feet = pu[:, :2].ravel()
+    _, _, uGround = scene.geometry.frame.columnPointAtHeight(
+        fe, fn, plane.terrainHeight_m(fe, fn) + 8.0
+    )
+    np.testing.assert_allclose(feet, uGround, atol=1.0)
+    # every pier spans its slab underside: height = clearance (3 m .. 5.5 m)
+    pierHeight = (pu[:, 2:] - pu[:, :2]).mean(axis=1)
+    assert (pierHeight > 3.0).all() and (pierHeight <= 5.9).all()  # + 2x PIER_EMBED_m

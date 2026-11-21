@@ -47,6 +47,8 @@ if TYPE_CHECKING:
 __all__ = [
     "CONCEPT_COLORS",
     "DECK_COLOR",
+    "PIER_COLOR",
+    "PIER_SPACING_m",
     "WALL_COLOR",
     "TileExtent",
     "buildingParts",
@@ -61,6 +63,12 @@ FloatArray = npt.NDArray[np.float64]
 
 WALL_COLOR = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
 DECK_COLOR = (172, 174, 180)
+PIER_COLOR = (150, 148, 145)
+PIER_SPACING_m = 35.0  # pier spacing along a deck centerline
+PIER_END_MARGIN_m = 15.0  # no piers within the tapered ends
+PIER_CLEARANCE_m = 3.0  # only where the slab clears the ground by this
+PIER_SIZE_m = 1.2  # square pier footprint side
+PIER_EMBED_m = 0.15  # pier ends embed slightly into slab and ground
 
 # Conceptual (map-like) style: flat pastel colours, shaded by the renderer.
 CONCEPT_COLORS: dict[str, tuple[int, int, int]] = {
@@ -303,7 +311,57 @@ def deckParts(
         np.column_stack([se[:m], sn[:m], upTop[:m]]),
         DECK_COLOR,
     )
-    return tops, MeshPart.concatenate([underside, sides])
+    return tops, MeshPart.concatenate([underside, sides, _piers(scene, d, indices)])
+
+
+def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64]) -> MeshPart:
+    """Box piers grounding centreline decks over clear ground.
+
+    Piers stand every :data:`PIER_SPACING_m` along the centerline (never
+    within the end tapers), only where the slab's underside clears the ground
+    by more than :data:`PIER_CLEARANCE_m`.
+
+    Args:
+        scene: Built scene.
+        d: The deck set.
+        indices: Deck indices in this tile.
+
+    Returns:
+        Coloured mesh part of pier side quads (empty when no deck needs piers).
+    """
+    parts: list[MeshPart] = [MeshPart.empty(withColors=True)]
+    geometry = scene.geometry
+    for k in indices:
+        line = d.centerlines[k]
+        if line is None:
+            continue
+        length_m = shapely.length(line) * geometry.gridSpacing_m
+        positions_m = np.arange(PIER_END_MARGIN_m, length_m - PIER_END_MARGIN_m, PIER_SPACING_m)
+        if positions_m.size == 0:
+            continue
+        points = shapely.line_interpolate_point(line, positions_m / length_m, normalized=True)
+        px = np.column_stack([shapely.get_x(points), shapely.get_y(points)])
+        topH = _deckTop(scene, d, np.array([k]), np.zeros(px.shape[0], dtype=np.int64), px)
+        gx, gy = _pixelToGrid(geometry, px[:, 0], px[:, 1])
+        e, n = gridToEnu(geometry, gx, gy)
+        lat, lon, _ = geometry.frame.columnPointAtHeight(e, n, 0.0)
+        groundH = np.asarray(scene.models.ground.orthometricAt(lat, lon))
+        keep = (topH - DECK_THICKNESS_m - groundH) > PIER_CLEARANCE_m
+        if not keep.any():
+            continue
+        e, n, topH, groundH = e[keep], n[keep], topH[keep], groundH[keep]
+        upPierTop = _columnUp(scene, e, n, topH - DECK_THICKNESS_m) + PIER_EMBED_m
+        upGround = _columnUp(scene, e, n, groundH) - PIER_EMBED_m
+        half = 0.5 * PIER_SIZE_m
+        corners = np.array([[half, half], [-half, half], [-half, -half], [half, -half]])
+        for i in range(4):
+            j = (i + 1) % 4
+            p0 = np.column_stack([e + corners[i, 0], n + corners[i, 1], upGround])
+            p1 = np.column_stack([e + corners[j, 0], n + corners[j, 1], upGround])
+            p2 = np.column_stack([e + corners[j, 0], n + corners[j, 1], upPierTop])
+            p3 = np.column_stack([e + corners[i, 0], n + corners[i, 1], upPierTop])
+            parts.append(_quads(p0, p1, p2, p3, PIER_COLOR))
+    return MeshPart.concatenate(parts)
 
 
 def renderTexture(
