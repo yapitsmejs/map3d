@@ -19,6 +19,7 @@ import shapely
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.columns import ChunkColumns
+from map3d.layers.decks import DEFAULT_DECK_WIDTH_m
 from map3d.layers.pixels import rasterizePixels, toPixelGeometries
 from map3d.pack.reader import Pack, RasterWindow
 from map3d.pack.registry import sourcesForRole
@@ -38,7 +39,10 @@ CLASS_BUILDING = 200
 CLASS_ROAD = 210
 CLASS_DECK = 220
 CLASS_RAIL = 230
-DEFAULT_WIDTH_m = {"road": 7.0, "rail": 4.0}
+# Transport corridors burn with the same widths deck footprints use
+# (DEFAULT_DECK_WIDTH_m), so the corridor class, the canopy carve and the
+# deck buffers agree on where a road is.
+DEFAULT_WIDTH_m = DEFAULT_DECK_WIDTH_m  # re-exported for compatibility
 
 _NAMES = {
     0: "unknown",
