@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import shutil
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ import shapely
 from map3d.gridGeometry import GridGeometry
 from map3d.layers import decks as dk
 from map3d.layers.columns import ChunkColumns
+from map3d.layers.pixels import toPixelGeometries
 from map3d.layers.terrain import GroundModel
 from map3d.pack.geoparquet import writeGeoParquet
 from map3d.pack.ingest import ingestFiles
@@ -42,6 +44,31 @@ def _load(scene: SyntheticScene, geom: GridGeometry, packDir: Path | None = None
     return dk.loadDecks(pack, geom, GroundModel.load(pack, geom))
 
 
+def _ground(scene: SyntheticScene, geom: GridGeometry, packDir: Path | None = None) -> GroundModel:
+    return GroundModel.load(Pack.open(packDir or scene.packDir), geom)
+
+
+def _raster(
+    decks: dk.DeckSet,
+    geom: GridGeometry,
+    ground: GroundModel,
+    maxLevels: int = 5,
+    rows: slice | None = None,
+    cols: slice | None = None,
+) -> dk.DeckChunk:
+    return dk.rasterizeDecks(
+        decks,
+        geom,
+        ChunkColumns(
+            geom,
+            rows if rows is not None else slice(None),
+            cols if cols is not None else slice(None),
+        ),
+        ground,
+        maxLevels,
+    )
+
+
 def _rc(geom: GridGeometry, e: float, n: float) -> tuple[int, int]:
     ee, nn = geom.nodesEnu()
     idx = np.unravel_index(np.argmin((ee - e) ** 2 + (nn - n) ** 2), ee.shape)
@@ -50,6 +77,10 @@ def _rc(geom: GridGeometry, e: float, n: float) -> tuple[int, int]:
 
 def _nodeE(geom: GridGeometry, r: int, c: int) -> float:
     return float(geom.nodesEnu()[0][r, c])
+
+
+def _nodeN(geom: GridGeometry, r: int, c: int) -> float:
+    return float(geom.nodesEnu()[1][r, c])
 
 
 def _plane(e: float, n: float) -> float:
@@ -85,6 +116,33 @@ def _packWithTransport(scene: SyntheticScene, tmp_path: Path, rows: list[tuple])
     return pack
 
 
+def _packWithOutlines(
+    scene: SyntheticScene, tmp_path: Path, rows: list[tuple], outlines: list[shapely.Polygon]
+) -> Path:
+    """A pack with custom transport segments and elevated-structure outlines."""
+    pack = _packWithTransport(scene, tmp_path, rows)
+    writeGeoParquet(
+        tmp_path / "o.parquet",
+        np.array(outlines, dtype=object),
+        {
+            "sourceFeatureId": [f"o{i}" for i in range(len(outlines))],
+            "structureType": ["Flyover"] * len(outlines),
+        },
+    )
+    ingestFiles(pack, "syntheticElevatedStructures", [tmp_path / "o.parquet"])
+    return pack
+
+
+def _enuBox(scene: SyntheticScene, e0: float, n0: float, e1: float, n1: float) -> shapely.Polygon:
+    lat, lon, _ = scene.frame.columnPointAtHeight([e0, e1, e1, e0], [n0, n0, n1, n1], 0.0)
+    return shapely.Polygon(np.column_stack([lon, lat]))
+
+
+def _pixelPoint(scene: SyntheticScene, geom: GridGeometry, e: float, n: float) -> Any:
+    lat, lon, _ = scene.frame.columnPointAtHeight(e, n, 0.0)
+    return toPixelGeometries(np.array([shapely.points(lon, lat)], dtype=object), 0.0, geom)[0]
+
+
 def testLoad_syntheticBridgeDedupesItsOutline(plane: SyntheticScene):
     decks = _load(plane, _geometry(plane))
     assert len(decks) == 1
@@ -97,16 +155,16 @@ def testLoad_syntheticBridgeDedupesItsOutline(plane: SyntheticScene):
     assert table["deckLevel"].tolist() == [1]
 
 
-def testRasterize_topFollowsInterpolatedGroundPlusLevel(plane: SyntheticScene):
+def testRasterize_topFollowsGroundAlongCenterlinePlusLevel(plane: SyntheticScene):
     geom = _geometry(plane)
     decks = _load(plane, geom)
-    chunk = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=5
-    )
+    ground = _ground(plane, geom)
+    chunk = _raster(decks, geom, ground)
     assert chunk.tops.shape == (5, 500, 500)
     r, c = _rc(geom, 0.0, 200.0)
-    # Ends at (-400, 200) = 0 m and (400, 200) = 16 m: the lerp equals the plane along n = 200.
-    expected = _plane(_nodeE(geom, r, c), 200.0) + dk.ROAD_LEVEL_HEIGHT_m
+    # The deck follows the ground sampled at the node (the bridge midpoint is
+    # past the end tapers), plus the full road level height.
+    expected = _plane(_nodeE(geom, r, c), _nodeN(geom, r, c)) + dk.ROAD_LEVEL_HEIGHT_m
     assert chunk.tops[0, r, c] == pytest.approx(expected, abs=1e-3)
     assert chunk.bottoms[0, r, c] == pytest.approx(expected - dk.DECK_THICKNESS_m, abs=1e-3)
     assert np.isnan(chunk.tops[1, r, c])
@@ -136,18 +194,16 @@ def testRasterize_interchangeStacksLevelsMergesParallelsAndCountsOverflow(
     geom = _geometry(plane)
     decks = _load(plane, geom, pack)
     assert len(decks) == 3
-    chunk = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=5
-    )
+    chunk = _raster(decks, geom, _ground(plane, geom, pack))
     r, c = _rc(geom, 0.0, 2.0)
     e = _nodeE(geom, r, c)
     # Level 1 is A/A' merged (tops along n = 0 and n = 4 differ by 0.04 m); level 2 is B along e = 0.
-    assert chunk.tops[0, r, c] == pytest.approx(_plane(e, 0.0) + 7.0, abs=0.05)
+    assert chunk.tops[0, r, c] == pytest.approx(_plane(e, _nodeN(geom, r, c)) + 7.0, abs=0.05)
     nNode = float(geom.nodesEnu()[1][r, c])
-    assert chunk.tops[1, r, c] == pytest.approx(_plane(0.0, nNode) + 14.0, abs=1e-3)
+    assert chunk.tops[1, r, c] == pytest.approx(_plane(_nodeE(geom, r, c), nNode) + 14.0, abs=1e-3)
     assert np.isnan(chunk.tops[2, r, c])  # A and A' merged into one level
     assert decks.sourceFeatureIds[chunk.maxDeck[r, c] - 1] == "r2"
-    one = dk.rasterizeDecks(decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=1)
+    one = _raster(decks, geom, _ground(plane, geom, pack), maxLevels=1)
     assert one.tops.shape[0] == 1
     assert one.tops[0, r, c] == pytest.approx(chunk.tops[0, r, c])
     assert one.maxTop[r, c] == pytest.approx(
@@ -165,12 +221,10 @@ def testRasterize_railUsesViaductHeightAndLevelZeroCountsAsOne(
     geom = _geometry(plane)
     decks = _load(plane, geom, pack)
     assert decks.levelHeight_m.tolist() == [dk.RAIL_LEVEL_HEIGHT_m]
-    chunk = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=2
-    )
+    chunk = _raster(decks, geom, _ground(plane, geom, pack), maxLevels=2)
     r, c = _rc(geom, 0.0, 0.0)
     assert chunk.tops[0, r, c] == pytest.approx(
-        _plane(_nodeE(geom, r, c), 0.0) + dk.RAIL_LEVEL_HEIGHT_m, abs=1e-3
+        _plane(_nodeE(geom, r, c), _nodeN(geom, r, c)) + dk.RAIL_LEVEL_HEIGHT_m, abs=1e-3
     )
     r2, c2 = _rc(geom, 0.0, dk.DEFAULT_DECK_WIDTH_m["rail"] / 2 + 3.0)
     assert np.isnan(chunk.maxTop[r2, c2])
@@ -186,9 +240,7 @@ def testOutlineOnlyStructure_usesMedianOutlineGround(plane: SyntheticScene, tmp_
     assert list(decks.sourceIds) == ["syntheticElevatedStructures"]
     assert decks.centerlines[0] is None
     geom = _geometry(plane)
-    chunk = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=2
-    )
+    chunk = _raster(decks, geom, _ground(plane, geom, pack), maxLevels=2)
     r, c = _rc(geom, 300.0, 200.0)
     # Outline of [-400, 400] x [194, 206] on the plane: median ground = plane(0, 200) = 8 m.
     assert chunk.tops[0, r, c] == pytest.approx(8.0 + 7.0, abs=0.1)
@@ -202,12 +254,11 @@ def testRasterize_chunkedEqualsWhole(plane: SyntheticScene, tmp_path: Path):
     pack = _packWithTransport(plane, tmp_path, rows)
     geom = _geometry(plane, s=4.0, heading=30.0)
     decks = _load(plane, geom, pack)
-    whole = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=3
-    )
+    ground = _ground(plane, geom, pack)
+    whole = _raster(decks, geom, ground, maxLevels=3)
     tops = np.full(whole.tops.shape, np.nan)
     for rows_, cols in geom.iterChunks(37, 51):
-        part = dk.rasterizeDecks(decks, geom, ChunkColumns(geom, rows_, cols), maxLevels=3)
+        part = _raster(decks, geom, ground, maxLevels=3, rows=rows_, cols=cols)
         tops[:, rows_, cols] = part.tops
     np.testing.assert_array_equal(tops, whole.tops)
 
@@ -221,9 +272,7 @@ def testNoDeckSources_emptySetAndNanChunk(plane: SyntheticScene, tmp_path: Path)
     geom = _geometry(plane, s=10.0)
     decks = _load(plane, geom, pack)
     assert len(decks) == 0
-    chunk = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=0
-    )
+    chunk = _raster(decks, geom, _ground(plane, geom, pack), maxLevels=0)
     assert chunk.tops.shape == (0, 100, 100)
     assert np.isnan(chunk.maxTop).all() and chunk.maxDeck.max() == 0
 
@@ -235,9 +284,111 @@ def testFootbridge_narrowAndLower(plane: SyntheticScene, tmp_path: Path):
     geom = _geometry(plane)
     decks = _load(plane, geom, pack)
     assert decks.levelHeight_m.tolist() == [dk.FOOTBRIDGE_LEVEL_HEIGHT_m]
-    chunk = dk.rasterizeDecks(
-        decks, geom, ChunkColumns(geom, slice(None), slice(None)), maxLevels=1
-    )
+    chunk = _raster(decks, geom, _ground(plane, geom, pack), maxLevels=1)
     r, c = _rc(geom, 0.0, 0.0)
-    assert chunk.tops[0, r, c] == pytest.approx(_plane(_nodeE(geom, r, c), 0.0) + 6.0, abs=1e-3)
+    assert chunk.tops[0, r, c] == pytest.approx(
+        _plane(_nodeE(geom, r, c), _nodeN(geom, r, c)) + 6.0, abs=1e-3
+    )
     assert np.isnan(chunk.maxTop[_rc(geom, 0.0, 5.0)])  # 3 m wide: 5 m off is outside
+
+
+def testRasterize_topFollowsGroundAlongCenterline_overHill(tmp_path: Path):
+    """A bridge over hilly terrain sits on the ground beneath it, not the ends' lerp."""
+    hill = makeSyntheticPack(tmp_path / "hill.pack", terrain="hill")
+    rows = [(_enuLine(hill, -400, 0, 400, 0), "road", True, 1, 8.0)]
+    pack = _packWithOutlines(hill, tmp_path, rows, [])
+    geom = _geometry(hill)
+    ground = _ground(hill, geom, pack)
+    decks = dk.loadDecks(Pack.open(pack), geom, ground)
+    chunk = _raster(decks, geom, ground, maxLevels=2)
+    r, c = _rc(geom, 0.0, 0.0)
+    lat, lon = ChunkColumns(geom, slice(None), slice(None)).nodeLatLon()
+    expected = ground.orthometricAt(lat, lon)[r, c] + dk.ROAD_LEVEL_HEIGHT_m
+    assert chunk.tops[0, r, c] == pytest.approx(expected, abs=1e-6)
+    # The ends' lerp would miss the 30 m hill by more than 15 m here.
+    assert chunk.tops[0, r, c] > 35.0
+
+
+def testRasterize_freeEndsTaperToGrade(plane: SyntheticScene, tmp_path: Path):
+    """A bridge piece with free ends ramps down to END_RESIDUAL_m above the ground."""
+    rows = [(_enuLine(plane, -300, 0, 300, 0), "road", True, 1, 8.0)]
+    pack = _packWithTransport(plane, tmp_path, rows)
+    geom = _geometry(plane)
+    ground = _ground(plane, geom, pack)
+    decks = dk.loadDecks(Pack.open(pack), geom, ground)
+    taper = (dk.ROAD_LEVEL_HEIGHT_m - dk.END_RESIDUAL_m) / dk.END_TAPER_GRADE
+    assert decks.taperStart_m.tolist() == [pytest.approx(taper)]
+    assert decks.taperEnd_m.tolist() == [pytest.approx(taper)]
+    chunk = _raster(decks, geom, ground)
+    columns = ChunkColumns(geom, slice(None), slice(None))
+    nodeGround = ground.orthometricAt(*columns.nodeLatLon())
+    line = decks.centerlines[0]
+    length_m = shapely.length(line) * geom.gridSpacing_m
+    for e_m in (-270.0, -100.0, 0.0, 100.0, 270.0):
+        r, c = _rc(geom, e_m, 0.0)
+        frac = float(
+            shapely.line_locate_point(line, shapely.points(c + 0.5, r + 0.5), normalized=True)
+        )
+        d = frac * length_m
+        expectedAbove = dk.END_RESIDUAL_m + (dk.ROAD_LEVEL_HEIGHT_m - dk.END_RESIDUAL_m) * min(
+            1.0, min(d, length_m - d) / taper
+        )
+        assert chunk.tops[0, r, c] == pytest.approx(nodeGround[r, c] + expectedAbove, abs=1e-6), (
+            f"e={e_m}"
+        )
+
+
+def testLoad_joinedBridgeEndsDoNotTaper(plane: SyntheticScene, tmp_path: Path):
+    """Ends shared with another bridge piece keep full height (no mid-flyover dip)."""
+    rows = [
+        (_enuLine(plane, -300, 0, 0, 0), "road", True, 1, 8.0),
+        (_enuLine(plane, 0, 0, 300, 0), "road", True, 1, 8.0),
+    ]
+    pack = _packWithTransport(plane, tmp_path, rows)
+    geom = _geometry(plane)
+    ground = _ground(plane, geom, pack)
+    decks = dk.loadDecks(Pack.open(pack), geom, ground)
+    assert len(decks) == 2
+    taper = (dk.ROAD_LEVEL_HEIGHT_m - dk.END_RESIDUAL_m) / dk.END_TAPER_GRADE
+    assert decks.taperStart_m.tolist() == [pytest.approx(taper), 0.0]
+    assert decks.taperEnd_m.tolist() == [0.0, pytest.approx(taper)]
+    chunk = _raster(decks, geom, ground)
+    r, c = _rc(geom, 0.0, 0.0)  # the joint
+    assert chunk.maxTop[r, c] == pytest.approx(
+        _plane(_nodeE(geom, r, c), _nodeN(geom, r, c)) + dk.ROAD_LEVEL_HEIGHT_m, abs=1e-6
+    )
+
+
+def testOutlineDeck_leavesAtGradeCarriagewaysAtGround(plane: SyntheticScene, tmp_path: Path):
+    """An at-grade road inside an elevated-structure outline stays at grade."""
+    rows = [(_enuLine(plane, -300, 0, 300, 0), "road", False, 0, 8.0)]
+    pack = _packWithOutlines(plane, tmp_path, rows, [_enuBox(plane, -50, -50, 50, 50)])
+    geom = _geometry(plane)
+    ground = _ground(plane, geom, pack)
+    decks = dk.loadDecks(Pack.open(pack), geom, ground)
+    assert len(decks) == 1
+    assert decks.centerlines[0] is None
+    shape = decks.pixelShapes[0]
+    assert not shapely.contains(shape, _pixelPoint(plane, geom, 0.0, 0.0))
+    assert shapely.contains(shape, _pixelPoint(plane, geom, 0.0, 20.0))
+    chunk = _raster(decks, geom, ground, maxLevels=2)
+    r, c = _rc(geom, 0.0, 0.0)
+    assert np.isnan(chunk.maxTop[r, c]) and chunk.maxDeck[r, c] == 0
+    r2, c2 = _rc(geom, 0.0, 20.0)
+    assert chunk.maxTop[r2, c2] == pytest.approx(_plane(0.0, 20.0) + 7.0, abs=0.5)
+
+
+def testOutlineDeck_keepsDeckOverRoadUndercrossings(plane: SyntheticScene, tmp_path: Path):
+    """An at-grade road crossing under a bridge keeps the outline deck there."""
+    rows = [
+        (_enuLine(plane, -300, 0, 300, 0), "road", False, 0, 8.0),
+        (_enuLine(plane, 0, -300, 0, 300), "road", True, 1, 8.0),
+    ]
+    pack = _packWithOutlines(plane, tmp_path, rows, [_enuBox(plane, -50, -50, 50, 50)])
+    geom = _geometry(plane)
+    decks = _load(plane, geom, pack)
+    outlines = [i for i in range(len(decks)) if decks.centerlines[i] is None]
+    assert len(outlines) == 1
+    shape = decks.pixelShapes[outlines[0]]
+    assert shapely.contains(shape, _pixelPoint(plane, geom, 0.0, 0.0))
+    assert not shapely.contains(shape, _pixelPoint(plane, geom, 20.0, 0.0))

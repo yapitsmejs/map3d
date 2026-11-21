@@ -124,6 +124,46 @@ def testCanopy_raisesSurfaceWithCanopyProvenance(built: Scene):
     assert built.layers["landClass"][r, c] == 10
 
 
+def testCanopy_doesNotWinRoadCorridors(plane: SyntheticScene, tmp_path: Path):
+    """Canopy over a ground-level road never tops the surface: the road stays at grade.
+
+    The canopy raster layer itself is untouched (trees still draw beside the
+    road as objects); only the surface composition suppresses it.
+    """
+
+    from map3d.pack.ingest import ingestFiles
+    from map3d.pack.synthetic import _METERS_PER_DEG_LAT, _pixelCentersEnu, _writeGeoTiff
+
+    pack = tmp_path / "c.pack"
+    shutil.copytree(plane.packDir, pack)
+    bounds = plane.sceneBounds_deg(plane.halfSize_m)
+    width = math.ceil((bounds[2] - bounds[0]) * _METERS_PER_DEG_LAT / 5.0)
+    height = math.ceil((bounds[3] - bounds[1]) * _METERS_PER_DEG_LAT / 5.0)
+    e, n = _pixelCentersEnu(plane.frame, bounds, (height, width))
+    # 15 m canopy over the at-grade road at n = -450 and the ground beside it.
+    patch = (e >= -350) & (e <= -250) & (n >= -460) & (n <= -425)
+    _writeGeoTiff(
+        tmp_path / "canopy.tif",
+        np.where(patch, 15.0, 0.0).astype(np.float32),
+        bounds,
+    )
+    ingestFiles(pack, "syntheticCanopy", [tmp_path / "canopy.tif"])
+
+    scene = buildScene(_request(plane, swath_m=1000.0), pack)
+    r, c = _rc(scene, -300.0, -450.0)  # on the road, under the canopy patch
+    assert scene.layers["canopyHeight_m"][r, c] == pytest.approx(15.0)
+    assert scene.layers["landClass"][r, c] == 210  # road
+    assert scene.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(
+        scene.layers["groundHeight_datum_m"][r, c], abs=1e-4
+    )
+    assert scene.layers["heightSource"][r, c] == HeightSource.GROUND
+    r2, c2 = _rc(scene, -300.0, -430.0)  # in the patch, off the road: canopy still wins
+    assert scene.layers["heightSource"][r2, c2] == HeightSource.CANOPY
+    assert scene.layers["surfaceHeight_datum_m"][r2, c2] == pytest.approx(
+        scene.layers["groundHeight_datum_m"][r2, c2] + 15.0, abs=1e-4
+    )
+
+
 def testDeck_setsSurfaceClassFeatureAndLevels(built: Scene, plane: SyntheticScene):
     r, c = _rc(built, 0.0, 200.0)
     top = built.layers["deckTopHeight_datum_m"][0, r, c]

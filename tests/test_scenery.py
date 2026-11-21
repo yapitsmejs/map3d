@@ -83,9 +83,18 @@ def testDecks_slabFollowsProfile(scene: Scene, plane: SyntheticScene):
     tops, sides = scenery.deckParts(scene, np.array([0]), _full(scene))
     assert not tops.isEmpty and not sides.isEmpty
     e, n, u = tops.positions_ENU_m.T
-    # Top = plane ground along n = 200 (interpolated between the bridge ends) + 7 m.
+    # Top = ground at the vertex + the end-tapered profile: the synthetic
+    # bridge runs E-W at n = 200 from e = -400 to 400 (800 m, free ends).
+    from map3d.layers.decks import END_TAPER_GRADE, END_RESIDUAL_m, ROAD_LEVEL_HEIGHT_m
+
+    length_m = 800.0
+    taper = (ROAD_LEVEL_HEIGHT_m - END_RESIDUAL_m) / END_TAPER_GRADE
+    d = np.clip(e + 400.0, 0.0, length_m)  # the bridge runs E-W in ENU, e = -400..400
+    above = END_RESIDUAL_m + (ROAD_LEVEL_HEIGHT_m - END_RESIDUAL_m) * np.clip(
+        np.minimum(d, length_m - d) / taper, 0.0, 1.0
+    )
     _, _, uRef = scene.geometry.frame.columnPointAtHeight(
-        e, n, plane.terrainHeight_m(e, 200.0) + 7.0 + 8.0
+        e, n, plane.terrainHeight_m(e, n) + above + 8.0
     )
     np.testing.assert_allclose(u, uRef, atol=0.05)
     assert sides.positions_ENU_m[:, 2].min() < u.min()  # underside is below the top

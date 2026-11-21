@@ -27,7 +27,7 @@ from rasterio.errors import NotGeoreferencedWarning
 from rasterio.io import MemoryFile
 
 from map3d.gridGeometry import GridGeometry
-from map3d.layers.decks import DECK_THICKNESS_m
+from map3d.layers.decks import DECK_THICKNESS_m, deckTopAboveGround_m
 from map3d.layers.landCover import (
     CLASS_BUILDING,
     CLASS_DECK,
@@ -271,7 +271,7 @@ def deckParts(
     )
     px = shapely.get_coordinates(tris).reshape(-1, 4, 2)[:, :3].reshape(-1, 2)
     pxOwner = np.repeat(owner, 3)
-    topH = _deckTop(d, indices, pxOwner, px)
+    topH = _deckTop(scene, d, indices, pxOwner, px)
     gx, gy = _pixelToGrid(scene.geometry, px[:, 0], px[:, 1])
     e, n = gridToEnu(scene.geometry, gx, gy)
     topPos = np.column_stack([e, n, _columnUp(scene, e, n, topH)])
@@ -290,7 +290,7 @@ def deckParts(
     segOwner = ringOwner[coordRing[a]]
     ends = np.concatenate([coords[a], coords[b]])
     endOwner = np.concatenate([segOwner, segOwner])
-    endTop = _deckTop(d, indices, endOwner, ends)
+    endTop = _deckTop(scene, d, indices, endOwner, ends)
     sgx, sgy = _pixelToGrid(scene.geometry, ends[:, 0], ends[:, 1])
     se, sn = gridToEnu(scene.geometry, sgx, sgy)
     upTop = _columnUp(scene, se, sn, endTop)
@@ -432,19 +432,30 @@ def _orthoToGeographic(wkt: str) -> pyproj.Transformer:
 
 
 def _deckTop(
-    decks: Any, indices: npt.NDArray[np.int64], owner: npt.NDArray[np.int64], px: FloatArray
+    scene: Scene,
+    d: Any,
+    indices: npt.NDArray[np.int64],
+    owner: npt.NDArray[np.int64],
+    px: FloatArray,
 ) -> FloatArray:
+    """Orthometric deck-top height at pixel positions (mirrors the grid layers)."""
     deck = indices[owner]
     top = np.empty(owner.size)
+    gx, gy = _pixelToGrid(scene.geometry, px[:, 0], px[:, 1])
+    e, n = gridToEnu(scene.geometry, gx, gy)
+    lat, lon, _ = scene.geometry.frame.columnPointAtHeight(e, n, 0.0)
+    groundAt = scene.models.ground.orthometricAt(lat, lon)
     for k in np.unique(deck):
         mine = deck == k
-        line = decks.centerlines[k]
+        line = d.centerlines[k]
         if line is None:
-            ground = np.full(int(mine.sum()), decks.groundStart_m[k])
+            top[mine] = d.groundStart_m[k] + d.levelHeight_m[k]
         else:
             frac = shapely.line_locate_point(line, shapely.points(px[mine]), normalized=True)
-            ground = decks.groundStart_m[k] + frac * (decks.groundEnd_m[k] - decks.groundStart_m[k])
-        top[mine] = ground + decks.levelHeight_m[k]
+            length_m = shapely.length(line) * scene.geometry.gridSpacing_m
+            top[mine] = groundAt[mine] + deckTopAboveGround_m(
+                frac, length_m, d.levelHeight_m[k], d.taperStart_m[k], d.taperEnd_m[k]
+            )
     return top
 
 

@@ -30,7 +30,14 @@ from map3d.layers.buildings import BuildingSet, loadBuildings, rasterizeBuilding
 from map3d.layers.canopy import CanopyModel
 from map3d.layers.columns import ChunkColumns
 from map3d.layers.decks import DeckSet, loadDecks, rasterizeDecks
-from map3d.layers.landCover import CLASS_BUILDING, CLASS_DECK, LandCoverModel, classTable
+from map3d.layers.landCover import (
+    CLASS_BUILDING,
+    CLASS_DECK,
+    CLASS_RAIL,
+    CLASS_ROAD,
+    LandCoverModel,
+    classTable,
+)
 from map3d.layers.provenance import HeightSource, heightSourceTable
 from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m, GroundModel
 from map3d.pack.manifest import MANIFEST_NAME, SourceEntry, fileSha256
@@ -412,8 +419,9 @@ def _buildChunk(
     ground, buildings = models.ground, models.buildings
     groundH = ground.cellMaxOrthometric(columns, geometry.gridSpacing_m)
     canopy = models.canopy.cellMax(columns)
+    classes = models.landCover.classes(columns)
     ids = rasterizeBuildings(buildings, geometry, rows, cols)
-    decks = rasterizeDecks(models.decks, geometry, columns, request.maxDeckLevels)
+    decks = rasterizeDecks(models.decks, geometry, columns, ground, request.maxDeckLevels)
 
     hasBuilding = ids > 0
     index = np.maximum(ids - 1, 0)
@@ -425,8 +433,11 @@ def _buildChunk(
         roofH = np.full(ids.shape, np.nan)
         bldgSource = np.zeros(ids.shape, dtype=np.uint8)
         bldgRes = np.zeros(ids.shape)
-    canopyTop = np.where(canopy > 0, groundH + canopy, np.nan)
     hasDeck = decks.maxDeck > 0
+    # Canopy never wins a node a road layer owns (road, rail or a deck on top):
+    # the corridor renders at its own surface, trees stand beside it as objects.
+    carveCanopy = np.isin(classes, (CLASS_ROAD, CLASS_RAIL)) | hasDeck
+    canopyTop = np.where((canopy > 0) & ~carveCanopy, groundH + canopy, np.nan)
 
     # Candidates in tie-break order: building > deck > canopy > ground.
     stack = np.stack([roofH, decks.maxTop, canopyTop, groundH])
@@ -456,8 +467,7 @@ def _buildChunk(
 
     deckOnTop = hasDeck & (~hasBuilding | (decks.maxTop > roofH))
     featureId = np.where(deckOnTop, len(buildings) + decks.maxDeck, ids)
-    landClass = models.landCover.classes(columns)
-    landClass = np.where(hasDeck, np.uint8(CLASS_DECK), landClass)
+    landClass = np.where(hasDeck, np.uint8(CLASS_DECK), classes)
     landClass = np.where(hasBuilding, np.uint8(CLASS_BUILDING), landClass).astype(np.uint8)
 
     (undulation,) = columns.mapNodes(lambda la, lo: (ground.undulation_m(la, lo),))
@@ -559,7 +569,9 @@ def _metadata(
             "footbridgeLevelHeight_m": deckModel.FOOTBRIDGE_LEVEL_HEIGHT_m,
             "deckThickness_m": deckModel.DECK_THICKNESS_m,
             "mergeTolerance_m": deckModel.MERGE_TOLERANCE_m,
-            "note": "Deck heights are estimated: ground interpolated between bridge ends + level x height.",
+            "note": "Deck heights are estimated: ground sampled along the bridge "
+            "centerline + level x height, tapering to grade at free ends. "
+            "Elevated-structure outlines exclude at-grade carriageways.",
         },
         "sources": [
             {

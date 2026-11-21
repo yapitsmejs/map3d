@@ -135,7 +135,7 @@ node's cell footprint (cell-max):
 | Layer | Shape | dtype | Meaning |
 |---|---|---|---|
 | `groundHeight_datum_m` / `groundHeight_ENU_m` | (Ny, Nx) | f4 | Bare-earth ground. |
-| `surfaceHeight_datum_m` / `surfaceHeight_ENU_m` | (Ny, Nx) | f4 | Top surface, i.e. the cell-max DSM over terrain, buildings, canopy and decks. |
+| `surfaceHeight_datum_m` / `surfaceHeight_ENU_m` | (Ny, Nx) | f4 | Top surface, i.e. the cell-max DSM over terrain, buildings, canopy and decks. Canopy never wins a node a road layer owns (§6.4). |
 | `buildingHeight_m` | (Ny, Nx) | f4 | Building height above ground (NaN where there is no building). |
 | `canopyHeight_m` | (Ny, Nx) | f4 | Vegetation canopy height above ground (NaN/0 where there is none). |
 | `deckTopHeight_datum_m` / `deckTopHeight_ENU_m` | (K, Ny, Nx) | f4 | Top of elevated structure level k (k = 0 is the lowest). |
@@ -179,7 +179,10 @@ ESA WorldCover codes (10 tree, 20 shrub, 30 grass, 40 cropland, 50 built-up,
 60 bare, 70 snow/ice, 80 water, 90 wetland, 95 mangrove, 100 moss/lichen),
 extended with vector-derived classes: 200 building, 210 road, 220
 bridge/elevated deck, 230 rail. Precedence for the top surface is
-building > deck > road/rail > land cover.
+building > deck > road/rail > land cover. Canopy is excluded from the
+surface competition wherever the class is road or rail (or a deck covers
+the node): the corridor renders at its own layer — roads sit on the ground,
+and trees over them draw as objects, not as the surface.
 
 - **Land cover:** sampled nearest-pixel at the node footprint. Impact
   Observatory codes are remapped to WorldCover codes.
@@ -363,11 +366,15 @@ aboveground rail locate decks but give no height, so v1 estimates them
   - Bridge pieces (transport `isBridge`) are buffered by their width, or a
     default (road 8 m, rail 8 m, footway 3 m).
   - Elevated-structure outlines are added unless more than half their area is
-    already covered.
-- **Top height:** ground interpolated linearly between the bridge's two ends
-  (along the centerline) + level × per-level height (road 7 m, rail viaduct
-  10 m, footbridge 6 m). Levels ≤ 0 or missing count as 1. Outline-only decks
-  use the median ground on their outline.
+    already covered. At-grade carriageways (non-bridge, level 0 transport)
+    are punched out of them first — except under a bridge footprint — so
+    ground-level roads inside an interchange outline stay at grade.
+- **Top height:** ground sampled along the bridge centerline (the smoothed
+  ground model, at each node or mesh vertex) + level × per-level height (road
+  7 m, rail viaduct 10 m, footbridge 6 m). Levels ≤ 0 or missing count as 1.
+  Free ends taper to 0.5 m above the ground at an 8% grade (ends joined to
+  another bridge piece keep full height). Outline-only decks use the median
+  ground on their (clipped) outline.
 - **Underside:** top − 1.5 m.
 - **Per node:** tops within 3 m merge into one level (parallel carriageways,
   piece joints). The lowest K levels are stored, and the highest deck always

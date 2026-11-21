@@ -8,10 +8,15 @@ Open data has no deck elevations, so heights are **estimated** (provenance
     per-kind default) in grid-pixel space.
   - Elevated-structure outlines (e.g. LTA flyovers) are added unless more
     than half their area is already covered by a bridge footprint.
-- **Height:** deck top = ground interpolated linearly between the bridge's
-  two ends (projected along its centerline) + level x per-level height (road
-  7 m, rail viaduct 10 m, footbridge 6 m). Levels <= 0 or missing count as 1. Outline-only
-  decks use the median ground on their outline. The deck underside is
+    At-grade carriageways (non-bridge, level 0 transport) are punched out of
+    them first — except where a bridge passes overhead — so ground-level
+    roads inside an interchange outline stay at grade.
+- **Height:** deck top = ground sampled along the bridge centerline + level x
+  per-level height (road 7 m, rail viaduct 10 m, footbridge 6 m). Levels <= 0
+  or missing count as 1. Free ends taper to :data:`END_RESIDUAL_m` above the
+  ground over :data:`END_TAPER_GRADE` (ends joined to another bridge piece
+  stay at full height); see :func:`deckTopAboveGround_m`. Outline-only decks
+  use the median ground on their outline. The deck underside is
   :data:`DECK_THICKNESS_m` below the top.
 - **Per node:** decks are sorted by top height. Tops within
   :data:`MERGE_TOLERANCE_m` merge into one level, so overlapping carriageways
@@ -38,11 +43,14 @@ from map3d.pack.registry import sourcesForRole
 __all__ = [
     "DECK_THICKNESS_m",
     "DEFAULT_DECK_WIDTH_m",
+    "END_RESIDUAL_m",
+    "END_TAPER_GRADE",
     "MERGE_TOLERANCE_m",
     "RAIL_LEVEL_HEIGHT_m",
     "ROAD_LEVEL_HEIGHT_m",
     "DeckChunk",
     "DeckSet",
+    "deckTopAboveGround_m",
     "loadDecks",
     "rasterizeDecks",
 ]
@@ -54,6 +62,8 @@ RAIL_LEVEL_HEIGHT_m = 10.0
 FOOTBRIDGE_LEVEL_HEIGHT_m = 6.0
 DECK_THICKNESS_m = 1.5
 MERGE_TOLERANCE_m = 3.0
+END_TAPER_GRADE = 0.08  # free deck ends descend to grade at this slope
+END_RESIDUAL_m = 0.5  # taper target: the slab stays this far above the ground
 DEFAULT_DECK_WIDTH_m = {"road": 8.0, "rail": 8.0, "footway": 3.0}
 LEVEL_HEIGHT_m = {
     "road": ROAD_LEVEL_HEIGHT_m,
@@ -62,6 +72,7 @@ LEVEL_HEIGHT_m = {
 }
 DUPLICATE_OVERLAP = 0.5
 _OUTLINE_STEP_deg = 5e-5
+_JOIN_TOLERANCE_px = 1e-6  # bridge-piece ends closer than this share a vertex
 
 
 @dataclass(frozen=True, eq=False)
@@ -73,7 +84,9 @@ class DeckSet:
         centerlines: Pixel-space centerline, or ``None`` for outline-only decks.
         groundStart_m: Orthometric ground at the centerline start (or outline median).
         groundEnd_m: Orthometric ground at the centerline end (or outline median).
-        levelHeight_m: Deck top above the interpolated ground.
+        levelHeight_m: Full deck top above the local ground (before end tapers).
+        taperStart_m: End-taper length at the start, in meters (0 = no taper).
+        taperEnd_m: End-taper length at the end, in meters (0 = no taper).
         levels: Nominal level (>= 1).
         sourceIds: Source of each deck.
         sourceFeatureIds: Feature id within its source.
@@ -84,6 +97,8 @@ class DeckSet:
     groundStart_m: FloatArray
     groundEnd_m: FloatArray
     levelHeight_m: FloatArray
+    taperStart_m: FloatArray
+    taperEnd_m: FloatArray
     levels: npt.NDArray[np.int64]
     sourceIds: npt.NDArray[np.str_]
     sourceFeatureIds: npt.NDArray[np.str_]
@@ -131,6 +146,41 @@ class DeckChunk:
     overflowNodes: int
 
 
+def deckTopAboveGround_m(
+    frac: npt.ArrayLike,
+    length_m: float,
+    levelHeight_m: float,
+    taperStart_m: float,
+    taperEnd_m: float,
+) -> FloatArray:
+    """Deck top height above the local ground along its centerline.
+
+    The top sits ``levelHeight_m`` above the ground, except within the end
+    tapers, where it descends to :data:`END_RESIDUAL_m` at
+    :data:`END_TAPER_GRADE` (a taper length of 0 means no taper). The mesh
+    slabs and the grid layers both use this profile, so they agree exactly.
+
+    Args:
+        frac: Position(s) along the centerline, normalized to ``[0, 1]``.
+        length_m: Centerline length, in meters.
+        levelHeight_m: Deck top above ground at full height.
+        taperStart_m: Taper length at the start, in meters (0 = no taper).
+        taperEnd_m: Taper length at the end, in meters (0 = no taper).
+
+    Returns:
+        Height(s) above the local ground, in meters.
+    """
+    f = np.asarray(frac, dtype=np.float64)
+    d = f * length_m
+    ramp = np.ones_like(d)
+    if taperStart_m > 0.0:
+        ramp = np.minimum(ramp, d / taperStart_m)
+    if taperEnd_m > 0.0:
+        ramp = np.minimum(ramp, (length_m - d) / taperEnd_m)
+    np.clip(ramp, 0.0, 1.0, out=ramp)
+    return END_RESIDUAL_m + (levelHeight_m - END_RESIDUAL_m) * ramp
+
+
 def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSet:
     """Collect and place every deck touching the scene.
 
@@ -152,6 +202,8 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
     levels: list[int] = []
     sources: list[str] = []
     ids: list[str] = []
+    gradeLines: list[Any] = []
+    gradeHalfWidth_px: list[float] = []
     for sourceId in sourcesForRole("transport"):
         if sourceId not in pack.manifest.sources:
             continue
@@ -160,20 +212,32 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         )
         t = sel.table
         bridge = np.array([bool(v) for v in t.column("isBridge").to_pylist()], dtype=bool)
+        kindsAll = np.array(t.column("kind").to_pylist(), dtype=object)
+        widthsAll = np.array(t.column("width_m").to_pylist(), dtype=object)
+        levelsAll = np.array(t.column("level").to_pylist(), dtype=object)
+        grade = ~bridge & np.array([v is not None and int(v) == 0 for v in levelsAll], dtype=bool)
+        if grade.any():
+            pixelGrade = toPixelGeometries(sel.geometries[grade], 0.0, geometry)
+            gradeLines += list(pixelGrade)
+            gradeHalfWidth_px += [
+                0.5
+                * (
+                    DEFAULT_DECK_WIDTH_m.get(k, DEFAULT_DECK_WIDTH_m["road"])
+                    if w is None
+                    else float(w)
+                )
+                / s
+                for k, w in zip(kindsAll[grade], widthsAll[grade], strict=True)
+            ]
         if not bridge.any():
             continue
         geoms = sel.geometries[bridge]
-        kinds = [str(k) for k in np.array(t.column("kind").to_pylist(), dtype=object)[bridge]]
+        kinds = kindsAll[bridge]
         widths = [
             DEFAULT_DECK_WIDTH_m.get(k, DEFAULT_DECK_WIDTH_m["road"]) if w is None else float(w)
-            for k, w in zip(
-                kinds, np.array(t.column("width_m").to_pylist(), dtype=object)[bridge], strict=True
-            )
+            for k, w in zip(kinds, widthsAll[bridge], strict=True)
         ]
-        lvls = [
-            max(1, int(v)) if v is not None else 1
-            for v in np.array(t.column("level").to_pylist(), dtype=object)[bridge]
-        ]
+        lvls = [max(1, int(v)) if v is not None else 1 for v in levelsAll[bridge]]
         pixelLines = toPixelGeometries(geoms, 0.0, geometry)
         start = shapely.get_point(geoms, 0)
         end = shapely.get_point(geoms, -1)
@@ -192,27 +256,36 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         ]
 
     bridgeShapes = np.array(shapes, dtype=object)
+    outlineShapes: list[Any] = []
+    outlineSources: list[str] = []
+    outlineIds: list[str] = []
     for sourceId in sourcesForRole("elevatedStructures"):
         if sourceId not in pack.manifest.sources:
             continue
         sel = pack.readVectors(sourceId, bounds, columns=["sourceFeatureId"])
         pixel = toPixelGeometries(shapely.make_valid(sel.geometries), 0.0, geometry)
-        keep = shapely.area(pixel) > 0
+        outlineShapes += list(pixel)
+        outlineSources += [sourceId] * pixel.size
+        outlineIds += [
+            str(v) for v in np.array(sel.table.column("sourceFeatureId").to_pylist(), dtype=object)
+        ]
+
+    if outlineShapes:
+        candidates = np.array(outlineShapes, dtype=object)
+        candidates = _punchAtGradeCorridors(candidates, gradeLines, gradeHalfWidth_px, bridgeShapes)
+        keep = shapely.area(candidates) > 0
         if bridgeShapes.size:
-            keep &= ~_coveredBy(pixel, bridgeShapes)
+            keep &= ~_coveredBy(candidates, bridgeShapes)
         idx = np.flatnonzero(keep)
-        median = _outlineMedianGround(sel.geometries[idx], ground)
-        shapes += list(pixel[idx])
+        median = _outlineMedianGround(_pixelToLonLat(candidates[idx], geometry), ground)
+        shapes += list(candidates[idx])
         lines += [None] * idx.size
         g0 += list(median)
         g1 += list(median)
         heights += [ROAD_LEVEL_HEIGHT_m] * idx.size
         levels += [1] * idx.size
-        sources += [sourceId] * idx.size
-        ids += [
-            str(v)
-            for v in np.array(sel.table.column("sourceFeatureId").to_pylist(), dtype=object)[idx]
-        ]
+        sources += [outlineSources[i] for i in idx]
+        ids += [outlineIds[i] for i in idx]
 
     allShapes = np.array(shapes, dtype=object)
     gs, ge = np.array(g0, dtype=np.float64), np.array(g1, dtype=np.float64)
@@ -222,20 +295,62 @@ def loadDecks(pack: Pack, geometry: GridGeometry, ground: GroundModel) -> DeckSe
         if allShapes.size
         else np.zeros(0, dtype=bool)
     )
+    taperStart, taperEnd = _endTapers(
+        np.array(lines, dtype=object)[keep] if lines else np.array([], dtype=object),
+        np.array(heights, dtype=np.float64)[keep],
+    )
     return DeckSet(
         pixelShapes=allShapes[keep],
         centerlines=np.array(lines, dtype=object)[keep] if lines else np.array([], dtype=object),
         groundStart_m=gs[keep],
         groundEnd_m=ge[keep],
         levelHeight_m=np.array(heights, dtype=np.float64)[keep],
+        taperStart_m=taperStart,
+        taperEnd_m=taperEnd,
         levels=np.array(levels, dtype=np.int64)[keep],
         sourceIds=np.array(sources, dtype=np.str_)[keep],
         sourceFeatureIds=np.array(ids, dtype=np.str_)[keep],
     )
 
 
+def _endTapers(
+    centerlines: npt.NDArray[np.object_], levelHeight_m: FloatArray
+) -> tuple[FloatArray, FloatArray]:
+    """Taper length at each deck end (0 where it joins another bridge piece).
+
+    Args:
+        centerlines: Pixel-space centerlines (``None`` for outline-only decks).
+        levelHeight_m: Full deck-top height above ground per deck.
+
+    Returns:
+        ``(taperStart_m, taperEnd_m)`` per deck; 0 for outline-only decks.
+    """
+    taperStart = np.zeros(centerlines.size)
+    taperEnd = np.zeros(centerlines.size)
+    isCenter = np.array([line is not None for line in centerlines], dtype=bool)
+    if not isCenter.any():
+        return taperStart, taperEnd
+    full = np.maximum(levelHeight_m[isCenter] - END_RESIDUAL_m, 0.0) / END_TAPER_GRADE
+    starts = shapely.get_point(centerlines[isCenter], 0)
+    ends = shapely.get_point(centerlines[isCenter], -1)
+    points = np.concatenate([starts, ends])
+    coords = np.column_stack([shapely.get_x(points), shapely.get_y(points)])
+    n = coords.shape[0] // 2
+    # An end joined to another bridge piece's end keeps its full height.
+    match = np.abs(coords[:, None, :] - coords[None, :, :]).max(axis=2) < _JOIN_TOLERANCE_px
+    np.fill_diagonal(match, False)  # an end never joins itself
+    joined = match.any(axis=1)
+    taperStart[isCenter] = np.where(joined[:n], 0.0, full)
+    taperEnd[isCenter] = np.where(joined[n:], 0.0, full)
+    return taperStart, taperEnd
+
+
 def rasterizeDecks(
-    decks: DeckSet, geometry: GridGeometry, columns: ChunkColumns, maxLevels: int
+    decks: DeckSet,
+    geometry: GridGeometry,
+    columns: ChunkColumns,
+    ground: GroundModel,
+    maxLevels: int,
 ) -> DeckChunk:
     """Rasterize decks into up to ``maxLevels`` stacked levels for a chunk.
 
@@ -243,6 +358,8 @@ def rasterizeDecks(
         decks: Placed decks.
         geometry: Scene grid geometry.
         columns: Chunk column geometry.
+        ground: Ground model; centerline decks follow the ground it samples
+            at each node (plus :func:`deckTopAboveGround_m`).
         maxLevels: ``K``, the number of levels to store.
 
     Returns:
@@ -259,6 +376,8 @@ def rasterizeDecks(
     hits = np.flatnonzero(
         shapely.intersects(decks.pixelShapes, shapely.box(c0, r0, c0 + nc, r0 + nr))
     )
+    nodeLat, nodeLon = columns.nodeLatLon()
+    nodeGround = ground.orthometricAt(nodeLat, nodeLon)
     flats: list[npt.NDArray[np.int64]] = []
     values: list[FloatArray] = []
     owners: list[npt.NDArray[np.int64]] = []
@@ -277,16 +396,17 @@ def rasterizeDecks(
             continue
         line = decks.centerlines[i]
         if line is None:
-            groundH = np.full(rr.size, decks.groundStart_m[i])
+            top = np.full(rr.size, decks.groundStart_m[i] + decks.levelHeight_m[i])
         else:
             frac = shapely.line_locate_point(
                 line, shapely.points(c0 + cc + 0.5, r0 + rr + 0.5), normalized=True
             )
-            groundH = decks.groundStart_m[i] + frac * (
-                decks.groundEnd_m[i] - decks.groundStart_m[i]
+            length_m = shapely.length(line) * geometry.gridSpacing_m
+            top = nodeGround[rr, cc] + deckTopAboveGround_m(
+                frac, length_m, decks.levelHeight_m[i], decks.taperStart_m[i], decks.taperEnd_m[i]
             )
         flats.append(rr * nc + cc)
-        values.append(groundH + decks.levelHeight_m[i])
+        values.append(top)
         owners.append(np.full(rr.size, i + 1, dtype=np.int64))
     if not flats:
         return DeckChunk(tops, bottoms, maxTop, maxDeck, 0)
@@ -327,6 +447,80 @@ def _coveredBy(
         )
     covered: npt.NDArray[np.bool_] = overlap > DUPLICATE_OVERLAP * shapely.area(candidates)
     return covered
+
+
+def _punchAtGradeCorridors(
+    outlines: npt.NDArray[np.object_],
+    gradeLines: list[Any],
+    gradeHalfWidth_px: list[float],
+    bridges: npt.NDArray[np.object_],
+) -> npt.NDArray[np.object_]:
+    """Subtract at-grade carriageways from elevated-structure outlines.
+
+    Interchange outlines cover the whole structure footprint, including
+    ground-level carriageways; a flat estimated deck over the whole polygon
+    would raise them. Their buffered footprints are punched out instead —
+    except where a bridge passes overhead, so the viaduct stays continuous
+    across the undercrossing.
+
+    Args:
+        outlines: Outline polygons in grid pixel space.
+        gradeLines: Non-bridge, level 0 transport centerlines in pixel space.
+        gradeHalfWidth_px: Half of each at-grade segment's width, in pixels.
+        bridges: Bridge footprints in pixel space (kept over undercrossings).
+
+    Returns:
+        The outlines with at-grade corridors removed (input untouched).
+    """
+    result = outlines.copy()
+    if outlines.size == 0 or not gradeLines:
+        return result
+    corridors = shapely.buffer(
+        np.array(gradeLines, dtype=object), np.asarray(gradeHalfWidth_px), cap_style="flat"
+    )
+    tree = shapely.STRtree(corridors)
+    hitOutline, hitCorridor = tree.query(outlines, predicate="intersects")
+    if hitOutline.size == 0:
+        return result
+    bridgeTree = shapely.STRtree(bridges) if bridges.size else None
+    for oi in np.unique(hitOutline):
+        hole = shapely.union_all(
+            shapely.intersection(outlines[oi], corridors[hitCorridor[hitOutline == oi]])
+        )
+        if bridgeTree is not None:
+            above = bridgeTree.query(outlines[oi], predicate="intersects")
+            if np.asarray(above).size:
+                hole = hole.difference(shapely.union_all(bridges[np.asarray(above)]))
+        result[oi] = outlines[oi].difference(hole)
+    return result
+
+
+def _pixelToLonLat(
+    geoms: npt.NDArray[np.object_], geometry: GridGeometry
+) -> npt.NDArray[np.object_]:
+    """Convert grid-pixel geometries back to lon/lat (inverse of pixel mapping).
+
+    Args:
+        geoms: Geometries in grid pixel coordinates.
+        geometry: Scene grid geometry.
+
+    Returns:
+        New geometries in lon/lat (input untouched).
+    """
+    if geoms.size == 0:
+        return geoms
+    coords = shapely.get_coordinates(geoms)
+    s = geometry.gridSpacing_m
+    gx = (coords[:, 0] - 0.5 * geometry.nCols) * s
+    gy = (coords[:, 1] - 0.5 * geometry.nRows) * s
+    axes = geometry.gridAxes_ENU
+    det = axes[0, 0] * axes[1, 1] - axes[0, 1] * axes[1, 0]
+    e = (axes[1, 1] * gx - axes[0, 1] * gy) / det
+    n = (axes[0, 0] * gy - axes[1, 0] * gx) / det
+    lat, lon, _ = geometry.frame.enuToGeodetic(e, n, np.zeros_like(e))
+    return np.asarray(
+        shapely.set_coordinates(geoms.copy(), np.column_stack([lon, lat])), dtype=object
+    )
 
 
 def _outlineMedianGround(geoms: npt.NDArray[np.object_], ground: GroundModel) -> FloatArray:
