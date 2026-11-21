@@ -83,7 +83,6 @@ FETCHERS: dict[str, Fetcher] = {
     "copernicusGlo30": lambda c: rasters.fetchGlo30(
         c.session, c.bounds, c.workDir("copernicusGlo30")
     ),
-    "copernicusDsm": lambda c: rasters.fetchGlo30(c.session, c.bounds, c.workDir("copernicusDsm")),
     "egm2008": lambda c: rasters.fetchEgm2008(c.session, c.bounds, c.workDir("egm2008")),
     "esaWorldCover": lambda c: rasters.fetchWorldCover(
         c.session, c.bounds, c.workDir("esaWorldCover")
@@ -137,7 +136,6 @@ FETCHERS: dict[str, Fetcher] = {
 
 DEFAULT_SOURCES: tuple[str, ...] = (
     "fabdem",
-    "copernicusDsm",
     "egm2008",
     "overtureBuildings",
     "overtureTransportation",

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from map3d.pack.ingest import ingestFiles
+from map3d.pack.manifest import MANIFEST_NAME
 from map3d.pack.reader import Pack
 
 BOUNDS = (103.0, 1.0, 104.0, 2.0)
@@ -59,6 +61,20 @@ def pack(tmp_path: Path, writeRaster, writeBuildings) -> Pack:
 def testOpen_exposesManifest(pack: Pack):
     assert pack.bounds_deg == BOUNDS
     assert set(pack.sourceIds) == {"fabdem", "egm2008", "overtureBuildings"}
+
+
+def testOpen_toleratesRetiredSources(pack: Pack, tmp_path: Path, writeRaster):
+    """A pack made before a source left the registry (copernicusDsm) still works."""
+    data = json.loads((pack.root / MANIFEST_NAME).read_text(encoding="utf-8"))
+    retired = dict(data["sources"]["fabdem"], sourceId="copernicusDsm", role="dsmHeight")
+    data["sources"]["copernicusDsm"] = retired
+    (pack.root / MANIFEST_NAME).write_text(json.dumps(data), encoding="utf-8")
+    old = Pack.open(pack.root)
+    assert "copernicusDsm" in old.manifest.sources
+    assert old.verify() == []
+    assert not any("dsmHeight" in w for w in old.checkCoverage((103.2, 1.2, 103.8, 1.8)))
+    ingestFiles(pack.root, "copernicusGlo30", [writeRaster(tmp_path / "c.tif", BOUNDS)])
+    assert "copernicusDsm" in Pack.open(pack.root).manifest.sources
 
 
 def testPrimarySource_followsRolePriority(pack: Pack, tmp_path: Path, writeRaster):

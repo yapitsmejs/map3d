@@ -43,27 +43,4 @@ def testRoadAudit_reportsContradictions(plane: SyntheticScene):
     assert "layers covering each node:" in result.stdout
     assert "PROVABLY WRONG" in result.stdout
     assert "SAME-DIRECTION OVERLAPS" in result.stdout
-    assert "DSM RESIDUAL EVIDENCE" in result.stdout  # no dsmHeight source: the fallback line
     assert result.returncode == 0
-
-
-def testHeightAudit_requiresDsmSource(plane: SyntheticScene):
-    """The height audit refuses to run without a dsmHeight source."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/heightAudit.py",
-            "--pack",
-            str(plane.packDir),
-            "--lat",
-            str(plane.frame.lat0_deg),
-            "--lon",
-            str(plane.frame.lon0_deg),
-        ],
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).resolve().parents[1],
-        timeout=600,
-    )
-    assert result.returncode != 0
-    assert "no dsmHeight source" in (result.stdout + result.stderr)

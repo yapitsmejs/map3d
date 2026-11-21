@@ -100,13 +100,6 @@ ROLES: dict[str, RoleSpec] = {
             "Gridded building height above ground.",
         ),
         RoleSpec("canopyHeight", "raster", False, (), "Vegetation canopy height above ground."),
-        RoleSpec(
-            "dsmHeight",
-            "raster",
-            False,
-            (),
-            "Digital surface model height above MSL; calibrates deck height estimates.",
-        ),
         RoleSpec("landCover", "raster", False, (), "Land-cover class (ESA WorldCover codes)."),
         RoleSpec(
             "transport",
@@ -166,19 +159,6 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "synthetic test data",
         "map3d synthetic test data",
         5.0,
-        "EGM2008",
-    ),
-    # --- surface model (deck-height calibration) ---
-    SourceSpec(
-        "copernicusDsm",
-        "dsmHeight",
-        "raster",
-        "Copernicus DEM GLO-30 (surface model)",
-        "Copernicus DEM licence",
-        "Produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence "
-        "and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; "
-        "all rights reserved",
-        30.0,
         "EGM2008",
     ),
     # --- geoid ---

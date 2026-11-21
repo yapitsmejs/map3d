@@ -54,7 +54,6 @@ class Segment:
 
     featureId: str
     enu: Any
-    lineLonLat: Any
     foot: Any
     length_m: float
     azimuth_deg: float
@@ -64,9 +63,6 @@ class Segment:
 
 _RAISED_m = 3.0  # surface this far above ground counts as raised
 _PARALLEL_DEG = 20.0  # azimuth difference that counts as "same direction"
-_DSM_MARGIN_m = 100.0
-_DSM_OFFSETS_m = (25.0, 40.0)
-_DSM_BASE_PERCENTILE = 20
 
 _SRC_NAMES = {
     int(HeightSource.NONE): "none",
@@ -227,57 +223,7 @@ def _audit(
     out.append("SAME-DIRECTION OVERLAPS (at-grade under a parallel elevated piece), metres:")
     for (below, above), metres in sameDir.most_common(10):
         out.append(f"  {metres:6.0f} m: {below}  under  {above}")
-    out.append(_residualEvidence(pack, geometry, ground, segments))
     return out
-
-
-def _residualEvidence(pack: Pack, geometry: GridGeometry, ground: Any, segments: list[Any]) -> str:
-    """DSM-minus-beside-ground residual per bridge, for human mis-tag review.
-
-    A 30 m DSM cannot drive automatic decisions (docs/research.md), but a
-    long "bridge" whose residual is near zero has nothing elevated under it.
-    """
-    entry = pack.primarySource("dsmHeight")
-    if entry is None:
-        return "DSM RESIDUAL EVIDENCE: no dsmHeight source in the pack"
-    dsm = pack.readRaster(entry.sourceId, geometry.footprintBounds_deg(margin_m=_DSM_MARGIN_m))
-    byLine = {}
-    for seg in segments:
-        if not seg.elevated or seg.length_m < 100.0:
-            continue
-        byLine[seg.featureId] = _medianResidual_m(
-            seg.lineLonLat, dsm, ground, geometry, seg.length_m
-        )
-    lines = ["DSM RESIDUAL EVIDENCE (lowest first; near zero on a long piece = mis-tagged):"]
-    for fid, residual in sorted(byLine.items(), key=lambda kv: kv[1])[:20]:
-        lines.append(f"  {residual:6.2f} m  {fid}")
-    return chr(10).join(lines)
-
-
-def _medianResidual_m(
-    line: Any, dsm: Any, ground: Any, geometry: GridGeometry, length_m: float
-) -> float:
-    """Median on-line DSM minus per-point low percentile of beside-ground."""
-    n = max(3, min(64, int(length_m / 10.0) + 1))
-    points = shapely.line_interpolate_point(line, np.linspace(0.2, 0.8, n), normalized=True)
-    lat = np.asarray(shapely.get_y(points))
-    lon = np.asarray(shapely.get_x(points))
-    surface = np.asarray(dsm.sample(lat, lon))
-    e, n_m, _ = geometry.frame.geodeticToEnu(lat, lon, np.zeros(n))
-    bearing = np.arctan2(np.diff(e), np.diff(n_m))
-    mid = 0.5 * (bearing[:-1] + bearing[1:] + (np.pi * ((bearing[1:] - bearing[:-1]) > np.pi)))
-    perpE = np.concatenate([[np.cos(mid[0])], np.cos(mid), [np.cos(mid[-1])]])
-    perpN = np.concatenate([[-np.sin(mid[0])], -np.sin(mid), [-np.sin(mid[-1])]])
-    bases = []
-    for offset_m in _DSM_OFFSETS_m:
-        for sign in (-1.0, 1.0):
-            latO, lonO, _ = geometry.frame.columnPointAtHeight(
-                e + sign * offset_m * perpE, n_m + sign * offset_m * perpN, np.zeros(n)
-            )
-            bases.append(np.asarray(ground.orthometricAt(latO, lonO)))
-    base = np.nanpercentile(np.stack(bases), _DSM_BASE_PERCENTILE, axis=0)
-    residual = (surface - base)[np.isfinite(surface - base)]
-    return float(np.median(residual)) if residual.size else float("nan")
 
 
 def _roadSegments(pack: Pack, geometry: GridGeometry) -> list[Any]:
@@ -308,7 +254,6 @@ def _roadSegments(pack: Pack, geometry: GridGeometry) -> list[Any]:
                 Segment(
                     featureId=str(t.column("sourceFeatureId")[i].as_py()),
                     enu=enu,
-                    lineLonLat=sel.geometries[i],
                     foot=shapely.buffer(enu, width / 2, cap_style="flat"),
                     length_m=shapely.length(enu),
                     azimuth_deg=math.degrees(

@@ -305,7 +305,6 @@ and trees over them draw as objects, not as the surface.
 | Building footprints | Overture Maps buildings (ODbL) | HDB Existing Building footprints; URA Master Plan building outlines (lowest priority, indicative) |
 | Building heights | Google Open Buildings 2.5D (CC BY 4.0, ~4 m effective); OSM `height` / `building:levels` via Overture | HDB Property Information `max_floor_lvl` (storeys) |
 | Canopy height | Meta/WRI global 1 m canopy height (CC BY 4.0) | — (NParks TreesSG is not downloadable) |
-| Surface model (deck-height calibration) | Copernicus DEM GLO-30 DSM | — |
 | Land cover | ESA WorldCover 2021 10 m; Impact Observatory 10 m annual LULC | — |
 | Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | URA Master Plan rail lines (`GRND_LEVEL` marks viaducts) |
 | Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
@@ -385,8 +384,8 @@ aboveground rail locate decks but give no height, so v1 estimates them
 - **Top height:** ground sampled along the bridge centerline (the smoothed
   ground model, at each node or mesh vertex) + level × per-level height (road
   7 m, rail viaduct 10 m, footbridge 6 m). Levels ≤ 0 or missing count as 1.
-  The `dsmHeight` role deliberately does **not** feed deck heights: a 30 m
-  DSM cannot resolve an 8–20 m deck (see `docs/research.md`).
+  No surface model feeds deck heights: a 30 m DSM cannot resolve an 8–20 m
+  deck (see `docs/research.md`).
   Free ends taper to 0.5 m above the ground at an 8% grade (ends joined to
   another bridge piece keep full height). Outline-only decks use the median
   ground on their (clipped) outline.
