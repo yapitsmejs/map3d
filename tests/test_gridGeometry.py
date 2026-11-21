@@ -70,6 +70,27 @@ def testNodesEnu_chunkMatchesFullSlice():
     np.testing.assert_array_equal(nChunk, nFull[rows, cols])
 
 
+def testPixelTransforms_nodeCentersAndRoundTrips():
+    geom = _geom(axes=_heading(-47.0), lx=10.0, ly=7.0)
+    e_m, n_m = geom.nodesEnu()
+    rowIdx, colIdx = np.mgrid[0 : geom.nRows, 0 : geom.nCols]
+    col, row = geom.enuToPixel(e_m, n_m)
+    np.testing.assert_allclose(col, colIdx + 0.5, atol=1e-12)
+    np.testing.assert_allclose(row, rowIdx + 0.5, atol=1e-12)
+    eBack, nBack = geom.pixelToEnu(col, row)
+    np.testing.assert_allclose(eBack, e_m, atol=1e-12)
+    np.testing.assert_allclose(nBack, n_m, atol=1e-12)
+    gx_m, gy_m = geom.pixelToGrid(colIdx + 0.5, rowIdx + 0.5)
+    np.testing.assert_allclose(gx_m, np.broadcast_to(geom.gridAxisX_m(), gx_m.shape))
+    np.testing.assert_allclose(geom.gridToEnu(gx_m, gy_m), (e_m, n_m), atol=1e-12)
+
+
+def testEnuToGrid_upTermOnlyAddsTheAxesUpComponent():
+    geom = _geom()
+    gx_m, gy_m = geom.enuToGrid(np.array([1.0]), np.array([2.0]), np.array([100.0]))
+    assert (gx_m[0], gy_m[0]) == (1.0, 2.0)  # z = Up: no lean
+
+
 def testAffine_pixelCentersAreNodes():
     geom = _geom(axes=_heading(-47.0), lx=10.0, ly=7.0)
     e_m, n_m = geom.nodesEnu()

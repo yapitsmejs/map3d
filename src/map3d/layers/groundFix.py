@@ -150,7 +150,7 @@ class GroundCorrection:
             geometry,
             zoneArray,
             footprintArray,
-            _enuToPixel(geometry, zoneArray),
+            shapely.transform(zoneArray, lambda xy: np.column_stack(geometry.enuToPixel(*xy.T))),
             np.array(coeffs),
             np.array(lowering),
         )
@@ -322,25 +322,11 @@ def _floodFill(
 
 
 def _toEnu(frame: LocalFrame, geoms: npt.NDArray[np.object_]) -> npt.NDArray[np.object_]:
-    coords = shapely.get_coordinates(geoms)
-    e, n, _ = frame.geodeticToEnu(coords[:, 1], coords[:, 0], 0.0)
-    return np.asarray(
-        shapely.make_valid(shapely.set_coordinates(geoms.copy(), np.column_stack([e, n]))),
-        dtype=object,
-    )
+    def toEnu(xy: FloatArray) -> FloatArray:
+        e, n, _ = frame.geodeticToEnu(xy[:, 1], xy[:, 0], 0.0)
+        return np.column_stack([e, n])
 
-
-def _enuToPixel(geometry: GridGeometry, zones: npt.NDArray[np.object_]) -> npt.NDArray[np.object_]:
-    coords = shapely.get_coordinates(zones)
-    a = geometry.gridAxes_ENU
-    gx = coords[:, 0] * a[0, 0] + coords[:, 1] * a[0, 1]
-    gy = coords[:, 0] * a[1, 0] + coords[:, 1] * a[1, 1]
-    s = geometry.gridSpacing_m
-    col = (gx + 0.5 * geometry.nCols * s) / s
-    row = (gy + 0.5 * geometry.nRows * s) / s
-    return np.asarray(
-        shapely.set_coordinates(zones.copy(), np.column_stack([col, row])), dtype=object
-    )
+    return np.asarray(shapely.make_valid(shapely.transform(geoms, toEnu)), dtype=object)
 
 
 def _ringSamples(enu: npt.NDArray[np.object_]) -> tuple[FloatArray, npt.NDArray[np.int64]]:

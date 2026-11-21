@@ -1,8 +1,7 @@
 """Lon/lat geometries -> grid pixel coordinates ``(col, row)``.
 
-Pixel space is the grid frame scaled by ``1 / gridSpacing_m`` and shifted so
-that cell ``(row i, col j)`` spans ``[j, j+1] x [i, i+1]``, with row 0 at -y.
-It is isotropic (1 unit = one grid spacing), so buffers by metres are exact.
+Pixel space is defined in :mod:`map3d.gridGeometry`. It is isotropic (1 unit =
+one grid spacing), so buffers by metres are exact.
 Points are converted at a given ellipsoidal height, so raised features (roofs,
 decks) sit exactly in the node columns they occupy.
 """
@@ -47,12 +46,7 @@ def toPixelGeometries(
     e_m, n_m, u_m = geometry.frame.geodeticToEnu(
         coords[:, 1], coords[:, 0], np.nan_to_num(heights[owner])
     )
-    axes = geometry.gridAxes_ENU
-    gx_m = axes[0, 0] * e_m + axes[0, 1] * n_m + axes[0, 2] * u_m
-    gy_m = axes[1, 0] * e_m + axes[1, 1] * n_m + axes[1, 2] * u_m
-    s = geometry.gridSpacing_m
-    col = (gx_m + 0.5 * geometry.nCols * s) / s
-    row = (gy_m + 0.5 * geometry.nRows * s) / s
+    col, row = geometry.enuToPixel(e_m, n_m, u_m)
     return np.asarray(
         shapely.set_coordinates(geoms.copy(), np.column_stack([col, row])), dtype=object
     )

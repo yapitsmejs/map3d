@@ -118,7 +118,7 @@ class ChunkColumns:
         if self._nodeUp is None:
             gx, gy = self._nodeAxes()
             field = self._field()
-            e_m, n_m = _gridToEnu(self.geometry, gx, gy)
+            e_m, n_m = self.geometry.gridToEnu(gx[None, :], gy[:, None])
             u0 = field.interp(field.upResidual, gx, gy) - (e_m**2 + n_m**2) / (2.0 * WGS84_A_m)
             self._nodeUp = (u0, field.interp(field.upFactor, gx, gy))
         u0, factor = self._nodeUp
@@ -134,9 +134,8 @@ class ChunkColumns:
         Returns:
             ``(lat_deg, lon_deg)`` of shape ``(rows*ss + 1, cols*ss + 1)``.
         """
-        gx, gy = self._latticeAxes(ss)
-        field = self._field()
-        return field.interp(field.lat, gx, gy), field.interp(field.lon, gx, gy)
+        lat, lon = self.mapLattice(ss, lambda lat, lon: (lat, lon))
+        return lat, lon
 
     def mapLattice(self, ss: int, fn: SmoothMap) -> tuple[FloatArray, ...]:
         """Evaluate a smooth function of footprint position on a sub-lattice.
@@ -208,7 +207,7 @@ class _CoarseField:
     def solve(cls, g: GridGeometry, x0: float, x1: float, y0: float, y1: float) -> _CoarseField:
         gx = _subset(_globalAxis(g.nCols, g.gridSpacing_m), x0, x1)
         gy = _subset(_globalAxis(g.nRows, g.gridSpacing_m), y0, y1)
-        e_m, n_m = _gridToEnu(g, gx, gy)
+        e_m, n_m = g.gridToEnu(gx[None, :], gy[:, None])
         lat, lon, u0 = g.frame.columnPointAtHeight(e_m, n_m, 0.0)
         # dU/dh along a column = 1 / (Up0 . n_local): smooth, so interpolated too.
         lat_rad, lon_rad = np.radians(lat), np.radians(lon)
@@ -237,15 +236,6 @@ def _bracket(axis: FloatArray, targets: FloatArray) -> tuple[npt.NDArray[np.int6
     )
     frac: FloatArray = (targets - axis[idx]) / (axis[idx + 1] - axis[idx])
     return idx, frac
-
-
-def _gridToEnu(
-    g: GridGeometry, gx_m: FloatArray, gy_m: FloatArray
-) -> tuple[FloatArray, FloatArray]:
-    axes = g.gridAxes_ENU
-    e_m = gy_m[:, None] * axes[1, 0] + gx_m[None, :] * axes[0, 0]
-    n_m = gy_m[:, None] * axes[1, 1] + gx_m[None, :] * axes[0, 1]
-    return e_m, n_m
 
 
 def _globalAxis(count: int, spacing_m: float) -> FloatArray:

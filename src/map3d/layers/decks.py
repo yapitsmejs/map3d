@@ -511,29 +511,12 @@ def _punchAtGradeCorridors(
 def _pixelToLonLat(
     geoms: npt.NDArray[np.object_], geometry: GridGeometry
 ) -> npt.NDArray[np.object_]:
-    """Convert grid-pixel geometries back to lon/lat (inverse of pixel mapping).
+    def toLonLat(xy: FloatArray) -> FloatArray:
+        e, n = geometry.pixelToEnu(xy[:, 0], xy[:, 1])
+        lat, lon, _ = geometry.frame.enuToGeodetic(e, n, np.zeros_like(e))
+        return np.column_stack([lon, lat])
 
-    Args:
-        geoms: Geometries in grid pixel coordinates.
-        geometry: Scene grid geometry.
-
-    Returns:
-        New geometries in lon/lat (input untouched).
-    """
-    if geoms.size == 0:
-        return geoms
-    coords = shapely.get_coordinates(geoms)
-    s = geometry.gridSpacing_m
-    gx = (coords[:, 0] - 0.5 * geometry.nCols) * s
-    gy = (coords[:, 1] - 0.5 * geometry.nRows) * s
-    axes = geometry.gridAxes_ENU
-    det = axes[0, 0] * axes[1, 1] - axes[0, 1] * axes[1, 0]
-    e = (axes[1, 1] * gx - axes[0, 1] * gy) / det
-    n = (axes[0, 0] * gy - axes[1, 0] * gx) / det
-    lat, lon, _ = geometry.frame.enuToGeodetic(e, n, np.zeros_like(e))
-    return np.asarray(
-        shapely.set_coordinates(geoms.copy(), np.column_stack([lon, lat])), dtype=object
-    )
+    return np.asarray(shapely.transform(geoms, toLonLat), dtype=object)
 
 
 def _outlineMedianGround(geoms: npt.NDArray[np.object_], ground: GroundModel) -> FloatArray:
