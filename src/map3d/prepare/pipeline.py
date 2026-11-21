@@ -15,14 +15,22 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from map3d.pack.ingest import ingestFiles
-from map3d.pack.manifest import MANIFEST_NAME, Bounds, Manifest, validateBounds
+from map3d.pack.manifest import (
+    MANIFEST_NAME,
+    Bounds,
+    Manifest,
+    boundsIntersect,
+    validateBounds,
+)
 from map3d.pack.registry import ROLES, getSource
+from map3d.prepare import DEFAULT_BUILDINGS_YEAR, defaultCacheDir
 from map3d.prepare.http import HttpSession
 from map3d.prepare.sources import dataGovSg, googleBuildings, imagery, overture, rasters
 
@@ -36,7 +44,7 @@ class PrepareContext:
     bounds: Bounds
     cacheDir: Path
     session: HttpSession
-    year: int = 2023
+    year: int = DEFAULT_BUILDINGS_YEAR
     _s3: Any = field(default=None, repr=False)
     _release: str | None = field(default=None, repr=False)
 
@@ -49,7 +57,7 @@ class PrepareContext:
     def s3(self) -> Any:
         """Anonymous S3 filesystem (created on first use, sharing the CA bundle)."""
         if self._s3 is None:
-            self._s3 = overture.s3FileSystem(getattr(self.session, "caBundle", None))
+            self._s3 = overture.s3FileSystem(self.session.caBundle)
         return self._s3
 
     def releaseBase(self) -> str:
@@ -68,76 +76,62 @@ def _sgDownload(ctx: PrepareContext, key: str) -> Path:
     return dataGovSg.downloadDataset(ctx.session, datasetId, target, isCsv)
 
 
+def _parquetOut(ctx: PrepareContext, sourceId: str) -> Path:
+    return ctx.workDir(sourceId) / f"{sourceId}.parquet"
+
+
 def _sgHdb(ctx: PrepareContext) -> list[Path]:
-    out, _stats = dataGovSg.adaptHdbBuildings(
-        _sgDownload(ctx, "hdbBuildings"),
-        _sgDownload(ctx, "hdbPropertyInfo"),
-        ctx.bounds,
-        ctx.workDir("sgHdbBuildings") / "sgHdbBuildings.parquet",
-    )
-    return [out]
+    return [
+        dataGovSg.adaptHdbBuildings(
+            _sgDownload(ctx, "hdbBuildings"),
+            _sgDownload(ctx, "hdbPropertyInfo"),
+            ctx.bounds,
+            _parquetOut(ctx, "sgHdbBuildings"),
+        )
+    ]
+
+
+def _tiles(sourceId: str, fetch: Callable[[HttpSession, Bounds, Path], list[Path]]) -> Fetcher:
+    """Raster/imagery fetchers: ``fetch(session, bounds, workDir)``."""
+    return lambda c: fetch(c.session, c.bounds, c.workDir(sourceId))
+
+
+def _overture(sourceId: str, fetch: Callable[[Any, str, Bounds, Path], Path]) -> Fetcher:
+    return lambda c: [fetch(c.s3(), c.releaseBase(), c.bounds, _parquetOut(c, sourceId))]
+
+
+def _sg(sourceId: str, key: str, adapt: Callable[[Path, Bounds, Path], Path]) -> Fetcher:
+    """One data.gov.sg dataset through its canonical adapter."""
+    return lambda c: [adapt(_sgDownload(c, key), c.bounds, _parquetOut(c, sourceId))]
 
 
 FETCHERS: dict[str, Fetcher] = {
-    "fabdem": lambda c: rasters.fetchFabdem(c.session, c.bounds, c.workDir("fabdem")),
-    "copernicusGlo30": lambda c: rasters.fetchGlo30(
-        c.session, c.bounds, c.workDir("copernicusGlo30")
-    ),
-    "copernicusDsm": lambda c: rasters.fetchGlo30(c.session, c.bounds, c.workDir("copernicusDsm")),
-    "egm2008": lambda c: rasters.fetchEgm2008(c.session, c.bounds, c.workDir("egm2008")),
-    "esaWorldCover": lambda c: rasters.fetchWorldCover(
-        c.session, c.bounds, c.workDir("esaWorldCover")
-    ),
-    "metaCanopy": lambda c: rasters.fetchMetaCanopy(c.session, c.bounds, c.workDir("metaCanopy")),
+    **{
+        sourceId: _tiles(sourceId, fetch)
+        for sourceId, fetch in (
+            ("fabdem", rasters.fetchFabdem),
+            ("copernicusGlo30", rasters.fetchGlo30),
+            ("egm2008", rasters.fetchEgm2008),
+            ("esaWorldCover", rasters.fetchWorldCover),
+            ("metaCanopy", rasters.fetchMetaCanopy),
+            ("sentinel2Composite", imagery.fetchSentinel2Cloudless),
+        )
+    },
     "googleOpenBuildings25d": lambda c: googleBuildings.fetchGoogleBuildings(
         c.session, c.bounds, c.workDir("googleOpenBuildings25d"), c.year
     ),
-    "overtureBuildings": lambda c: [
-        overture.fetchOvertureBuildings(
-            c.s3(),
-            c.releaseBase(),
-            c.bounds,
-            c.workDir("overtureBuildings") / "overtureBuildings.parquet",
-        )
-    ],
-    "overtureTransportation": lambda c: [
-        overture.fetchOvertureTransport(
-            c.s3(),
-            c.releaseBase(),
-            c.bounds,
-            c.workDir("overtureTransportation") / "overtureTransportation.parquet",
-        )
-    ],
-    "sentinel2Composite": lambda c: imagery.fetchSentinel2Cloudless(
-        c.session, c.bounds, c.workDir("sentinel2Composite")
-    ),
+    "overtureBuildings": _overture("overtureBuildings", overture.fetchOvertureBuildings),
+    "overtureTransportation": _overture("overtureTransportation", overture.fetchOvertureTransport),
     "sgHdbBuildings": _sgHdb,
-    "sgUraBuildings": lambda c: [
-        dataGovSg.adaptUraBuildings(
-            _sgDownload(c, "uraBuildings"),
-            c.bounds,
-            c.workDir("sgUraBuildings") / "sgUraBuildings.parquet",
-        )
-    ],
-    "sgMasterPlanRail": lambda c: [
-        dataGovSg.adaptMasterPlanRail(
-            _sgDownload(c, "mpRail"),
-            c.bounds,
-            c.workDir("sgMasterPlanRail") / "sgMasterPlanRail.parquet",
-        )
-    ],
-    "sgLtaElevatedStructures": lambda c: [
-        dataGovSg.adaptLtaStructures(
-            _sgDownload(c, "ltaStructures"),
-            c.bounds,
-            c.workDir("sgLtaElevatedStructures") / "sgLtaElevatedStructures.parquet",
-        )
-    ],
+    "sgUraBuildings": _sg("sgUraBuildings", "uraBuildings", dataGovSg.adaptUraBuildings),
+    "sgMasterPlanRail": _sg("sgMasterPlanRail", "mpRail", dataGovSg.adaptMasterPlanRail),
+    "sgLtaElevatedStructures": _sg(
+        "sgLtaElevatedStructures", "ltaStructures", dataGovSg.adaptLtaStructures
+    ),
 }
 
 DEFAULT_SOURCES: tuple[str, ...] = (
     "fabdem",
-    "copernicusDsm",
     "egm2008",
     "overtureBuildings",
     "overtureTransportation",
@@ -169,7 +163,7 @@ def preparePack(
     sources: Sequence[str] | None = None,
     cacheDir: str | os.PathLike[str] | None = None,
     caBundle: str | os.PathLike[str] | None = None,
-    year: int = 2023,
+    year: int = DEFAULT_BUILDINGS_YEAR,
     session: HttpSession | None = None,
     fetchers: dict[str, Fetcher] | None = None,
     log: Callable[[str], None] = lambda message: None,
@@ -204,17 +198,15 @@ def preparePack(
             )
         getSource(sourceId)
     pack = Path(packDir)
-    cache = Path(cacheDir) if cacheDir is not None else pack.with_name(pack.name + ".cache")
-    ownSession = session is None
-    http = (
-        session
-        if session is not None
-        else HttpSession(caBundle, minInterval_s=dataGovSg.MIN_INTERVAL_s)
-    )
-    ctx = PrepareContext(bounds, cache, http, year)
+    cache = Path(cacheDir) if cacheDir is not None else defaultCacheDir(pack)
     report = PrepareReport()
     today = datetime.now(UTC).date().isoformat()
-    try:
+    with ExitStack() as stack:
+        if session is None:
+            session = stack.enter_context(
+                HttpSession(caBundle, minInterval_s=dataGovSg.MIN_INTERVAL_s)
+            )
+        ctx = PrepareContext(bounds, cache, session, year)
         for sourceId in wanted:
             _runOne(sourceId, table, ctx, pack, bounds, today, report, log)
         if (
@@ -224,9 +216,6 @@ def preparePack(
         ):
             log("no ground source ingested; falling back to Copernicus GLO-30")
             _runOne("copernicusGlo30", table, ctx, pack, bounds, today, report, log)
-    finally:
-        if ownSession:
-            http.close()
     for role, spec in ROLES.items():
         if spec.required and not _hasRole(pack, role):
             raise RuntimeError(f"pack is missing required role {role!r}; report: {report}")
@@ -243,7 +232,7 @@ def _runOne(
     report: PrepareReport,
     log: Callable[[str], None],
 ) -> None:
-    if sourceId in _SINGAPORE_ONLY and not dataGovSg.intersectsSingapore(bounds):
+    if sourceId in _SINGAPORE_ONLY and not boundsIntersect(bounds, dataGovSg.SINGAPORE_BOUNDS):
         report.skipped[sourceId] = "outside Singapore"
         return
     log(f"{sourceId}: fetching")

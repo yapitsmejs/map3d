@@ -24,9 +24,25 @@ def testRolePriority_listsEveryRoleSourceExactlyOnce():
         assert set(ids) == {s for s, spec in registry.SOURCES.items() if spec.role == role}
 
 
-def testRolePriority_fabdemBeatsGlo30():
-    ground = registry.sourcesForRole("ground")
-    assert ground.index("fabdem") < ground.index("copernicusGlo30")
+def testRolePriority_pinnedOrder():
+    """Catalogue order is precedence: pin it so table refactors cannot reorder it."""
+    assert {role: registry.sourcesForRole(role) for role in registry.ROLES} == {
+        "ground": ["fabdem", "copernicusGlo30", "syntheticGround"],
+        "geoid": ["egm2008", "syntheticGeoid"],
+        "buildings": [
+            "sgHdbBuildings",
+            "overtureBuildings",
+            "sgUraBuildings",
+            "syntheticBuildings",
+        ],
+        "buildingHeightRaster": ["googleOpenBuildings25d"],
+        "canopyHeight": ["metaCanopy", "syntheticCanopy"],
+        "landCover": ["esaWorldCover", "impactObservatoryLulc", "syntheticLandCover"],
+        "transport": ["overtureTransportation", "sgMasterPlanRail", "syntheticTransport"],
+        "trees": ["syntheticTrees"],
+        "elevatedStructures": ["sgLtaElevatedStructures", "syntheticElevatedStructures"],
+        "imagery": ["sentinel2Composite"],
+    }
 
 
 def testGetSource_returnsSpec():
@@ -67,12 +83,6 @@ def testSingaporeSources_registeredWithOpenDataLicence():
         spec = registry.getSource(sourceId)
         assert spec.licence == "Singapore Open Data Licence v1.0"
         assert "{accessed}" in spec.attribution
-
-
-def testBuildingSources_authoritativeFirst():
-    buildings = registry.sourcesForRole("buildings")
-    assert buildings.index("sgHdbBuildings") < buildings.index("overtureBuildings")
-    assert buildings.index("overtureBuildings") < buildings.index("sgUraBuildings")
 
 
 def testElevatedStructuresRole_isOptionalVector():

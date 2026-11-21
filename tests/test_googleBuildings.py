@@ -9,9 +9,10 @@ import httpx
 import numpy as np
 import pytest
 import rasterio
+from _packSupport import mockSession, writeBands
+from _support import rangeServer
 from rasterio.transform import from_origin
 
-from map3d.prepare.http import HttpSession
 from map3d.prepare.sources import googleBuildings as gob
 
 SG = (103.80, 1.28, 103.84, 1.32)
@@ -75,20 +76,7 @@ def testTilesIntersecting_selectsByUtmExtent():
 def _threeBandTile(path: Path, x0: float, y1: float) -> bytes:
     data = np.stack([np.full((400, 400), v, np.float32) for v in (0.5, 21.0, 0.9)])
     data[1, :8, :8] = -99.0
-    with rasterio.open(
-        path,
-        "w",
-        driver="GTiff",
-        width=400,
-        height=400,
-        count=3,
-        dtype="float32",
-        crs="EPSG:32648",
-        transform=from_origin(x0, y1, 0.5, 0.5),
-        nodata=-99.0,
-    ) as dst:
-        dst.write(data)
-    return path.read_bytes()
+    return writeBands(path, data, "EPSG:32648", from_origin(x0, y1, 0.5, 0.5), -99.0).read_bytes()
 
 
 def testFetch_listsManifestsSelectsTilesAndClipsHeightBand(tmp_path: Path):
@@ -122,11 +110,9 @@ def testFetch_listsManifestsSelectsTilesAndClipsHeightBand(tmp_path: Path):
                     "nextPageToken": "p2",
                 },
             )
-        from _support import rangeServer
-
         return rangeServer(files)(request)
 
-    with HttpSession(transport=httpx.MockTransport(handler), sleep=lambda s: None) as session:
+    with mockSession(handler) as session:
         out = gob.fetchGoogleBuildings(session, query, tmp_path / "work", year=2023)
     assert [p.name for p in out] == ["googleOpenBuildings25d_tile_hit.tif"]
     with rasterio.open(out[0]) as src:
@@ -143,5 +129,5 @@ def testFetch_noManifestForZoneReturnsEmpty(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"items": []})
 
-    with HttpSession(transport=httpx.MockTransport(handler), sleep=lambda s: None) as session:
+    with mockSession(handler) as session:
         assert gob.fetchGoogleBuildings(session, SG, tmp_path / "work") == []

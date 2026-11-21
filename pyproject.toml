@@ -25,6 +25,7 @@ dependencies = [
 # Network-only tooling for `map3d prepare`; never needed on the air-gapped box.
 prepare = [
     "httpx>=0.27",
+    "certifi",  # certs.py bundles certifi's roots with the OS store
 ]
 dev = [
     "pytest>=8",

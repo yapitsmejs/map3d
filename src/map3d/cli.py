@@ -17,6 +17,7 @@ from map3d import __version__
 from map3d.layers.terrain import DEFAULT_GROUND_SMOOTHING_m
 from map3d.pack.ingest import ingestFiles
 from map3d.pack.reader import Pack
+from map3d.prepare import DEFAULT_BUILDINGS_YEAR, defaultCacheDir
 from map3d.request import SceneRequest
 from map3d.scene import buildScene
 
@@ -259,7 +260,7 @@ def prepare(
     ] = False,
     year: Annotated[
         int, typer.Option("--year", help="Year for Google Open Buildings 2.5D.")
-    ] = 2023,
+    ] = DEFAULT_BUILDINGS_YEAR,
 ) -> None:
     """Download open data for a box and build an offline pack (needs internet)."""
     try:
@@ -272,7 +273,7 @@ def prepare(
         )
     if caBundle is not None and systemCerts:
         _fail(ValueError("use either --ca-bundle or --system-certs, not both"))
-    cacheDir = cache if cache is not None else out.with_name(out.name + ".cache")
+    cacheDir = cache if cache is not None else defaultCacheDir(out)
     bundle = certs.exportCaBundle(cacheDir / "ca-bundle.pem") if systemCerts else caBundle
     wanted = [s.strip() for s in sources.split(",") if s.strip()] if sources else None
     try:

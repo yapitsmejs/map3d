@@ -182,10 +182,17 @@ class Pack:
         """Declared pack coverage ``(minLon, minLat, maxLon, maxLat)``."""
         return self.manifest.bounds_deg
 
-    @property
-    def sourceIds(self) -> list[str]:
-        """Identifiers of the sources present in the pack."""
-        return list(self.manifest.sources)
+    def sourcesFor(self, role: str) -> list[str]:
+        """Sources present in the pack for a role, highest priority first.
+
+        Args:
+            role: Role identifier.
+
+        Returns:
+            Source identifiers in registry (priority) order; sources the
+            registry no longer knows are never listed.
+        """
+        return [s for s in sourcesForRole(role) if s in self.manifest.sources]
 
     def primarySource(self, role: str) -> SourceEntry | None:
         """Highest-priority source present for a role.
@@ -196,10 +203,8 @@ class Pack:
         Returns:
             The source entry, or ``None`` if the pack has no source for the role.
         """
-        for sourceId in sourcesForRole(role):
-            if sourceId in self.manifest.sources:
-                return self.manifest.sources[sourceId]
-        return None
+        present = self.sourcesFor(role)
+        return self.manifest.sources[present[0]] if present else None
 
     def checkCoverage(self, bounds_deg: Bounds) -> list[str]:
         """Check that the pack can serve a scene footprint.
@@ -379,9 +384,7 @@ def _extent(bounds: Bounds) -> Any:
     return shapely.envelope(shapely.multipoints([(minX, minY), (maxX, maxY)]))
 
 
-def _snapToGrid(
-    transform: Any, bounds: tuple[float, float, float, float], marginPixels: int
-) -> tuple[float, float, float, float]:
+def _snapToGrid(transform: Any, bounds: Bounds, marginPixels: int) -> Bounds:
     left, bottom, right, top = bounds
     x0, resX = transform.c, transform.a
     y0, resY = transform.f, -transform.e

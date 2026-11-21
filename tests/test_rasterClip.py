@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
 import numpy as np
 import pytest
 import rasterio
+from _packSupport import mockSession, writeBands
 from _support import rangeServer
 from rasterio.transform import from_bounds
 
-from map3d.prepare.http import HttpSession
 from map3d.prepare.rasterClip import clipRaster
 
 BOUNDS = (103.0, 1.0, 104.0, 2.0)
@@ -58,20 +57,8 @@ def testClip_decimatesAndScalesTransform(tmp_path: Path, writeRaster):
 
 
 def testClip_selectsBandAndOverridesNodata(tmp_path: Path):
-    path = tmp_path / "rgb.tif"
     data = np.stack([np.full((10, 10), v, np.float32) for v in (1.0, 2.0, 3.0)])
-    with rasterio.open(
-        path,
-        "w",
-        driver="GTiff",
-        width=10,
-        height=10,
-        count=3,
-        dtype="float32",
-        crs="EPSG:4326",
-        transform=from_bounds(*BOUNDS, 10, 10),
-    ) as dst:
-        dst.write(data)
+    path = writeBands(tmp_path / "rgb.tif", data, "EPSG:4326", from_bounds(*BOUNDS, 10, 10))
     out = clipRaster(str(path), BOUNDS, tmp_path / "o.tif", band=2, nodata=-99.0)
     with rasterio.open(out) as clipped:
         assert clipped.count == 1
@@ -95,8 +82,7 @@ def testClip_projectedSource(tmp_path: Path, writeRaster):
 
 def testClip_remoteThroughSessionOpener(tmp_path: Path, writeRaster):
     src = writeRaster(tmp_path / "s.tif", BOUNDS, values=_grid(), shape=(100, 100))
-    transport = httpx.MockTransport(rangeServer({"https://x/s.tif": src.read_bytes()}))
-    with HttpSession(transport=transport, sleep=lambda s: None) as session:
+    with mockSession(rangeServer({"https://x/s.tif": src.read_bytes()})) as session:
         out = clipRaster(
             "https://x/s.tif",
             (103.2, 1.2, 103.4, 1.3),

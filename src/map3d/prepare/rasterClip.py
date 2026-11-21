@@ -18,6 +18,7 @@ from rasterio.enums import Resampling
 from rasterio.warp import transform_bounds
 from rasterio.windows import Window, from_bounds
 
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpSession
 
 __all__ = ["clipRaster"]
@@ -28,7 +29,7 @@ _SNAP = 1e-6  # pixels: absorb float noise in bounds -> window conversion
 
 def clipRaster(
     source: str,
-    bounds_deg: tuple[float, float, float, float],
+    bounds_deg: Bounds,
     outPath: str | os.PathLike[str],
     session: HttpSession | None = None,
     band: int = 1,

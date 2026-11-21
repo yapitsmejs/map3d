@@ -29,6 +29,7 @@ from map3d.pack.manifest import (
     Manifest,
     PackFile,
     SourceEntry,
+    boundsIntersect,
     fileSha256,
     validateBounds,
 )
@@ -86,7 +87,7 @@ def ingestFiles(
         expectedCrs = expectedCrs or item.crsWkt
         checked.append(item)
 
-    entry = existing or SourceEntry.fromSpec(spec, crs=None)
+    entry = existing or SourceEntry.fromSpec(spec)
     entry.crs = expectedCrs if spec.kind == "raster" else None
     entry.accessedDate = accessed
     targetDir = root / spec.kind / sourceId
@@ -136,7 +137,7 @@ def _check(path: Path, spec: SourceSpec, expectedCrs: str | None, packBounds: Bo
         item = _checkRaster(path, spec, expectedCrs)
     else:
         item = _checkVector(path, spec)
-    if item.bounds_deg is not None and not _intersects(item.bounds_deg, packBounds):
+    if item.bounds_deg is not None and not boundsIntersect(item.bounds_deg, packBounds):
         raise ValueError(
             f"{path} (extent {item.bounds_deg}) does not intersect the pack {packBounds}"
         )
@@ -166,7 +167,3 @@ def _checkVector(path: Path, spec: SourceSpec) -> _Checked:
     if missing:
         raise ValueError(f"{path}: missing canonical columns for role {spec.role!r}: {missing}")
     return _Checked(path, info.bounds_deg, None)
-
-
-def _intersects(a: Bounds, b: Bounds) -> bool:
-    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]

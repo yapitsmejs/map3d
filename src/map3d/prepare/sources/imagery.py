@@ -19,31 +19,17 @@ from rasterio.errors import NotGeoreferencedWarning
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
 
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpSession
+from map3d.prepare.sources.rasters import tileRange
 
 __all__ = ["DEFAULT_YEAR", "DEFAULT_ZOOM", "fetchSentinel2Cloudless", "tileRange", "tileUrl"]
-
-Bounds = tuple[float, float, float, float]
 
 DEFAULT_YEAR = 2024
 DEFAULT_ZOOM = 14
 _TILE_PX = 256
 _HALF_WORLD_m = math.pi * 6378137.0
 _WMTS = "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-{year}_3857/default/g/{z}/{y}/{x}.jpg"
-
-
-def tileRange(bounds: Bounds, zoom: int) -> tuple[int, int, int, int]:
-    """Inclusive Web Mercator tile range ``(x0, y0, x1, y1)`` covering a lon/lat box."""
-    minLon, minLat, maxLon, maxLat = bounds
-    n = 1 << zoom
-
-    def tx(lon: float) -> int:
-        return min(n - 1, int((lon + 180.0) / 360.0 * n))
-
-    def ty(lat: float) -> int:
-        return min(n - 1, int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n))
-
-    return tx(minLon), ty(maxLat), tx(maxLon), ty(minLat)
 
 
 def tileUrl(year: int, zoom: int, x: int, y: int) -> str:

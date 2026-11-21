@@ -24,6 +24,7 @@ from pathlib import Path
 
 import rasterio.errors
 
+from map3d.pack.manifest import Bounds
 from map3d.prepare.http import HttpRangeFile, HttpSession
 from map3d.prepare.rasterClip import clipRaster
 
@@ -43,10 +44,10 @@ __all__ = [
     "quadkey",
     "quadkeyBounds",
     "quadkeysCovering",
+    "tileRange",
+    "tileXY",
     "worldCoverUrl",
 ]
-
-Bounds = tuple[float, float, float, float]
 
 GLO30_BASE = "https://copernicus-dem-30m.s3.amazonaws.com"
 FABDEM_BASE = "https://data.bris.ac.uk/datasets/s5hqmjcdj8yo2ibzi9b4ew3sn"
@@ -110,8 +111,8 @@ def metaCanopyUrl(key: str) -> str:
     return f"{META_CANOPY_BASE}/{key}.tif"
 
 
-def quadkey(lat_deg: float, lon_deg: float, zoom: int) -> str:
-    """Bing/Web-Mercator quadkey of the tile containing a point.
+def tileXY(lat_deg: float, lon_deg: float, zoom: int) -> tuple[int, int]:
+    """Web Mercator (XYZ / WMTS) tile column and row containing a point.
 
     Args:
         lat_deg: Latitude.
@@ -119,13 +120,23 @@ def quadkey(lat_deg: float, lon_deg: float, zoom: int) -> str:
         zoom: Zoom level.
 
     Returns:
-        Quadkey string of length ``zoom``.
+        ``(x, y)``, with ``y`` counted from the north.
     """
-    n = 2**zoom
+    n = 1 << zoom
     x = min(n - 1, int((lon_deg + 180.0) / 360.0 * n))
-    lat_rad = math.radians(lat_deg)
-    y = min(n - 1, int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n))
-    return _key(x, y, zoom)
+    y = min(n - 1, int((1.0 - math.asinh(math.tan(math.radians(lat_deg))) / math.pi) / 2.0 * n))
+    return x, y
+
+
+def tileRange(bounds: Bounds, zoom: int) -> tuple[int, int, int, int]:
+    """Inclusive Web Mercator tile range ``(x0, y0, x1, y1)`` covering a lon/lat box."""
+    minLon, minLat, maxLon, maxLat = bounds
+    return (*tileXY(maxLat, minLon, zoom), *tileXY(minLat, maxLon, zoom))
+
+
+def quadkey(lat_deg: float, lon_deg: float, zoom: int) -> str:
+    """Bing quadkey (string of length ``zoom``) of the tile containing a point."""
+    return _key(*tileXY(lat_deg, lon_deg, zoom), zoom)
 
 
 def quadkeyBounds(key: str) -> Bounds:
@@ -141,15 +152,8 @@ def quadkeyBounds(key: str) -> Bounds:
 
 def quadkeysCovering(bounds: Bounds, zoom: int) -> list[str]:
     """Quadkeys of all zoom-level tiles intersecting a lon/lat box."""
-    minLon, minLat, maxLon, maxLat = bounds
-    nw, se = quadkey(maxLat, minLon, zoom), quadkey(minLat, maxLon, zoom)
-    x0, y0 = _xy(nw)
-    x1, y1 = _xy(se)
-    keys = []
-    for y in range(y0, y1 + 1):
-        for x in range(x0, x1 + 1):
-            keys.append(_key(x, y, zoom))
-    return keys
+    x0, y0, x1, y1 = tileRange(bounds, zoom)
+    return [_key(x, y, zoom) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
 
 
 def fetchGlo30(session: HttpSession, bounds: Bounds, workDir: Path) -> list[Path]:

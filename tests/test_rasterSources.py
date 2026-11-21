@@ -10,9 +10,9 @@ import httpx
 import numpy as np
 import pytest
 import rasterio
+from _packSupport import mockSession
 from _support import rangeServer
 
-from map3d.prepare.http import HttpSession
 from map3d.prepare.sources import rasters
 
 SG = (103.6, 1.2, 104.1, 1.5)
@@ -68,10 +68,6 @@ def testQuadkeysCoveringBounds():
         assert b[0] < SG[2] and SG[0] < b[2] and b[1] < SG[3] and SG[1] < b[3]
 
 
-def _session(files: dict[str, bytes]) -> HttpSession:
-    return HttpSession(transport=httpx.MockTransport(rangeServer(files)), sleep=lambda s: None)
-
-
 def _tif(writeRaster, path: Path, bounds, value: float, crs="EPSG:4326") -> bytes:
     return writeRaster(
         path, bounds, values=np.full((40, 40), value, np.float32), shape=(40, 40), crs=crs
@@ -85,7 +81,7 @@ def testFetchTiles_clipsEachTileAndSkipsMissing(tmp_path: Path, writeRaster):
         )
     }
     # Tile (1, 104) is absent (ocean) -> skipped.
-    with _session(files) as session:
+    with mockSession(rangeServer(files)) as session:
         out = rasters.fetchGlo30(session, SG, tmp_path / "work")
     assert [p.name for p in out] == ["copernicusGlo30_N01E103.tif"]
     with rasterio.open(out[0]) as src:
@@ -101,10 +97,7 @@ def testFetchFabdem_extractsOnlyNeededZipMembers(tmp_path: Path, writeRaster):
         )
         zf.writestr("N05E105_FABDEM_V1-2.tif", b"not needed")
     log: list[httpx.Request] = []
-    transport = httpx.MockTransport(
-        rangeServer({rasters.fabdemZipUrl(1, 103): buf.getvalue()}, log)
-    )
-    with HttpSession(transport=transport, sleep=lambda s: None) as session:
+    with mockSession(rangeServer({rasters.fabdemZipUrl(1, 103): buf.getvalue()}, log)) as session:
         out = rasters.fetchFabdem(session, SG, tmp_path / "work")
     assert [p.name for p in out] == ["fabdem_N01E103.tif"]
     with rasterio.open(out[0]) as src:
@@ -112,7 +105,7 @@ def testFetchFabdem_extractsOnlyNeededZipMembers(tmp_path: Path, writeRaster):
 
 
 def testFetchFabdem_missingZipIsSkipped(tmp_path: Path):
-    with _session({}) as session:
+    with mockSession(rangeServer({})) as session:
         assert rasters.fetchFabdem(session, SG, tmp_path / "work") == []
 
 
@@ -122,7 +115,7 @@ def testFetchEgm2008_singleClippedFile(tmp_path: Path, writeRaster):
             writeRaster, tmp_path / "g.tif", (-180.0, -90.0, 180.0, 90.0), 8.5
         )
     }
-    with _session(files) as session:
+    with mockSession(rangeServer(files)) as session:
         out = rasters.fetchEgm2008(session, SG, tmp_path / "work")
     assert [p.name for p in out] == ["egm2008.tif"]
     with rasterio.open(out[0]) as src:
@@ -139,7 +132,7 @@ def testFetchWorldCoverAndCanopy(tmp_path: Path, writeRaster):
     for key in qk:
         b = rasters.quadkeyBounds(key)
         files[rasters.metaCanopyUrl(key)] = _tif(writeRaster, tmp_path / f"{key}.tif", b, 5.0)
-    with _session(files) as session:
+    with mockSession(rangeServer(files)) as session:
         wc = rasters.fetchWorldCover(session, SG, tmp_path / "work")
         canopy = rasters.fetchMetaCanopy(session, SG, tmp_path / "work")
     assert [p.name for p in wc] == ["esaWorldCover_N00E102.tif"]
