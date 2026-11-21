@@ -182,6 +182,18 @@ class Pack:
         """Declared pack coverage ``(minLon, minLat, maxLon, maxLat)``."""
         return self.manifest.bounds_deg
 
+    def sourcesFor(self, role: str) -> list[str]:
+        """Sources present in the pack for a role, highest priority first.
+
+        Args:
+            role: Role identifier.
+
+        Returns:
+            Source identifiers in registry (priority) order; sources the
+            registry no longer knows are never listed.
+        """
+        return [s for s in sourcesForRole(role) if s in self.manifest.sources]
+
     def primarySource(self, role: str) -> SourceEntry | None:
         """Highest-priority source present for a role.
 
@@ -191,10 +203,8 @@ class Pack:
         Returns:
             The source entry, or ``None`` if the pack has no source for the role.
         """
-        for sourceId in sourcesForRole(role):
-            if sourceId in self.manifest.sources:
-                return self.manifest.sources[sourceId]
-        return None
+        present = self.sourcesFor(role)
+        return self.manifest.sources[present[0]] if present else None
 
     def checkCoverage(self, bounds_deg: Bounds) -> list[str]:
         """Check that the pack can serve a scene footprint.

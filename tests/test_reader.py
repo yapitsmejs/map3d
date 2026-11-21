@@ -84,6 +84,14 @@ def testPrimarySource_followsRolePriority(pack: Pack, tmp_path: Path, writeRaste
     assert pack.primarySource("canopyHeight") is None
 
 
+def testSourcesFor_presentSourcesInPriorityOrder(pack: Pack, tmp_path: Path, writeRaster):
+    ingestFiles(pack.root, "copernicusGlo30", [writeRaster(tmp_path / "c.tif", BOUNDS)])
+    reopened = Pack.open(pack.root)
+    assert reopened.sourcesFor("ground") == ["fabdem", "copernicusGlo30"]
+    assert reopened.sourcesFor("buildings") == ["overtureBuildings"]
+    assert reopened.sourcesFor("canopyHeight") == []
+
+
 def testReadRaster_mosaicsTilesAndSamplesBilinear(pack: Pack):
     window = pack.readRaster("fabdem", (103.3, 1.3, 103.7, 1.7))
     rng = np.random.default_rng(1)

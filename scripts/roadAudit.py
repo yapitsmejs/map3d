@@ -41,7 +41,6 @@ import shapely
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.provenance import HeightSource
 from map3d.pack.reader import Pack
-from map3d.pack.registry import sourcesForRole
 from map3d.request import SceneRequest
 from map3d.scene import buildScene
 
@@ -219,9 +218,7 @@ def _roadSegments(pack: Pack, geometry: GridGeometry) -> list[Any]:
     bounds = geometry.footprintBounds_deg(margin_m=geometry.gridSpacing_m)
     frame = geometry.frame
     segments = []
-    for sourceId in sourcesForRole("transport"):
-        if sourceId not in pack.manifest.sources:
-            continue
+    for sourceId in pack.sourcesFor("transport"):
         sel = pack.readVectors(
             sourceId, bounds, columns=["sourceFeatureId", "kind", "isBridge", "level", "width_m"]
         )
