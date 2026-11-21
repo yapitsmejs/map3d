@@ -152,3 +152,16 @@ nor automatic mis-tag dropping is reliable; the `dsmHeight` role is kept as
 prepared infrastructure (buildings are large enough for the 30 m pixels to
 measure - see `scripts/heightAudit.py`-style validation) and the residual
 is reported per bridge by `scripts/roadAudit.py` as human-review evidence.
+
+
+**Building-height validation from the DSM (negative result, 2026-11-21):**
+`scripts/heightAudit.py` compares recorded building heights with the median
+DSM-minus-ground residual over each footprint. On the Loyang scene the
+tool reports a 26 m median deviation for *authoritative* HDB floor-derived
+heights - and direct inspection shows the DSM is the wrong side: over a
+600x600 m HDB precinct of ~40 m blocks, GLO-30 tops out at 28 m (reading
+the surrounding trees) while the same tile reads an industrial depot roof
+correctly. Singapore's Copernicus GLO-30 coverage is too patchy to validate
+building heights here; the tool remains useful where the DSM is sound, and
+prints a warning when authoritative sources and the DSM disagree by more
+than 5 m.
