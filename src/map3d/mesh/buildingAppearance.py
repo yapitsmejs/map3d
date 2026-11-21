@@ -13,8 +13,6 @@ import colorsys
 import functools
 import hashlib
 import os
-import struct
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +23,7 @@ import rasterio
 import shapely
 
 from map3d.layers.buildings import BuildingSet
+from map3d.mesh.gltf import encodePng
 from map3d.pack.reader import RasterWindow, readRasterWindow
 
 if TYPE_CHECKING:
@@ -33,6 +32,8 @@ if TYPE_CHECKING:
 __all__ = [
     "FACADE_BAY_WIDTH_m",
     "FACADE_FLOOR_HEIGHT_m",
+    "NEUTRAL_ROOF",
+    "NEUTRAL_WALL",
     "BuildingAppearance",
     "facadeTexture",
     "facadeUv",
@@ -41,8 +42,8 @@ __all__ = [
 FloatArray = npt.NDArray[np.float64]
 ColorArray = npt.NDArray[np.uint8]
 
-NEUTRAL_ROOF = np.array([214, 214, 212], dtype=np.uint8)
-NEUTRAL_WALL = np.array([240, 240, 244], dtype=np.uint8)
+NEUTRAL_ROOF = (214, 214, 212)  # also the conceptual texture's roof colour
+NEUTRAL_WALL = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
 FACADE_BAY_WIDTH_m = 3.0
 FACADE_FLOOR_HEIGHT_m = 3.0
 _MAX_SAMPLES_PER_BUILDING = 256
@@ -86,8 +87,8 @@ class BuildingAppearance:
         """
         count = len(buildings)
         return cls(
-            np.tile(NEUTRAL_ROOF, (count, 1)),
-            np.tile(NEUTRAL_WALL, (count, 1)),
+            np.tile(np.array(NEUTRAL_ROOF, dtype=np.uint8), (count, 1)),
+            np.tile(np.array(NEUTRAL_WALL, dtype=np.uint8), (count, 1)),
             np.zeros(count, dtype=bool),
         )
 
@@ -266,24 +267,4 @@ def facadeTexture() -> bytes:
     image[22:66, 46:50] = 170  # vertical mullion
     image[68:73, 22:74] = 190  # sill
     image[-4:, :] = 220  # floor band
-    return _png(image)
-
-
-def _png(image: ColorArray) -> bytes:
-    height, width, _ = image.shape
-    scanlines = b"".join(b"\x00" + row.tobytes() for row in image)
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data))
-            + kind
-            + data
-            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-        )
-
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(scanlines, level=9))
-        + chunk(b"IEND", b"")
-    )
+    return encodePng(image)

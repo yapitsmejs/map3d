@@ -32,7 +32,7 @@ import shapely
 
 from map3d import __version__
 from map3d.mesh.buildingAppearance import BuildingAppearance, facadeTexture
-from map3d.mesh.gltf import MeshPart, writeGlb
+from map3d.mesh.gltf import InstancedPart, MeshPart, writeGlb
 from map3d.mesh.scenery import (
     TileExtent,
     buildingParts,
@@ -201,26 +201,29 @@ def _writeTile(
         else np.array([], dtype=np.int64)
     )
     terrain = terrainPart(scene, extent, params.terrainGridSize, terrainError)
-    roofs, walls = buildingParts(scene, selB, extent, appearance=params.buildingAppearance)
+    roofs, walls = buildingParts(scene, selB, extent, params.buildingAppearance)
     tops, sides = deckParts(scene, selD, extent)
     textured = MeshPart.concatenate([terrain, roofs, tops])
     colored = sides
-    selT = _treesInTile(params.trees, r, sx, sy, ix, iy, n, level, depth)
+    instanced: list[InstancedPart] = []
+    treeCorners: list[FloatArray] = []
+    if params.trees is not None:
+        selT = _treesInTile(params.trees, r, sx, sy, ix, iy, n, level, depth)
+        instanced = params.trees.select(selT)
+        treeCorners = list(params.trees.extents(selT))
     uri = f"tiles/{level}/{ix}_{iy}.glb"
     writeGlb(
         root / uri,
         textured,
-        renderTexture(scene, extent, params.textureSize, params.buildingAppearance),
+        renderTexture(scene, extent, params.buildingAppearance, params.textureSize),
         colored,
-        instanced=params.trees.select(selT) if params.trees is not None else (),
+        instanced=instanced,
         facades=walls,
         facadeTexture=params.facadePng,
     )
 
     corners = [p.positions_ENU_m for p in (textured, colored, walls) if not p.isEmpty]
-    if params.trees is not None and selT.size:
-        corners += list(params.trees.extents(selT))
-    positions = np.concatenate(corners)
+    positions = np.concatenate(corners + treeCorners)
     lo, hi = positions.min(axis=0) - _BOX_PAD_m, positions.max(axis=0) + _BOX_PAD_m
     tile: dict[str, Any] = {
         "boundingVolume": {"box": _box(lo, hi)},
@@ -250,7 +253,7 @@ def _writeTile(
 
 
 def _treesInTile(
-    trees: TreeSet | None,
+    trees: TreeSet,
     r: TileExtent,
     sx: float,
     sy: float,
@@ -260,7 +263,7 @@ def _treesInTile(
     level: int,
     depth: int,
 ) -> npt.NDArray[np.int64]:
-    if trees is None or len(trees) == 0 or level < depth - 1:
+    if len(trees) == 0 or level < depth - 1:
         return np.array([], dtype=np.int64)
     inTile = _inTile(np.column_stack([trees.gx_m, trees.gy_m]), r, sx, sy, ix, iy, n)
     if level < depth:

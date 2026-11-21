@@ -15,7 +15,7 @@ scene-centre ENU metres:
 
 from __future__ import annotations
 
-import warnings
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -23,8 +23,6 @@ import numpy as np
 import numpy.typing as npt
 import pyproj
 import shapely
-from rasterio.errors import NotGeoreferencedWarning
-from rasterio.io import MemoryFile
 
 from map3d.gridGeometry import GridGeometry
 from map3d.layers.decks import DECK_THICKNESS_m, deckTopAboveGround_m
@@ -35,8 +33,8 @@ from map3d.layers.landCover import (
     CLASS_ROAD,
     remapClasses,
 )
-from map3d.mesh.buildingAppearance import BuildingAppearance, facadeUv
-from map3d.mesh.gltf import MeshPart
+from map3d.mesh.buildingAppearance import NEUTRAL_ROOF, BuildingAppearance, facadeUv
+from map3d.mesh.gltf import MeshPart, encodePng
 from map3d.mesh.martini import checkGridSize, rtinErrors, rtinMesh
 from map3d.mesh.trees import MIN_TREE_HEIGHT_m
 from map3d.pack.reader import RasterWindow
@@ -59,7 +57,6 @@ __all__ = [
 
 FloatArray = npt.NDArray[np.float64]
 
-WALL_COLOR = (240, 240, 244)  # walls a touch brighter than roofs, as in map renders
 DECK_COLOR = (172, 174, 180)
 PIER_COLOR = (150, 148, 145)
 PIER_SPACING_m = 35.0  # pier spacing along a deck centerline
@@ -81,7 +78,7 @@ CONCEPT_COLORS: dict[str, tuple[int, int, int]] = {
     "road": (178, 180, 186),
     "rail": (162, 154, 148),
     "deck": (190, 192, 198),
-    "roof": (214, 214, 212),
+    "roof": NEUTRAL_ROOF,
     "unknown": (228, 228, 222),
 }
 _LAND_COVER_STYLE = {
@@ -209,7 +206,7 @@ def buildingParts(
     scene: Scene,
     indices: npt.NDArray[np.int64],
     extent: TileExtent,
-    appearance: BuildingAppearance | None = None,
+    appearance: BuildingAppearance,
 ) -> tuple[MeshPart, MeshPart]:
     """LOD1 extrusions of the selected buildings.
 
@@ -217,7 +214,7 @@ def buildingParts(
         scene: Built scene.
         indices: Building indices (into ``scene.models.buildings``).
         extent: Tile extent (for roof UVs).
-        appearance: Imagery-derived facade tints, or neutral conceptual colours.
+        appearance: Per-building facade tints (imagery-derived or neutral).
 
     Returns:
         ``(roofs, walls)``: textured roofs and textured, vertex-tinted walls.
@@ -235,23 +232,14 @@ def buildingParts(
     baseEll = b.baseOrthometric_m[indices] + undulation
     frame = scene.geometry.frame
 
-    tris, owner = shapely.get_parts(
-        shapely.constrained_delaunay_triangles(geoms), return_index=True
-    )
-    corners = shapely.get_coordinates(tris).reshape(-1, 4, 2)[:, :3].reshape(-1, 2)
-    cornerOwner = np.repeat(owner, 3)
+    corners, cornerOwner = _triCorners(geoms)
     e, n, u = frame.geodeticToEnu(corners[:, 1], corners[:, 0], roofEll[cornerOwner])
     roofPos = np.column_stack([e, n, u])
     roofTris = np.arange(roofPos.shape[0], dtype=np.uint32).reshape(-1, 3)
     gx, gy = enuToGrid(scene.geometry, e, n)
     roofs = MeshPart(roofPos, _upward(roofPos, roofTris), extent.uv(gx, gy))
 
-    wallColors = (
-        appearance.wallColors[indices]
-        if appearance is not None
-        else np.tile(np.array(WALL_COLOR, dtype=np.uint8), (indices.size, 1))
-    )
-    walls = _walls(frame, geoms, baseEll, roofEll, wallColors)
+    walls = _walls(frame, geoms, baseEll, roofEll, appearance.wallColors[indices])
     return roofs, walls
 
 
@@ -288,11 +276,7 @@ def deckParts(
         return MeshPart.empty(withUv=True), MeshPart.empty(withColors=True)
     indices = np.asarray(kept, dtype=np.int64)
     shapes = np.array(clipped, dtype=object)
-    tris, owner = shapely.get_parts(
-        shapely.constrained_delaunay_triangles(shapes), return_index=True
-    )
-    px = shapely.get_coordinates(tris).reshape(-1, 4, 2)[:, :3].reshape(-1, 2)
-    pxOwner = np.repeat(owner, 3)
+    px, pxOwner = _triCorners(shapes)
     topH = _deckTop(scene, d, indices, pxOwner, px)
     gx, gy = _pixelToGrid(scene.geometry, px[:, 0], px[:, 1])
     e, n = gridToEnu(scene.geometry, gx, gy)
@@ -306,22 +290,19 @@ def deckParts(
         colors=_colors(bottomPos.shape[0], DECK_COLOR),
     )
 
-    rings, ringOwner = shapely.get_rings(shapes, return_index=True)
-    coords, coordRing = shapely.get_coordinates(rings, return_index=True)
-    a, b = _ringSegments(coordRing)
-    segOwner = ringOwner[coordRing[a]]
-    ends = np.concatenate([coords[a], coords[b]])
+    start, end, segOwner = _ringEdges(shapes)
+    ends = np.concatenate([start, end])
     endOwner = np.concatenate([segOwner, segOwner])
     endTop = _deckTop(scene, d, indices, endOwner, ends)
     sgx, sgy = _pixelToGrid(scene.geometry, ends[:, 0], ends[:, 1])
     se, sn = gridToEnu(scene.geometry, sgx, sgy)
     upTop = _columnUp(scene, se, sn, endTop)
     upBottom = _columnUp(scene, se, sn, endTop - DECK_THICKNESS_m)
-    m = a.size
+    m = segOwner.size
     # Segments lying on the clip box are tile cuts, not real slab edges:
     # drawing their sides would raise a wall where the deck continues into
     # the neighbouring tile.
-    cut = _onClipEdge(coords[a], coords[b], box)
+    cut = _onClipEdge(start, end, box)
     keep = ~np.concatenate([cut, cut])
     sides = _quads(
         np.column_stack([se[:m], sn[:m], upBottom[:m]])[keep[:m]],
@@ -410,8 +391,8 @@ def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64], extent: TileExt
 def renderTexture(
     scene: Scene,
     extent: TileExtent,
+    appearance: BuildingAppearance,
     size: int = 512,
-    appearance: BuildingAppearance | None = None,
 ) -> bytes:
     """Render a tile's conceptual top-down texture as lossless PNG.
 
@@ -426,8 +407,8 @@ def renderTexture(
     Args:
         scene: Built scene.
         extent: Tile extent.
+        appearance: Per-building roof colours (imagery-derived or neutral).
         size: Texture side in pixels.
-        appearance: Optional per-building roof colours derived from imagery.
 
     Returns:
         PNG bytes.
@@ -439,7 +420,7 @@ def renderTexture(
     e, n = gridToEnu(scene.geometry, gxm, gym)
     toGeo = _orthoToGeographic(scene.geometry.orthoCrs().to_wkt())
     lon, lat = (np.asarray(v) for v in toGeo.transform(e, n))
-    return _encode(_conceptTexture(scene, extent, size, lat, lon, appearance))
+    return encodePng(_conceptTexture(scene, extent, size, lat, lon, appearance))
 
 
 _SUPERSAMPLE = 2  # crisp overlays are sampled 2x per axis and averaged (anti-aliased edges)
@@ -478,7 +459,7 @@ def _conceptTexture(
     size: int,
     lat: FloatArray,
     lon: FloatArray,
-    appearance: BuildingAppearance | None,
+    appearance: BuildingAppearance,
 ) -> npt.NDArray[np.uint8]:
     k = _SUPERSAMPLE
     t = (np.arange(size * k) + 0.5) / (size * k)
@@ -497,14 +478,13 @@ def _conceptTexture(
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
-    if appearance is not None:
-        featureIds = np.asarray(scene.layers["featureId"])[row, col]
-        buildingRoof = (
-            (classes == CLASS_BUILDING)
-            & (featureIds > 0)
-            & (featureIds <= appearance.roofColors.shape[0])
-        )
-        rgb[buildingRoof] = appearance.roofColors[featureIds[buildingRoof] - 1]
+    featureIds = np.asarray(scene.layers["featureId"])[row, col]
+    buildingRoof = (
+        (classes == CLASS_BUILDING)
+        & (featureIds > 0)
+        & (featureIds <= appearance.roofColors.shape[0])
+    )
+    rgb[buildingRoof] = appearance.roofColors[featureIds[buildingRoof] - 1]
     underTrees = (canopy >= MIN_TREE_HEIGHT_m) & ~overlay  # roads under trees stay roads
     rgb[underTrees] = CONCEPT_COLORS["underTrees"]
     averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
@@ -512,24 +492,9 @@ def _conceptTexture(
     return out
 
 
-def _encode(rgb: npt.NDArray[np.uint8]) -> bytes:
-    height, width, _ = rgb.shape
-    with warnings.catch_warnings(), MemoryFile() as mem:
-        warnings.simplefilter("ignore", NotGeoreferencedWarning)  # textures are not georeferenced
-        with mem.open(driver="PNG", width=width, height=height, count=3, dtype="uint8") as dst:
-            dst.write(np.moveaxis(rgb, -1, 0))
-        return bytes(mem.read())
-
-
-_TRANSFORMERS: dict[str, pyproj.Transformer] = {}
-
-
+@functools.cache
 def _orthoToGeographic(wkt: str) -> pyproj.Transformer:
-    if wkt not in _TRANSFORMERS:
-        _TRANSFORMERS[wkt] = pyproj.Transformer.from_crs(
-            pyproj.CRS.from_wkt(wkt), "EPSG:4326", always_xy=True
-        )
-    return _TRANSFORMERS[wkt]
+    return pyproj.Transformer.from_crs(pyproj.CRS.from_wkt(wkt), "EPSG:4326", always_xy=True)
 
 
 def _deckTop(
@@ -560,12 +525,23 @@ def _deckTop(
     return top
 
 
-def _ringSegments(
-    coordRing: npt.NDArray[np.int64],
-) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-    """Indices ``(a, b)`` of consecutive coordinates within each (closed) ring."""
-    a = np.flatnonzero(coordRing[:-1] == coordRing[1:])
-    return a, a + 1
+def _triCorners(polygons: npt.NDArray[np.object_]) -> tuple[FloatArray, npt.NDArray[np.int64]]:
+    """Constrained-Delaunay triangle corners ``(3m, 2)`` and the polygon of each corner."""
+    tris, owner = shapely.get_parts(
+        shapely.constrained_delaunay_triangles(polygons), return_index=True
+    )
+    corners = shapely.get_coordinates(tris).reshape(-1, 4, 2)[:, :3].reshape(-1, 2)
+    return corners, np.repeat(owner, 3)
+
+
+def _ringEdges(
+    polygons: npt.NDArray[np.object_],
+) -> tuple[FloatArray, FloatArray, npt.NDArray[np.int64]]:
+    """Every ring segment as ``(start, end, polygon index)``."""
+    rings, ringOwner = shapely.get_rings(polygons, return_index=True)
+    coords, coordRing = shapely.get_coordinates(rings, return_index=True)
+    a = np.flatnonzero(coordRing[:-1] == coordRing[1:])  # consecutive points of one ring
+    return coords[a], coords[a + 1], ringOwner[coordRing[a]]
 
 
 def _walls(
@@ -575,19 +551,16 @@ def _walls(
     roofEll: FloatArray,
     colors: npt.NDArray[np.uint8],
 ) -> MeshPart:
-    rings, ringOwner = shapely.get_rings(geoms, return_index=True)
-    coords, coordRing = shapely.get_coordinates(rings, return_index=True)
-    a, b = _ringSegments(coordRing)
-    owner = ringOwner[coordRing[a]]
+    start, end, owner = _ringEdges(geoms)
 
-    def enu(idx: npt.NDArray[np.int64], h: FloatArray) -> FloatArray:
-        e, n, u = frame.geodeticToEnu(coords[idx, 1], coords[idx, 0], h)
+    def enu(lonLat: FloatArray, h: FloatArray) -> FloatArray:
+        e, n, u = frame.geodeticToEnu(lonLat[:, 1], lonLat[:, 0], h)
         return np.column_stack([e, n, u])
 
-    p0 = enu(a, baseEll[owner])
-    p1 = enu(b, baseEll[owner])
-    p2 = enu(b, roofEll[owner])
-    p3 = enu(a, roofEll[owner])
+    p0 = enu(start, baseEll[owner])
+    p1 = enu(end, baseEll[owner])
+    p2 = enu(end, roofEll[owner])
+    p3 = enu(start, roofEll[owner])
     length_m = np.linalg.norm(p1 - p0, axis=1)
     height_m = np.maximum(roofEll - baseEll, 0.0)[owner]
     return _quads(p0, p1, p2, p3, colors[owner], facadeUv(length_m, height_m))

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from map3d.mesh import scenery
+from map3d.mesh.buildingAppearance import BuildingAppearance
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
 from map3d.request import SceneRequest
 from map3d.scene import Scene, buildScene
@@ -26,6 +27,11 @@ def scene(plane: SyntheticScene) -> Scene:
         SceneRequest((plane.frame.lat0_deg, plane.frame.lon0_deg), 5.0, axes, 1000.0, 1000.0),
         plane.packDir,
     )
+
+
+@pytest.fixture
+def neutral(scene: Scene) -> BuildingAppearance:
+    return BuildingAppearance.neutral(scene.models.buildings)
 
 
 FULL = scenery.TileExtent(-500.0, 500.0, -500.0, 500.0)  # the whole 1 km swath
@@ -58,9 +64,9 @@ def testTerrain_flatPlaneSimplifiesWithTolerance(scene: Scene):
     assert coarse.triangles.shape[0] < exact.triangles.shape[0]
 
 
-def testBuildings_roofAtRoofHeightAndWallsColored(scene: Scene):
+def testBuildings_roofAtRoofHeightAndWallsColored(scene: Scene, neutral: BuildingAppearance):
     buildings = scene.models.buildings
-    roofs, walls = scenery.buildingParts(scene, np.array([0]), FULL)
+    roofs, walls = scenery.buildingParts(scene, np.array([0]), FULL, neutral)
     # Flat in ellipsoidal height, so corners differ by Earth curvature (mm) in ENU Up.
     lon, lat = np.asarray(buildings.geometries[0].exterior.coords).T
     expectedU = scene.geometry.frame.geodeticToEnu(lat, lon, buildings.roofOrthometric_m[0] + 8.0)[
@@ -99,14 +105,14 @@ def testDecks_slabFollowsProfile(scene: Scene, plane: SyntheticScene):
     assert sides.positions_ENU_m[:, 2].min() < u.min()  # underside is below the top
 
 
-def testEmptySelections_giveEmptyParts(scene: Scene):
+def testEmptySelections_giveEmptyParts(scene: Scene, neutral: BuildingAppearance):
     empty = np.array([], dtype=np.int64)
-    assert all(p.isEmpty for p in scenery.buildingParts(scene, empty, FULL))
+    assert all(p.isEmpty for p in scenery.buildingParts(scene, empty, FULL, neutral))
     assert all(p.isEmpty for p in scenery.deckParts(scene, empty, FULL))
 
 
-def testTexture_conceptualIsPng(scene: Scene):
-    png = scenery.renderTexture(scene, FULL, size=64)
+def testTexture_conceptualIsPng(scene: Scene, neutral: BuildingAppearance):
+    png = scenery.renderTexture(scene, FULL, neutral, size=64)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
@@ -134,10 +140,12 @@ def _decodePng(data: bytes) -> np.ndarray:
         (0.0, 200.0, "road"),  # bridges burn as the roads they carry
     ],
 )
-def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
+def testTexture_conceptualColours(
+    scene: Scene, neutral: BuildingAppearance, e: float, n: float, name: str
+):
     extent = FULL
     size = 500  # 2 m pixels
-    rgb = _decodePng(scenery.renderTexture(scene, extent, size=size))
+    rgb = _decodePng(scenery.renderTexture(scene, extent, neutral, size=size))
     assert rgb.shape == (size, size, 3)
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(e), np.array(n))
     col = int((gx - extent.x0) / (extent.x1 - extent.x0) * size)
@@ -146,20 +154,18 @@ def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
 
 
 def testTexture_imageryDerivedBuildingRoofColour(scene: Scene):
-    from map3d.mesh.buildingAppearance import BuildingAppearance
-
     appearance = BuildingAppearance.neutral(scene.models.buildings)
     appearance.roofColors[0] = [160, 100, 80]
-    rgb = _decodePng(scenery.renderTexture(scene, FULL, size=500, appearance=appearance))
+    rgb = _decodePng(scenery.renderTexture(scene, FULL, appearance, size=500))
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(-160.0), np.array(-100.0))
     np.testing.assert_array_equal(rgb[int(500 - gy) // 2, int(gx + 500) // 2], [160, 100, 80])
 
 
-def testTexture_conceptualSoftensLandCoverEdges(scene: Scene):
+def testTexture_conceptualSoftensLandCoverEdges(scene: Scene, neutral: BuildingAppearance):
     # Grass meets water at n = 350 m: the land-cover colours blend across the
     # 5 m source pixels instead of switching in a hard step.
     extent = scenery.TileExtent(-60.0, 60.0, 290.0, 410.0)
-    rgb = _decodePng(scenery.renderTexture(scene, extent, size=240)).astype(int)
+    rgb = _decodePng(scenery.renderTexture(scene, extent, neutral, size=240)).astype(int)
     grass, water = (
         np.array(scenery.CONCEPT_COLORS["grass"]),
         np.array(scenery.CONCEPT_COLORS["water"]),
@@ -168,14 +174,16 @@ def testTexture_conceptualSoftensLandCoverEdges(scene: Scene):
     assert between.mean() > 0.005
 
 
-def testTexture_conceptualWithoutLandCoverUsesGridClasses(scene: Scene):
+def testTexture_conceptualWithoutLandCoverUsesGridClasses(
+    scene: Scene, neutral: BuildingAppearance
+):
     import dataclasses
 
     models = dataclasses.replace(
         scene.models, landCover=dataclasses.replace(scene.models.landCover, window=None)
     )
     bare = dataclasses.replace(scene, models=models)
-    rgb = _decodePng(scenery.renderTexture(bare, FULL, size=100))
+    rgb = _decodePng(scenery.renderTexture(bare, FULL, neutral, size=100))
     gx, gy = scenery.enuToGrid(scene.geometry, np.array(100.0), np.array(-390.0))
     col, row = int((gx + 500) / 10), int((500 - gy) / 10)
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS["grass"])

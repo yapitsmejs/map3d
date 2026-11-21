@@ -18,6 +18,7 @@ ECEF.
 from __future__ import annotations
 
 import os
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,8 +26,10 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pygltflib
+from rasterio.errors import NotGeoreferencedWarning
+from rasterio.io import MemoryFile
 
-__all__ = ["InstancedPart", "MeshPart", "enuToGltf", "vertexNormals", "writeGlb"]
+__all__ = ["InstancedPart", "MeshPart", "encodePng", "enuToGltf", "vertexNormals", "writeGlb"]
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -135,6 +138,23 @@ def vertexNormals(positions: FloatArray, triangles: npt.NDArray[np.uint32]) -> F
     out = np.tile(np.array([0.0, 0.0, 1.0]), (p.shape[0], 1))
     out[ok] = acc[ok] / length[ok, None]
     return out
+
+
+def encodePng(rgb: npt.NDArray[np.uint8]) -> bytes:
+    """Encode an RGB image as PNG bytes (for a glTF texture).
+
+    Args:
+        rgb: Image, ``(height, width, 3)`` ``uint8``.
+
+    Returns:
+        Lossless PNG bytes.
+    """
+    height, width, _ = rgb.shape
+    with warnings.catch_warnings(), MemoryFile() as mem:
+        warnings.simplefilter("ignore", NotGeoreferencedWarning)  # textures are not georeferenced
+        with mem.open(driver="PNG", width=width, height=height, count=3, dtype="uint8") as dst:
+            dst.write(np.moveaxis(rgb, -1, 0))
+        return bytes(mem.read())
 
 
 def writeGlb(
@@ -249,6 +269,17 @@ def writeGlb(
         )
         return pygltflib.Primitive(attributes=attributes, indices=indices, material=material)
 
+    def addMaterial(
+        doubleSided: bool = False, texture: int | None = None, color: list[float] | None = None
+    ) -> int:
+        pbr = pygltflib.PbrMetallicRoughness(metallicFactor=0.0, roughnessFactor=1.0)
+        if texture is not None:
+            pbr.baseColorTexture = pygltflib.TextureInfo(index=texture)
+        if color is not None:
+            pbr.baseColorFactor = color
+        gltf.materials.append(pygltflib.Material(pbrMetallicRoughness=pbr, doubleSided=doubleSided))
+        return len(gltf.materials) - 1
+
     def addTextureMaterial(data: bytes, doubleSided: bool, repeat: bool) -> int:
         image = addView(data, None)
         imageIndex = len(gltf.images)
@@ -260,17 +291,7 @@ def writeGlb(
         )
         textureIndex = len(gltf.textures)
         gltf.textures.append(pygltflib.Texture(source=imageIndex, sampler=samplerIndex))
-        gltf.materials.append(
-            pygltflib.Material(
-                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
-                    baseColorTexture=pygltflib.TextureInfo(index=textureIndex),
-                    metallicFactor=0.0,
-                    roughnessFactor=1.0,
-                ),
-                doubleSided=doubleSided,
-            )
-        )
-        return len(gltf.materials) - 1
+        return addMaterial(doubleSided, texture=textureIndex)
 
     if hasTextured and textured is not None and texture is not None:
         material = addTextureMaterial(texture, doubleSided=False, repeat=False)
@@ -279,15 +300,7 @@ def writeGlb(
         material = addTextureMaterial(facadeTexture, doubleSided=True, repeat=True)
         primitives.append(addPrimitive(facades, material))
     if hasColored and colored is not None:
-        gltf.materials.append(
-            pygltflib.Material(
-                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
-                    metallicFactor=0.0, roughnessFactor=1.0
-                ),
-                doubleSided=True,
-            )
-        )
-        primitives.append(addPrimitive(colored, len(gltf.materials) - 1))
+        primitives.append(addPrimitive(colored, addMaterial(doubleSided=True)))
 
     if primitives:
         gltf.meshes.append(pygltflib.Mesh(primitives=primitives))
@@ -295,16 +308,7 @@ def writeGlb(
         gltf.scenes[0].nodes.append(len(gltf.nodes) - 1)
     for part in instances:
         linear = (np.asarray(part.color, dtype=np.float64) / 255.0) ** 2.2  # factors are linear
-        gltf.materials.append(
-            pygltflib.Material(
-                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
-                    baseColorFactor=[*(float(c) for c in linear), 1.0],
-                    metallicFactor=0.0,
-                    roughnessFactor=1.0,
-                )
-            )
-        )
-        prim = addPrimitive(part.mesh, len(gltf.materials) - 1)
+        prim = addPrimitive(part.mesh, addMaterial(color=[*(float(c) for c in linear), 1.0]))
         gltf.meshes.append(pygltflib.Mesh(primitives=[prim]))
         s = np.asarray(part.scales, dtype=np.float64)
         attributes = {
