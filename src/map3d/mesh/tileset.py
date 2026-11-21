@@ -57,7 +57,6 @@ __all__ = [
 FloatArray = npt.NDArray[np.float64]
 Style = Literal["conceptual"]
 STYLES: tuple[str, ...] = ("conceptual",)
-_TEXTURE_SIZE = {"conceptual": 512}  # flat colours need ~0.5 m pixels at the leaves
 
 _BASE_SKYLINE_m = 10.0
 PARENT_TREE_MIN_m = 8.0  # trees kept one level above the leaves; none higher up
@@ -81,7 +80,6 @@ class _Params:
     textureSize: int
     terrainGridSize: int
     leafTerrainError_m: float
-    lit: bool
     trees: TreeSet | None
     buildingAppearance: BuildingAppearance
     facadePng: bytes
@@ -91,7 +89,7 @@ def write3dTiles(
     scene: Scene,
     outDir: str | os.PathLike[str],
     leafSize_m: float = 512.0,
-    textureSize: int | None = None,
+    textureSize: int = 512,
     terrainGridSize: int = 129,
     leafTerrainError_m: float = 0.25,
     style: Style = "conceptual",
@@ -104,7 +102,7 @@ def write3dTiles(
         scene: A scene from :func:`map3d.scene.buildScene` (needs its models).
         outDir: Output directory (``tileset.json`` + ``tiles/``).
         leafSize_m: Maximum leaf tile size.
-        textureSize: Texture side in pixels per tile (default: 512).
+        textureSize: Texture side in pixels per tile.
         terrainGridSize: RTIN lattice side per tile (``2^k + 1``).
         leafTerrainError_m: RTIN tolerance at the leaves.
         style: ``"conceptual"`` (flat map colours, lit), the default.
@@ -134,10 +132,9 @@ def write3dTiles(
     params = _Params(
         depth=quadtreeDepth(width_m, height_m, leafSize_m),
         rootExtent=TileExtent(-width_m / 2, width_m / 2, -height_m / 2, height_m / 2),
-        textureSize=textureSize if textureSize is not None else _TEXTURE_SIZE[style],
+        textureSize=textureSize,
         terrainGridSize=terrainGridSize,
         leafTerrainError_m=leafTerrainError_m,
-        lit=style == "conceptual",
         trees=TreeSet.fromScene(scene) if withTrees else None,
         buildingAppearance=appearance,
         facadePng=facadeTexture(),
@@ -215,7 +212,6 @@ def _writeTile(
         textured,
         renderTexture(scene, extent, params.textureSize, params.buildingAppearance),
         colored,
-        lit=params.lit,
         instanced=params.trees.select(selT) if params.trees is not None else (),
         facades=walls,
         facadeTexture=params.facadePng,

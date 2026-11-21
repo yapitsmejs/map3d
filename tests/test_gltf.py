@@ -10,6 +10,8 @@ import pytest
 
 from map3d.mesh.gltf import MeshPart, enuToGltf, writeGlb
 
+_PNG = b"\x89PNG\r\n\x1a\nfakepng"
+
 
 def _square(z: float = 0.0, uv: bool = True, color: bool = False) -> MeshPart:
     pos = np.array([[0, 0, z], [10, 0, z], [10, 10, z], [0, 10, z]], dtype=np.float64)
@@ -35,11 +37,10 @@ def testMeshPart_concatenateAndEmpty():
 
 
 def testWriteGlb_texturedAndColoredPrimitives(tmp_path: Path):
-    jpeg = b"\xff\xd8\xff\xe0fakejpeg\xff\xd9"
     path = writeGlb(
         tmp_path / "t.glb",
         textured=_square(1.0),
-        texture=jpeg,
+        texture=_PNG,
         colored=_square(2.0, uv=False, color=True),
     )
     raw = path.read_bytes()
@@ -57,12 +58,11 @@ def testWriteGlb_texturedAndColoredPrimitives(tmp_path: Path):
     color = gltf.accessors[prims[1].attributes.COLOR_0]
     assert color.normalized is True
     assert color.type == "VEC4"  # 4-byte aligned elements (glTF requirement)
-    assert "KHR_materials_unlit" in gltf.extensionsUsed
-    assert gltf.images[0].mimeType == "image/jpeg"
+    assert gltf.images[0].mimeType == "image/png"
     assert gltf.materials[prims[1].material].doubleSided is True
     blob = gltf.binary_blob()
     view = gltf.bufferViews[gltf.images[0].bufferView]
-    assert blob[view.byteOffset : view.byteOffset + view.byteLength] == jpeg
+    assert blob[view.byteOffset : view.byteOffset + view.byteLength] == _PNG
 
 
 def testWriteGlb_onlyColoredOrNothing(tmp_path: Path):
@@ -78,9 +78,6 @@ def testWriteGlb_onlyColoredOrNothing(tmp_path: Path):
 def testWriteGlb_texturedPartNeedsUvAndTexture(tmp_path: Path):
     with pytest.raises(ValueError, match="uv"):
         writeGlb(tmp_path / "x.glb", textured=_square(uv=False), texture=b"x", colored=None)
-
-
-_PNG = b"\x89PNG\r\n\x1a\nfakepng"
 
 
 def testVertexNormals_flatAndSmooth():
@@ -101,17 +98,15 @@ def testVertexNormals_flatAndSmooth():
     )
 
 
-def testWriteGlb_litWritesNormalsAndPng(tmp_path: Path):
+def testWriteGlb_everyPrimitiveIsLitWithNormals(tmp_path: Path):
     path = writeGlb(
         tmp_path / "lit.glb",
         textured=_square(1.0),
         texture=_PNG,
         colored=_square(2.0, uv=False, color=True),
-        lit=True,
     )
     gltf = pygltflib.GLTF2().load_binary(str(path))
     assert "KHR_materials_unlit" not in (gltf.extensionsUsed or [])
-    assert gltf.images[0].mimeType == "image/png"
     blob = gltf.binary_blob()
     for prim in gltf.meshes[0].primitives:
         acc = gltf.accessors[prim.attributes.NORMAL]
@@ -121,14 +116,6 @@ def testWriteGlb_litWritesNormalsAndPng(tmp_path: Path):
             blob[view.byteOffset : view.byteOffset + view.byteLength], np.float32
         ).reshape(-1, 3)
         np.testing.assert_allclose(normals, np.tile([0.0, 1.0, 0.0], (4, 1)))  # up is +y in glTF
-
-
-def testWriteGlb_unlitTexturedPartHasNoNormals(tmp_path: Path):
-    path = writeGlb(tmp_path / "u.glb", textured=_square(1.0), texture=_PNG, colored=None)
-    gltf = pygltflib.GLTF2().load_binary(str(path))
-    assert gltf.meshes[0].primitives[0].attributes.NORMAL is None
-    assert "KHR_materials_unlit" in gltf.extensionsUsed
-    assert gltf.images[0].mimeType == "image/png"
 
 
 def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
@@ -145,7 +132,7 @@ def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
         scales=np.array([[2.0, 2.0, 3.0], [1.0, 1.0, 1.5]]),
         rotations_ENU=np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.6, 0.8]]),
     )
-    path = writeGlb(tmp_path / "i.glb", _square(1.0), _PNG, None, lit=True, instanced=[part, part])
+    path = writeGlb(tmp_path / "i.glb", _square(1.0), _PNG, None, instanced=[part, part])
     gltf = pygltflib.GLTF2().load_binary(str(path))
     assert "EXT_mesh_gpu_instancing" in gltf.extensionsUsed
     assert "EXT_mesh_gpu_instancing" in gltf.extensionsRequired
@@ -178,7 +165,6 @@ def testWriteGlb_texturedFacadesRepeatAndKeepVertexColors(tmp_path: Path):
         textured=_square(1.0),
         texture=_PNG,
         colored=None,
-        lit=True,
         facades=facade,
         facadeTexture=_PNG,
     )
