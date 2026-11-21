@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import numpy as np
 import pygltflib
 import pytest
+from _meshSupport import sceneOver, writeOrtho
 from _support import validateTileset
 
 from map3d.mesh import tileset as ts
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
-from map3d.request import SceneRequest
-from map3d.scene import Scene, buildScene
+from map3d.scene import Scene
 
 
 @pytest.fixture(scope="module")
@@ -24,12 +23,7 @@ def hill(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 @pytest.fixture(scope="module")
 def scene(hill: SyntheticScene) -> Scene:
-    h = math.radians(30.0)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
-    return buildScene(
-        SceneRequest((hill.frame.lat0_deg, hill.frame.lon0_deg), 5.0, axes, 1000.0, 800.0),
-        hill.packDir,
-    )
+    return sceneOver(hill, angle_deg=30.0, height_m=800.0)
 
 
 @pytest.fixture(scope="module")
@@ -107,23 +101,7 @@ def testTileset_conceptualStyleIsDefault(written: Path):
 
 
 def testTileset_buildingImageryAndProceduralFacades(scene: Scene, tmp_path: Path):
-    import rasterio
-    from rasterio.transform import from_bounds
-
-    ortho = tmp_path / "ortho.tif"
-    bounds = scene.geometry.footprintBounds_deg(margin_m=50.0)
-    with rasterio.open(
-        ortho,
-        "w",
-        driver="GTiff",
-        width=100,
-        height=100,
-        count=3,
-        dtype="uint8",
-        crs="EPSG:4326",
-        transform=from_bounds(*bounds, 100, 100),
-    ) as dst:
-        dst.write(np.full((3, 100, 100), 120, np.uint8))
+    ortho = writeOrtho(scene, tmp_path / "ortho.tif", (120, 120, 120))
     path = ts.write3dTiles(
         scene,
         tmp_path / "styled",

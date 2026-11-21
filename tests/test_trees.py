@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
-import math
 
 import numpy as np
 import pytest
+from _meshSupport import sceneOver
 
 from map3d.mesh import trees as tr
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
-from map3d.request import SceneRequest
-from map3d.scene import Scene, buildScene
+from map3d.scene import Scene
 
 PATCH = (-400.0, -400.0, -300.0, -300.0)  # synthetic 15 m canopy patch (ENU)
 
@@ -23,12 +22,7 @@ def plane(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 @pytest.fixture(scope="module")
 def scene(plane: SyntheticScene) -> Scene:
-    h = math.radians(20.0)
-    axes = [[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]
-    return buildScene(
-        SceneRequest((plane.frame.lat0_deg, plane.frame.lon0_deg), 5.0, axes, 1000.0, 1000.0),
-        plane.packDir,
-    )
+    return sceneOver(plane, angle_deg=20.0)
 
 
 @pytest.fixture(scope="module")

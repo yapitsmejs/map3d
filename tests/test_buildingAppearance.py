@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-import rasterio
-from rasterio.errors import NotGeoreferencedWarning
-from rasterio.io import MemoryFile
-from rasterio.transform import from_bounds
+from _meshSupport import decodePng, sceneOver, writeOrtho
 
 from map3d.mesh.buildingAppearance import BuildingAppearance, facadeTexture
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
-from map3d.request import SceneRequest
-from map3d.scene import Scene, buildScene
+from map3d.scene import Scene
 
 
 @pytest.fixture(scope="module")
@@ -26,37 +21,7 @@ def synthetic(tmp_path_factory: pytest.TempPathFactory) -> SyntheticScene:
 
 @pytest.fixture(scope="module")
 def scene(synthetic: SyntheticScene) -> Scene:
-    return buildScene(
-        SceneRequest(
-            (synthetic.frame.lat0_deg, synthetic.frame.lon0_deg),
-            5.0,
-            np.eye(3),
-            1000.0,
-            1000.0,
-        ),
-        synthetic.packDir,
-    )
-
-
-def _ortho(
-    scene: Scene, path: Path, colour: tuple[int, int, int], size: int = 100, bands: int = 3
-) -> Path:
-    bounds = scene.geometry.footprintBounds_deg(margin_m=50.0)
-    with rasterio.open(
-        path,
-        "w",
-        driver="GTiff",
-        width=size,
-        height=size,
-        count=bands,
-        dtype="uint8",
-        crs="EPSG:4326",
-        transform=from_bounds(*bounds, size, size),
-    ) as dst:
-        data = np.zeros((bands, size, size), dtype=np.uint8)
-        data[:3] = np.array(colour, dtype=np.uint8)[:bands, None, None]
-        dst.write(data)
-    return path
+    return sceneOver(synthetic)
 
 
 def testBuildingAppearance_neutralWhenPackHasNoImagery(scene: Scene):
@@ -86,7 +51,7 @@ def testBuildingAppearance_unavailablePackCoverageFallsBack(scene: Scene, monkey
 
 
 def testBuildingAppearance_orthoDeterminesRoofAndCoordinatedWall(scene: Scene, tmp_path: Path):
-    path = _ortho(scene, tmp_path / "ortho.tif", (160, 100, 80))
+    path = writeOrtho(scene, tmp_path / "ortho.tif", (160, 100, 80))
     first = BuildingAppearance.fromScene(scene, buildingImageryPath=path)
     second = BuildingAppearance.fromScene(scene, buildingImageryPath=path)
     assert first.sourceId == "byoBuildingImagery"
@@ -102,20 +67,20 @@ def testBuildingAppearance_orthoDeterminesRoofAndCoordinatedWall(scene: Scene, t
 def testBuildingAppearance_rejectsVegetationAndShadows(
     scene: Scene, tmp_path: Path, colour: tuple[int, int, int]
 ):
-    path = _ortho(scene, tmp_path / "ortho.tif", colour)
+    path = writeOrtho(scene, tmp_path / "ortho.tif", colour)
     appearance = BuildingAppearance.fromScene(scene, buildingImageryPath=path)
     assert appearance.coloredCount == 0
     np.testing.assert_array_equal(appearance.roofColors[0], [214, 214, 212])
 
 
 def testBuildingAppearance_coarseImageryFallsBack(scene: Scene, tmp_path: Path):
-    path = _ortho(scene, tmp_path / "coarse.tif", (160, 100, 80), size=1)
+    path = writeOrtho(scene, tmp_path / "coarse.tif", (160, 100, 80), size=1)
     appearance = BuildingAppearance.fromScene(scene, buildingImageryPath=path)
     assert appearance.coloredCount == 0
 
 
 def testBuildingAppearance_requiresRgbImagery(scene: Scene, tmp_path: Path):
-    path = _ortho(scene, tmp_path / "grey.tif", (100, 100, 100), bands=2)
+    path = writeOrtho(scene, tmp_path / "grey.tif", (100, 100, 100), bands=2)
     with pytest.raises(ValueError, match="RGB"):
         BuildingAppearance.fromScene(scene, buildingImageryPath=path)
     with pytest.raises(ValueError, match="not found"):
@@ -123,10 +88,7 @@ def testBuildingAppearance_requiresRgbImagery(scene: Scene, tmp_path: Path):
 
 
 def testFacadeTexture_hasRepeatedWindowAndFloorBand():
-    with warnings.catch_warnings(), MemoryFile(facadeTexture()) as mem:
-        warnings.simplefilter("ignore", NotGeoreferencedWarning)
-        with mem.open() as src:
-            image = np.moveaxis(src.read(), 0, -1)
+    image = decodePng(facadeTexture())
     assert image.shape == (96, 96, 3)
     assert np.all(image[0, 0] == 255)
     assert image[30, 35].mean() < 100  # glass
