@@ -105,11 +105,12 @@ def testScene_groundCorrectedBuildingExposedAndMetadata(mound: SyntheticScene):
     )
     # The mound is present without the fix (5 m source raster rounds the sharp peak).
     assert raw.layers["groundHeight_datum_m"][centre] > _plane(e[centre], n[centre]) + 0.8 * MOUND_m
-    # B1 is 12 m tall above its lowest outline ground (the plane at (50, 90)); on the
-    # slope that leaves 12 - (plane(centre) - plane(50, 90)) exposed at its centre.
-    exposed = 12.0 - (_plane(e[centre], n[centre]) - _plane(50.0, 90.0))
-    assert fixed.layers["buildingHeight_m"][centre] == pytest.approx(exposed, abs=0.3)
-    assert raw.layers["buildingHeight_m"][centre] < 1.0
+    # B1's 12 m are measured from the median ground under it: on the corrected
+    # plane that is the ground at its centre.
+    assert fixed.layers["buildingHeight_m"][centre] == pytest.approx(12.0, abs=0.3)
+    # Without the fix it rides on the residue mound instead.
+    surface = "surfaceHeight_datum_m"
+    assert raw.layers[surface][centre] > fixed.layers[surface][centre] + 3.0
     meta = fixed.metadata["groundCorrection"]
     assert meta["buildingsCorrected"] == 1 and meta["maxLowering_m"] == pytest.approx(
         MOUND_m, abs=2.5
@@ -123,7 +124,7 @@ def testScene_groundCorrectedBuildingExposedAndMetadata(mound: SyntheticScene):
 
 def testScene_correctionStillWorksOnSmoothedGround(mound: SyntheticScene):
     # Default 90 m smoothing spreads the 20 m mound into a ~3 m swell; the
-    # correction still triggers on what is left, and B1 stands ~11 of its 12 m.
+    # correction still triggers on what is left, and B1 stands on the true ground.
     raw = buildScene(_request(mound), mound.packDir, correctGround=False)
     fixed = buildScene(_request(mound), mound.packDir)
     assert fixed.metadata["groundSmoothing_m"] == 90.0
@@ -133,8 +134,9 @@ def testScene_correctionStillWorksOnSmoothedGround(mound: SyntheticScene):
     plane = _plane(e[centre], n[centre])
     assert raw.layers["groundHeight_datum_m"][centre] > plane + 2.5
     assert fixed.layers["groundHeight_datum_m"][centre] < plane + 1.0
-    assert fixed.layers["buildingHeight_m"][centre] > raw.layers["buildingHeight_m"][centre] + 1.5
-    assert fixed.layers["buildingHeight_m"][centre] > 10.5
+    surface = "surfaceHeight_datum_m"
+    assert raw.layers[surface][centre] > fixed.layers[surface][centre] + 1.0  # on the swell
+    assert fixed.layers["buildingHeight_m"][centre] > 11.5
 
 
 def testMesh_terrainUsesCorrectedGround(mound: SyntheticScene):

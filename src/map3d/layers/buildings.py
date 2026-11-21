@@ -12,9 +12,16 @@
 2. **Height precedence:** authoritative height, then authoritative floors x
    storey height, then explicit height, then the building-height raster (median
    inside the footprint), then floors x storey height, then a default.
-3. **Placement:** the base is the lowest ground under the footprint outline and
-   the top is base + height. A raised part (``minHeight_m``, else ``minFloor`` x
-   storey height; ignored unless below the top) starts at base + min height.
+3. **Placement:** heights are measured from the building's **anchor**, the
+   median ground under its footprint (outline and interior): on a slope, a
+   height above the local ground (as a DSM-derived raster gives it) belongs
+   there, not at the lowest point. The top is anchor + height, lifted if
+   needed so the roof clears the highest ground under the footprint by a
+   storey (or the building's height, if lower), so no building is buried
+   uphill. Walls reach down to the **base**, the lowest ground under the
+   outline, so the downhill side stands on a plinth. A raised part
+   (``minHeight_m``, else ``minFloor`` x storey height; ignored unless below
+   the top) starts at anchor + min height.
    The footprint is converted to grid pixel coordinates at top height, so the
    roof sits exactly in its node columns.
 4. **Roof shape:** mapped roof shapes become height fields
@@ -93,7 +100,7 @@ class BuildingSet:
         height_m: Resolved height above the base.
         heightSource: :class:`HeightSource` code of the resolved height.
         nativeResolution_m: Resolution of the height source (0 for vector attributes).
-        baseOrthometric_m: Lowest ground under the footprint (MSL).
+        baseOrthometric_m: Lowest ground under the footprint outline (MSL): wall bottoms.
         roofOrthometric_m: Top, i.e. the roof's highest point (MSL).
         pixelGeometries: Footprints in grid pixel coordinates ``(col, row)`` at top height.
         minHeight_m: Bottom of a raised part above its base (0 = on the ground).
@@ -103,6 +110,8 @@ class BuildingSet:
         roofColor: Mapped roof colour, ``None`` if unmapped.
         facadeMaterial: Mapped facade material (e.g. ``glass``), ``None`` if unmapped.
         roofMaterial: Mapped roof material (e.g. ``roof_tiles``), ``None`` if unmapped.
+        anchorOrthometric_m: Median ground under the footprint, which heights
+            are measured from (MSL); the base if not given.
         groundCorrection: Ground cap applied under buildings, if any.
     """
 
@@ -122,6 +131,7 @@ class BuildingSet:
     roofColor: npt.NDArray[np.object_]
     facadeMaterial: npt.NDArray[np.object_]
     roofMaterial: npt.NDArray[np.object_]
+    anchorOrthometric_m: FloatArray | None = None
     groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
@@ -129,8 +139,13 @@ class BuildingSet:
 
     @property
     def bottomOrthometric_m(self) -> FloatArray:
-        """Underside of each building (its base unless it is a raised part)."""
-        result: FloatArray = self.baseOrthometric_m + self.minHeight_m
+        """Underside of each building: its base, or anchor + min height for raised parts."""
+        anchor = (
+            self.baseOrthometric_m if self.anchorOrthometric_m is None else self.anchorOrthometric_m
+        )
+        result: FloatArray = np.where(
+            self.minHeight_m > 0.0, anchor + self.minHeight_m, self.baseOrthometric_m
+        )
         return result
 
     @property
@@ -212,8 +227,11 @@ def loadBuildings(
     )
     if correction is not None:
         ground = dataclasses.replace(ground, correction=correction)
-    base = _baseHeights(geoms, ground)
-    roof = base + height
+    base, anchor, highest = _footprintGround(geoms, ground)
+    roof = anchor + height
+    grounded = minHeight <= 0.0
+    clearance = np.minimum(height, STOREY_HEIGHT_m)
+    roof = np.where(grounded, np.fmax(roof, highest + clearance), roof)
     centroids = shapely.centroid(geoms)
     roofEll = roof + ground.undulation_m(shapely.get_y(centroids), shapely.get_x(centroids))
     pixel = toPixelGeometries(geoms, roofEll, geometry)
@@ -225,7 +243,7 @@ def loadBuildings(
         else makeRoof(
             geoms[i],
             int(fused.roofShape[i]),
-            float(height[i] - minHeight[i]),
+            float(roof[i] - anchor[i] - minHeight[i]),
             roofHeight_m=float(fused.roofHeights[i]),
             direction_deg=float(fused.roofDirections[i]),
             orientation=fused.roofOrientations[i],
@@ -241,6 +259,7 @@ def loadBuildings(
         nativeResolution_m=nativeRes[keep],
         baseOrthometric_m=base[keep],
         roofOrthometric_m=roof[keep],
+        anchorOrthometric_m=anchor[keep],
         pixelGeometries=pixel[keep],
         minHeight_m=minHeight[keep],
         roofShape=fused.roofShape[keep],
@@ -666,8 +685,66 @@ def _resolveHeights(
     return height, code, nativeRes
 
 
-def _baseHeights(geoms: npt.NDArray[np.object_], ground: GroundModel) -> FloatArray:
-    base = np.full(geoms.size, np.inf)
+def _footprintGround(
+    geoms: npt.NDArray[np.object_], ground: GroundModel
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    """``(base, anchor, highest)``: lowest outline ground, median and highest ground under each footprint.
+
+    The median and maximum use the densified outline plus an interior grid of
+    about :data:`_INTERIOR_STEP_deg` (at most :data:`_MAX_INTERIOR_SAMPLES` points).
+    """
+    n = geoms.size
+    base = np.full(n, np.inf)
     values, owner = outlineGround(geoms, ground)
-    np.fmin.at(base, owner, np.where(np.isfinite(values), values, np.inf))
-    return np.where(np.isfinite(base), base, np.nan)
+    finite = np.isfinite(values)
+    np.fmin.at(base, owner, np.where(finite, values, np.inf))
+    lat, lon, inOwner = _interiorPoints(geoms)
+    inside = ground.orthometricAt(lat, lon) if lat.size else np.zeros(0)
+    allValues = np.concatenate([values, inside])
+    allOwner = np.concatenate([owner, inOwner])
+    ok = np.isfinite(allValues)
+    allValues, allOwner = allValues[ok], allOwner[ok]
+    highest = np.full(n, -np.inf)
+    np.fmax.at(highest, allOwner, allValues)
+    anchor = np.full(n, np.nan)
+    if allValues.size:
+        order = np.lexsort((allValues, allOwner))
+        sortedOwner, sortedValues = allOwner[order], allValues[order]
+        owners, start, count = np.unique(sortedOwner, return_index=True, return_counts=True)
+        anchor[owners] = 0.5 * (
+            sortedValues[start + (count - 1) // 2] + sortedValues[start + count // 2]
+        )
+    base = np.where(np.isfinite(base), base, np.nan)
+    anchor = np.fmax(np.where(np.isfinite(anchor), anchor, base), base)
+    highest = np.where(np.isfinite(highest), highest, base)
+    return base, anchor, highest
+
+
+_INTERIOR_STEP_deg = 4.5e-5  # ~5 m
+_MAX_INTERIOR_SAMPLES = 400
+
+
+def _interiorPoints(
+    geoms: npt.NDArray[np.object_],
+) -> tuple[FloatArray, FloatArray, npt.NDArray[np.int64]]:
+    """``(lat, lon, owner)`` of grid points inside each footprint."""
+    lats: list[FloatArray] = [np.zeros(0)]
+    lons: list[FloatArray] = [np.zeros(0)]
+    owners: list[npt.NDArray[np.int64]] = [np.zeros(0, dtype=np.int64)]
+    bounds = shapely.bounds(geoms)
+    for i, poly in enumerate(geoms):
+        x0, y0, x1, y1 = bounds[i]
+        step = max(
+            _INTERIOR_STEP_deg,
+            float(np.sqrt((x1 - x0) * (y1 - y0) / _MAX_INTERIOR_SAMPLES)),
+        )
+        xs = np.arange(x0 + step / 2, x1, step)
+        ys = np.arange(y0 + step / 2, y1, step)
+        if xs.size == 0 or ys.size == 0:
+            continue
+        gx, gy = np.meshgrid(xs, ys)
+        inside = shapely.contains_xy(poly, gx, gy)
+        lons.append(gx[inside])
+        lats.append(gy[inside])
+        owners.append(np.full(int(inside.sum()), i, dtype=np.int64))
+    return np.concatenate(lats), np.concatenate(lons), np.concatenate(owners)

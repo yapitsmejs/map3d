@@ -88,7 +88,9 @@ def testLoad_baseIsLowestGroundUnderFootprint(plane: SyntheticScene):
     buildings = _load(plane, _geometry(plane))
     # Plane 10 + 0.02 e - 0.01 n over [-200, -120] x [-150, -50]: min at (-200, -50) = 6.5.
     assert buildings.baseOrthometric_m[0] == pytest.approx(6.5, abs=1e-3)
-    assert buildings.roofOrthometric_m[0] == pytest.approx(36.5, abs=1e-3)
+    # Heights are measured from the median ground: the plane at the centre, 7.8.
+    assert buildings.anchorOrthometric_m[0] == pytest.approx(7.8, abs=0.05)
+    assert buildings.roofOrthometric_m[0] == pytest.approx(37.8, abs=0.05)
 
 
 def testLoad_authoritativeSourceWinsAndDuplicatesDropped(plane: SyntheticScene, tmp_path: Path):
@@ -345,7 +347,7 @@ def testLoad_minHeightsAndRoofShapes(plane: SyntheticScene, skyPark: Path):
     assert buildings.minHeight_m[ids.index("bridge")] == 2 * STOREY_HEIGHT_m  # from minFloor
     assert buildings.minHeight_m[ids.index("bad")] == 0.0  # not below its top: ignored
     assert buildings.bottomOrthometric_m[park] == pytest.approx(
-        buildings.baseOrthometric_m[park] + 100.0
+        buildings.anchorOrthometric_m[park] + 100.0
     )
     roof = buildings.roofs[hall]
     assert buildings.roofs[park] is None and roof is not None
@@ -479,3 +481,32 @@ def testFuse_droppedDuplicateHandsItsAppearanceToTheAuthoritativeOutline(
     assert buildings.roofColor[blk1] is None  # the kiosk is not the same building
     assert buildings.facadeColor[blk2] == "#EEEEEE"  # own value kept
     assert buildings.roofColor[blk2] == "#777777"  # missing value inherited
+
+
+def testLoad_slopeAnchorsAtMedianGroundAndRoofsClearTheHill(tmp_path: Path):
+    """On a steep hill, a short building is not buried uphill and stands on a plinth downhill."""
+    hill = makeSyntheticPack(tmp_path / "hill.pack", terrain="hill")
+    geom = _geometry(hill)
+    pack = _copyPack(hill, tmp_path)
+    ground = GroundModel.load(Pack.open(pack), geom)
+    # A 60 m wide shed on the flank of the hill, 3 m tall.
+    e, n = np.meshgrid(np.linspace(30.0, 90.0, 61), np.linspace(-20.0, 20.0, 41))
+    la, lo, _ = hill.frame.columnPointAtHeight(e.ravel(), n.ravel(), 0.0)
+    h = ground.orthometricAt(la, lo)
+    relief = float(np.nanmax(h) - np.nanmin(h))
+    assert relief > 4.0, "the test needs more relief than the shed is tall"
+    ingestFiles(
+        pack,
+        "overtureBuildings",
+        [
+            _write3d(
+                tmp_path / "o.parquet",
+                [{"id": "shed", "geometry": _enuBox(hill, 30, -20, 90, 20), "height_m": 3.0}],
+            )
+        ],
+    )
+    buildings = loadBuildings(Pack.open(pack), geom, ground, correctGround=False)
+    i = list(buildings.sourceFeatureIds).index("shed")
+    assert buildings.baseOrthometric_m[i] == pytest.approx(np.nanmin(h), abs=0.3)  # wall bottoms
+    assert buildings.roofOrthometric_m[i] >= np.nanmax(h) + 3.0 - 0.3  # clears the uphill ground
+    assert buildings.anchorOrthometric_m[i] == pytest.approx(np.nanmedian(h), abs=0.5)

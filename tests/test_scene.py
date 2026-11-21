@@ -93,9 +93,11 @@ def testEllipsoidDatum_addsUndulation(plane: SyntheticScene, built: Scene):
 def testBuildings_raiseSurfaceAndRecordProvenance(built: Scene):
     r, c = _rc(built, -160.0, -100.0)  # inside B0 (30 m, explicit height)
     assert built.layers["featureId"][r, c] == 1
-    assert built.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(36.5, abs=1e-3)
+    # 30 m above the median ground under B0: the plane at its centre, 7.8 m.
+    top = built.layers["surfaceHeight_datum_m"][r, c]
+    assert top == pytest.approx(37.8, abs=0.05)
     ground = built.layers["groundHeight_datum_m"][r, c]
-    assert built.layers["buildingHeight_m"][r, c] == pytest.approx(36.5 - ground, abs=1e-3)
+    assert built.layers["buildingHeight_m"][r, c] == pytest.approx(top - ground, abs=1e-3)
     assert built.layers["heightSource"][r, c] == HeightSource.EXPLICIT_HEIGHT
     assert built.layers["nativeResolution_m"][r, c] == 0.0
 

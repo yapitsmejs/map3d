@@ -382,6 +382,17 @@ Overture):**
   `facadeMaterial` / `roofMaterial` columns for the mesh palette and facade
   styles (§7).
 
+**Placement on slopes:** a building's heights are measured from its
+**anchor**, the median ground under its footprint (outline and a ~5 m
+interior grid): a DSM-derived height (Google 2.5D) is a height above the local
+ground, and measuring from the lowest point buried hillside buildings on
+their uphill side. The top is anchor + height, lifted where needed so the roof
+clears the highest ground under the footprint by one storey (or the
+building's height, if lower). Walls still reach down to the **base**, the
+lowest ground on the outline, so the downhill side stands on a plinth. Raised
+parts start at anchor + min height. Around Marina Bay and Fort Canning Hill
+this took the number of buildings with ground above their roof from 51 to 0.
+
 **Attributes of dropped duplicates:** when fusion drops a feature as a
 duplicate and it is the same building as the accepted feature it overlaps
 most (each covers at least half of the other), it hands that feature the
