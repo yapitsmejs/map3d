@@ -282,6 +282,15 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         "© Overture Maps Foundation, ODbL (OpenStreetMap contributors)",
         0.0,
     ),
+    SourceSpec(
+        "overtureLandUse",
+        "landCoverPolygons",
+        "vector",
+        "Overture Maps base land use and land (parks, grass, plazas, woods, ...)",
+        "ODbL 1.0",
+        "© Overture Maps Foundation, ODbL (OpenStreetMap contributors)",
+        0.0,
+    ),
     # --- transport ---
     SourceSpec(
         "overtureTransportation",

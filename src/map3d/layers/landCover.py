@@ -8,7 +8,8 @@ applies the full precedence building > deck > road/rail > land cover.
 
 Where a polygon source maps a class completely (``overtureWater`` maps all
 water), raster pixels of that class outside its polygons are the raster's
-coarse edge, not real water: they become built-up land.
+coarse edge, not real water: they become built-up land. Grass polygons
+(parks) leave the raster's tree cover in place.
 
 Ground transport is drawn with ``all_touched=False`` (cell centres only), so
 coarse grids don't inflate roads.
@@ -32,6 +33,7 @@ from map3d.pack.reader import Pack, RasterWindow
 from map3d.pack.registry import getSource
 
 __all__ = [
+    "keepsRaster",
     "CLASS_BUILDING",
     "CLASS_DECK",
     "CLASS_RAIL",
@@ -68,6 +70,9 @@ _NAMES = {
 # outside their polygons become the replacement class.
 _COMPLETE = {"overtureWater": (80,)}
 _REPLACEMENT_CLASS = 50  # built-up
+# Polygon class -> raster classes it does not overwrite: a park's grass keeps
+# the raster's tree cover (the wooded parts of a park).
+_KEEP_RASTER = {30: (10,)}
 # Impact Observatory 10 m LULC -> WorldCover. 10 = clouds -> unknown.
 _REMAP = {"impactObservatoryLulc": {1: 80, 2: 10, 4: 90, 5: 40, 7: 50, 8: 60, 9: 70, 10: 0, 11: 30}}
 
@@ -203,7 +208,7 @@ class LandCoverModel:
                 dtype="uint8",
                 priority=np.arange(self.coverShapes.size),
             )
-            out = np.where(cover > 0, cover, out).astype(np.uint8)
+            out = np.where((cover > 0) & ~keepsRaster(cover, out), cover, out).astype(np.uint8)
         # rail (the higher code) is drawn last
         burned = burnChunk(
             self.transportShapes, self.transportClasses, columns, allTouched=False, dtype="uint8"
@@ -232,3 +237,21 @@ def _coverPolygons(
     if not shapes:
         return np.zeros(0, dtype=object), np.zeros(0, dtype=np.uint8), ()
     return np.concatenate(shapes), np.concatenate(classes), tuple(sorted(replaced))
+
+
+def keepsRaster(
+    cover: npt.NDArray[np.uint8], raster: npt.NDArray[np.uint8]
+) -> npt.NDArray[np.bool_]:
+    """Where a land-cover polygon's class leaves the raster's class in place.
+
+    Args:
+        cover: Polygon classes (0 = none).
+        raster: Raster classes at the same places.
+
+    Returns:
+        True where the raster class wins (e.g. tree cover inside a grassy park).
+    """
+    keep = np.zeros(np.shape(cover), dtype=bool)
+    for polygonClass, rasterClasses in _KEEP_RASTER.items():
+        keep |= (cover == polygonClass) & np.isin(raster, rasterClasses)
+    return keep

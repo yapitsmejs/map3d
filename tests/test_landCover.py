@@ -194,3 +194,36 @@ def testCoverPolygons_burnCrispAndReplaceUnmappedRasterWater(plane: SyntheticSce
     # Mapped water is complete: raster water with no polygon is the raster's edge.
     assert _at(geom, classes, 0.0, 450.0) == 50
     assert _at(geom, classes, 100.0, -450.0) == lc.CLASS_ROAD  # roads still on top
+
+
+def testLandUsePolygons_crispButParksKeepTheirTrees(plane: SyntheticScene, tmp_path: Path):
+    import shapely
+
+    from map3d.pack.geoparquet import writeGeoParquet
+
+    pack = tmp_path / "use.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def box(e0: float, n0: float, e1: float, n1: float) -> shapely.Polygon:
+        lat, lon, _ = plane.frame.columnPointAtHeight(
+            np.array([e0, e1, e1, e0]), np.array([n0, n0, n1, n1]), 0.0
+        )
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    writeGeoParquet(
+        tmp_path / "u.parquet",
+        np.array(
+            [box(-400, -400, -250, -250), box(150, -50, 250, 50), box(-60, -60, 60, 60)],
+            dtype=object,
+        ),
+        {"sourceFeatureId": ["park", "site", "plaza"], "landClass": [30, 60, 50]},
+    )
+    ingestFiles(pack, "overtureLandUse", [tmp_path / "u.parquet"])
+    geom = _geometry(plane)
+    classes = _classes(pack, geom)
+    assert _at(geom, classes, -350.0, -350.0) == 10  # trees in the park stay trees
+    assert _at(geom, classes, -270.0, -270.0) == 30  # the park's open grass
+    assert _at(geom, classes, 200.0, 0.0) == 60  # construction site: bare
+    assert _at(geom, classes, 0.0, 0.0) == 50  # plaza over raster grass
+    assert _at(geom, classes, 0.0, 63.0) == 30  # crisp edge: grass 3 m outside
+    assert _at(geom, classes, 0.0, 450.0) == 80  # no water polygons: raster water stays

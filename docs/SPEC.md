@@ -200,6 +200,13 @@ and trees over them draw as objects, not as the surface.
   `overtureWater` (Overture base water: ocean, reservoirs, rivers, canals,
   ponds, pools; class 80) maps water completely, so raster water pixels with
   no water polygon (the raster's coarse shoreline) become built-up (50).
+  `overtureLandUse` (below water) adds surface-like Overture `land_use` (parks,
+  managed grass, pitches, golf courses, cemeteries: grass 30; pedestrian
+  plazas: built-up 50; construction sites: bare 60; farmland: cropland 40) and
+  natural `land` (woods 10, scrub 20, grass 30, wetland 90, sand and rock 60);
+  zoning-like land use (residential, commercial, ...) is skipped. Grass
+  polygons leave raster tree cover in place, so a park's wooded parts stay
+  trees.
 - **Roads/rails (including bridges):** every road/rail corridor burns its
   class with its width (defaults shared with deck footprints: road 8 m, rail
   8 m), cell centres only, so the corridor class, the canopy carve and the
@@ -230,7 +237,7 @@ and trees over them draw as objects, not as the surface.
   map-like look in the spirit of geosg.app.
   - **Land cover:** WorldCover, sampled bilinearly so its 10 m cells blend
     softly. Grass is pale green, built-up land warm light grey, water blue.
-    Land-cover polygons (mapped water) are burned into each tile's texture at
+    Land-cover polygons (mapped water, parks, plazas, ...) are burned into each tile's texture at
     its own resolution, so shorelines are crisp at any grid spacing.
   - **Crisp overlays from the grid:** grey roads, rail and decks, and a soft
     green on the ground under canopy ≥ 2 m (not on roads), so gaps between
@@ -325,7 +332,7 @@ and trees over them draw as objects, not as the surface.
 | Building heights | Google Open Buildings 2.5D (CC BY 4.0, ~4 m effective); OSM `height` / `building:levels` via Overture | HDB Property Information `max_floor_lvl` (storeys) |
 | Canopy height | Meta/WRI global 1 m canopy height (CC BY 4.0) | — (NParks TreesSG is not downloadable) |
 | Land cover | ESA WorldCover 2021 10 m; Impact Observatory 10 m annual LULC | — |
-| Land-cover polygons | Overture base water (OSM-derived oceans, reservoirs, rivers, ponds; ODbL) | — |
+| Land-cover polygons | Overture base water (OSM-derived oceans, reservoirs, rivers, ponds) and land use / land (parks, plazas, woods, ...); ODbL | — |
 | Roads, rail, bridges | Overture transportation (OSM-derived: `is_bridge`, `level`, width) | URA Master Plan rail lines (`GRND_LEVEL` marks viaducts) |
 | Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
 | Imagery | Sentinel-2 cloudless 2024 by EOX (s2maps.eu WMTS, zoom 14 ≈ 10 m; CC BY-NC-SA 4.0) | BYO RGB orthophoto (`--building-imagery`) for building palettes |

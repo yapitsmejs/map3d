@@ -25,7 +25,7 @@ It runs fully offline from portable **data packs** of open data:
 - Ground: FABDEM / Copernicus GLO-30.
 - Buildings: Overture footprints, Google Open Buildings 2.5D heights, OSM.
 - Vegetation and land cover: Meta/WRI canopy height, ESA WorldCover, Overture
-  water polygons (crisp shorelines).
+  water and land-use polygons (crisp shorelines, parks and plazas).
 - Imagery: Sentinel-2 cloudless.
 - Singapore: data.gov.sg.
 

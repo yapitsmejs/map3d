@@ -36,6 +36,7 @@ from map3d.layers.landCover import (
     CLASS_DECK,
     CLASS_RAIL,
     CLASS_ROAD,
+    keepsRaster,
 )
 from map3d.layers.pixels import rasterizeAffine
 from map3d.layers.roofs import Roof
@@ -536,7 +537,8 @@ def _conceptTexture(
     soft = np.repeat(np.repeat(_softLandCover(scene, lat, lon), k, axis=0), k, axis=1)
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
     cover = _coverClasses(scene, extent, size * k)
-    rgb[cover > 0] = _styleLut(_LAND_COVER_STYLE)[cover[cover > 0]]
+    crisp = (cover > 0) & ~keepsRaster(cover, classes)
+    rgb[crisp] = _styleLut(_LAND_COVER_STYLE)[cover[crisp]]
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
     featureIds = np.asarray(scene.layers["featureId"])[row, col]

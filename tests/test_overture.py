@@ -128,6 +128,26 @@ def release(tmp_path: Path) -> str:
             },
         ],
     )
+    landUse = [
+        ("u-park", "park", "park", shapely.box(103.811, 1.311, 103.812, 1.312)),
+        ("u-plaza", "pedestrian", "pedestrian", shapely.box(103.813, 1.311, 103.814, 1.312)),
+        ("u-site", "construction", "construction", shapely.box(103.815, 1.311, 103.816, 1.312)),
+        ("u-homes", "residential", "residential", shapely.box(103.817, 1.311, 103.818, 1.312)),
+        ("u-golf", "recreation", "golf_course", shapely.box(103.819, 1.311, 103.82, 1.312)),
+    ]
+    _write(
+        base / "theme=base" / "type=land_use" / "part-0.parquet",
+        [{"id": i, "subtype": s, "class": c, "geometry": g} for i, s, c, g in landUse],
+    )
+    land = [
+        ("l-wood", "forest", "wood", shapely.box(103.811, 1.313, 103.812, 1.314)),
+        ("l-island", "land", "island", shapely.box(103.80, 1.28, 103.84, 1.32)),
+        ("l-beach", "sand", "beach", shapely.box(103.813, 1.313, 103.814, 1.314)),
+    ]
+    _write(
+        base / "theme=base" / "type=land" / "part-0.parquet",
+        [{"id": i, "subtype": s, "class": c, "geometry": g} for i, s, c, g in land],
+    )
     line = shapely.LineString([(103.81, 1.30), (103.83, 1.30)])
     flags = lambda values, between=None: [{"values": values, "between": between}]  # noqa: E731
     _write(
@@ -284,3 +304,26 @@ def testWater_polygonsClippedToTheBoxLinesDropped(tmp_path: Path, release: str):
     assert table.column("landClass").to_pylist() == [80, 80]
     x0, y0, x1, y1 = shapely.total_bounds(geoms)
     assert (x0, y0) == pytest.approx((103.81, 1.28)) and (x1, y1) == pytest.approx((103.84, 1.3001))
+
+
+def testLandUse_surfaceClassesOnlyFromLandUseAndLand(tmp_path: Path, release: str):
+    out = overture.fetchOvertureLandUse(
+        pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "u.parquet"
+    )
+    table, _ = readGeoParquet(out)
+    got = dict(
+        zip(
+            table.column("sourceFeatureId").to_pylist(),
+            table.column("landClass").to_pylist(),
+            strict=True,
+        )
+    )
+    # Zoning (residential) and the island outline say nothing about the surface.
+    assert got == {
+        "u-park": 30,
+        "u-plaza": 50,
+        "u-site": 60,
+        "u-golf": 30,
+        "l-wood": 10,
+        "l-beach": 60,
+    }

@@ -42,7 +42,7 @@ def testRolePriority_pinnedOrder():
         "trees": ["syntheticTrees"],
         "elevatedStructures": ["sgLtaElevatedStructures", "syntheticElevatedStructures"],
         "imagery": ["sentinel2Composite"],
-        "landCoverPolygons": ["overtureWater"],
+        "landCoverPolygons": ["overtureWater", "overtureLandUse"],
     }
 
 
