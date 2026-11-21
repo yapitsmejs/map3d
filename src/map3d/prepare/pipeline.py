@@ -68,71 +68,58 @@ def _sgDownload(ctx: PrepareContext, key: str) -> Path:
     return dataGovSg.downloadDataset(ctx.session, datasetId, target, isCsv)
 
 
+def _parquetOut(ctx: PrepareContext, sourceId: str) -> Path:
+    return ctx.workDir(sourceId) / f"{sourceId}.parquet"
+
+
 def _sgHdb(ctx: PrepareContext) -> list[Path]:
     return [
         dataGovSg.adaptHdbBuildings(
             _sgDownload(ctx, "hdbBuildings"),
             _sgDownload(ctx, "hdbPropertyInfo"),
             ctx.bounds,
-            ctx.workDir("sgHdbBuildings") / "sgHdbBuildings.parquet",
+            _parquetOut(ctx, "sgHdbBuildings"),
         )
     ]
 
 
+def _tiles(sourceId: str, fetch: Callable[[HttpSession, Bounds, Path], list[Path]]) -> Fetcher:
+    """Raster/imagery fetchers: ``fetch(session, bounds, workDir)``."""
+    return lambda c: fetch(c.session, c.bounds, c.workDir(sourceId))
+
+
+def _overture(sourceId: str, fetch: Callable[[Any, str, Bounds, Path], Path]) -> Fetcher:
+    return lambda c: [fetch(c.s3(), c.releaseBase(), c.bounds, _parquetOut(c, sourceId))]
+
+
+def _sg(sourceId: str, key: str, adapt: Callable[[Path, Bounds, Path], Path]) -> Fetcher:
+    """One data.gov.sg dataset through its canonical adapter."""
+    return lambda c: [adapt(_sgDownload(c, key), c.bounds, _parquetOut(c, sourceId))]
+
+
 FETCHERS: dict[str, Fetcher] = {
-    "fabdem": lambda c: rasters.fetchFabdem(c.session, c.bounds, c.workDir("fabdem")),
-    "copernicusGlo30": lambda c: rasters.fetchGlo30(
-        c.session, c.bounds, c.workDir("copernicusGlo30")
-    ),
-    "egm2008": lambda c: rasters.fetchEgm2008(c.session, c.bounds, c.workDir("egm2008")),
-    "esaWorldCover": lambda c: rasters.fetchWorldCover(
-        c.session, c.bounds, c.workDir("esaWorldCover")
-    ),
-    "metaCanopy": lambda c: rasters.fetchMetaCanopy(c.session, c.bounds, c.workDir("metaCanopy")),
+    **{
+        sourceId: _tiles(sourceId, fetch)
+        for sourceId, fetch in (
+            ("fabdem", rasters.fetchFabdem),
+            ("copernicusGlo30", rasters.fetchGlo30),
+            ("egm2008", rasters.fetchEgm2008),
+            ("esaWorldCover", rasters.fetchWorldCover),
+            ("metaCanopy", rasters.fetchMetaCanopy),
+            ("sentinel2Composite", imagery.fetchSentinel2Cloudless),
+        )
+    },
     "googleOpenBuildings25d": lambda c: googleBuildings.fetchGoogleBuildings(
         c.session, c.bounds, c.workDir("googleOpenBuildings25d"), c.year
     ),
-    "overtureBuildings": lambda c: [
-        overture.fetchOvertureBuildings(
-            c.s3(),
-            c.releaseBase(),
-            c.bounds,
-            c.workDir("overtureBuildings") / "overtureBuildings.parquet",
-        )
-    ],
-    "overtureTransportation": lambda c: [
-        overture.fetchOvertureTransport(
-            c.s3(),
-            c.releaseBase(),
-            c.bounds,
-            c.workDir("overtureTransportation") / "overtureTransportation.parquet",
-        )
-    ],
-    "sentinel2Composite": lambda c: imagery.fetchSentinel2Cloudless(
-        c.session, c.bounds, c.workDir("sentinel2Composite")
-    ),
+    "overtureBuildings": _overture("overtureBuildings", overture.fetchOvertureBuildings),
+    "overtureTransportation": _overture("overtureTransportation", overture.fetchOvertureTransport),
     "sgHdbBuildings": _sgHdb,
-    "sgUraBuildings": lambda c: [
-        dataGovSg.adaptUraBuildings(
-            _sgDownload(c, "uraBuildings"),
-            c.bounds,
-            c.workDir("sgUraBuildings") / "sgUraBuildings.parquet",
-        )
-    ],
-    "sgMasterPlanRail": lambda c: [
-        dataGovSg.adaptMasterPlanRail(
-            _sgDownload(c, "mpRail"),
-            c.bounds,
-            c.workDir("sgMasterPlanRail") / "sgMasterPlanRail.parquet",
-        )
-    ],
-    "sgLtaElevatedStructures": lambda c: [
-        dataGovSg.adaptLtaStructures(
-            _sgDownload(c, "ltaStructures"),
-            c.bounds,
-            c.workDir("sgLtaElevatedStructures") / "sgLtaElevatedStructures.parquet",
-        )
-    ],
+    "sgUraBuildings": _sg("sgUraBuildings", "uraBuildings", dataGovSg.adaptUraBuildings),
+    "sgMasterPlanRail": _sg("sgMasterPlanRail", "mpRail", dataGovSg.adaptMasterPlanRail),
+    "sgLtaElevatedStructures": _sg(
+        "sgLtaElevatedStructures", "ltaStructures", dataGovSg.adaptLtaStructures
+    ),
 }
 
 DEFAULT_SOURCES: tuple[str, ...] = (
