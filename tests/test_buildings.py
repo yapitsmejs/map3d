@@ -161,7 +161,7 @@ def testLoad_noBuildingSourcesGivesEmptySet(tmp_path: Path):
     assert (
         rasterizeBuildings(
             buildings, ChunkColumns(_geometry(scene), slice(None), slice(None))
-        ).max()
+        ).ids.max()
         == 0
     )
 
@@ -175,7 +175,7 @@ def testLoad_dropsBuildingsOutsideGrid(plane: SyntheticScene):
 def testRasterize_interiorAndExterior(plane: SyntheticScene):
     geom = _geometry(plane)
     buildings = _load(plane, geom)
-    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None))).ids
     s, half = geom.gridSpacing_m, 400.0
     col = lambda e: int((e + half) / s)  # noqa: E731
     row = lambda n: int((n + half) / s)  # noqa: E731
@@ -189,7 +189,7 @@ def testRasterize_conservativeCoverageOfPartialCells(plane: SyntheticScene):
     # 10 m cells; B2 is a 20 x 20 m box at [300, 320] x [-300, -280] offset by 5 m from the cell grid.
     geom = _geometry(plane, swath_m=810.0, s=10.0)
     buildings = _load(plane, geom)
-    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None))).ids
     b2 = list(buildings.sourceFeatureIds).index("synB2") + 1
     assert (ids == b2).sum() == 9  # 3 x 3 cells touched, not 2 x 2
 
@@ -197,7 +197,7 @@ def testRasterize_conservativeCoverageOfPartialCells(plane: SyntheticScene):
 def testRasterize_rotatedGridHitsBuildingCenter(plane: SyntheticScene):
     geom = _geometry(plane, heading_deg=30.0)
     buildings = _load(plane, geom)
-    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None))).ids
     e_m, n_m = geom.nodesEnu()
     nearest = np.unravel_index(np.argmin((e_m + 160.0) ** 2 + (n_m + 100.0) ** 2), e_m.shape)
     assert ids[nearest] == 1
@@ -214,7 +214,7 @@ def testRasterize_tallestWinsWhereFootprintsOverlap(plane: SyntheticScene, tmp_p
     )
     geom = _geometry(plane)
     buildings = _load(plane, geom, pack)
-    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    ids = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None))).ids
     iHigh = list(buildings.sourceFeatureIds).index("x1") + 1
     assert ids[int((290.0 + 400) / 2), int((-275.0 + 400) / 2)] == iHigh
 
@@ -222,10 +222,10 @@ def testRasterize_tallestWinsWhereFootprintsOverlap(plane: SyntheticScene, tmp_p
 def testRasterize_chunkedEqualsWhole(plane: SyntheticScene):
     geom = _geometry(plane, heading_deg=30.0, s=4.0)
     buildings = _load(plane, geom)
-    whole = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    whole = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None))).ids
     parts = np.zeros_like(whole)
     for rows, cols in geom.iterChunks(37, 53):
-        parts[rows, cols] = rasterizeBuildings(buildings, ChunkColumns(geom, rows, cols))
+        parts[rows, cols] = rasterizeBuildings(buildings, ChunkColumns(geom, rows, cols)).ids
     np.testing.assert_array_equal(parts, whole)
 
 
@@ -273,3 +273,136 @@ def testLoad_smallFootprintWithoutDataGetsOneStorey(plane: SyntheticScene, tmp_p
     i = list(buildings.sourceFeatureIds).index("x0")
     assert buildings.height_m[i] == 3.0
     assert buildings.heightSource[i] == HeightSource.DEFAULT_HEIGHT
+
+
+def _write3d(path: Path, rows: list[dict]) -> Path:
+    """Buildings with the optional 3D columns (``geometry`` plus attributes)."""
+    names = ["height_m", "numFloors", "minHeight_m", "minFloor", "roofShape", "roofHeight_m"]
+    writeGeoParquet(
+        path,
+        np.array([r["geometry"] for r in rows], dtype=object),
+        {
+            "sourceFeatureId": [r["id"] for r in rows],
+            **{k: [r.get(k) for r in rows] for k in names},
+            "roofDirection_deg": [None] * len(rows),
+            "roofOrientation": [None] * len(rows),
+        },
+    )
+    return path
+
+
+@pytest.fixture(scope="module")
+def skyPark(plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Two 100 m towers bridged by a 10 m deep raised part, and a domed hall."""
+    tmp = tmp_path_factory.mktemp("sky")
+    pack = tmp / "sky.pack"
+    shutil.copytree(plane.packDir, pack)
+    box = lambda e0, n0, e1, n1: _enuBox(plane, e0, n0, e1, n1)  # noqa: E731
+    dome = shapely.Point(-300.0, 360.0).buffer(20.0, quad_segs=32)
+    lat, lon, _ = plane.frame.columnPointAtHeight(*shapely.get_coordinates(dome.exterior).T, 0.0)
+    rows = [
+        {"id": "towerA", "geometry": box(-360, 300, -340, 320), "height_m": 100.0},
+        {"id": "towerB", "geometry": box(-260, 300, -240, 320), "height_m": 100.0},
+        {
+            "id": "park",
+            "geometry": box(-370, 300, -230, 320),
+            "height_m": 110.0,
+            "minHeight_m": 100.0,
+        },
+        {
+            "id": "hall",
+            "geometry": shapely.Polygon(np.column_stack([lon, lat])),
+            "height_m": 30.0,
+            "roofShape": "dome",
+        },
+        {"id": "bridge", "geometry": box(-380, 340, -370, 380), "height_m": 9.0, "minFloor": 2},
+        {"id": "bad", "geometry": box(-200, 340, -190, 350), "height_m": 5.0, "minHeight_m": 6.0},
+    ]
+    ingestFiles(pack, "overtureBuildings", [_write3d(tmp / "o.parquet", rows)])
+    return pack
+
+
+def _node(geom: GridGeometry, e_m: float, n_m: float) -> tuple[int, int]:
+    e, n = geom.nodesEnu()
+    return np.unravel_index(np.argmin((e - e_m) ** 2 + (n - n_m) ** 2), e.shape)
+
+
+def testLoad_minHeightsAndRoofShapes(plane: SyntheticScene, skyPark: Path):
+    buildings = _load(plane, _geometry(plane), skyPark)
+    ids = list(buildings.sourceFeatureIds)
+    park, hall = ids.index("park"), ids.index("hall")
+    assert buildings.minHeight_m[park] == 100.0
+    assert buildings.minHeight_m[ids.index("bridge")] == 2 * STOREY_HEIGHT_m  # from minFloor
+    assert buildings.minHeight_m[ids.index("bad")] == 0.0  # not below its top: ignored
+    assert buildings.bottomOrthometric_m[park] == pytest.approx(
+        buildings.baseOrthometric_m[park] + 100.0
+    )
+    roof = buildings.roofs[hall]
+    assert buildings.roofs[park] is None and roof is not None
+    assert roof.rise_m == pytest.approx(20.0, rel=0.01)
+    assert buildings.eaveOrthometric_m[hall] == pytest.approx(
+        buildings.roofOrthometric_m[hall] - roof.rise_m
+    )
+    table = buildings.featureTable()
+    assert table["roofShape"][hall] == "dome" and table["roofShape"][park] == "flat"
+    assert table["minHeight_m"][park] == 100.0
+
+
+def testRasterize_raisedPartRestsOnTowersAndFloatsBetween(plane: SyntheticScene, skyPark: Path):
+    geom = _geometry(plane)
+    buildings = _load(plane, geom, skyPark)
+    columns = ChunkColumns(geom, slice(None), slice(None))
+    ground = GroundModel.load(Pack.open(skyPark), geom).orthometricAt(*columns.nodeLatLon())
+    built = rasterizeBuildings(buildings, columns, ground)
+    park = list(buildings.sourceFeatureIds).index("park")
+    parkTop = buildings.roofOrthometric_m[park]
+    onTower, between = _node(geom, -350.0, 310.0), _node(geom, -300.0, 310.0)
+    for node in (onTower, between):
+        assert built.ids[node] == park + 1
+        assert built.top[node] == pytest.approx(parkTop)
+    nc = built.ids.shape[1]
+    levelAt = dict(zip(built.levels.flat.tolist(), range(built.levels.flat.size), strict=True))
+    assert onTower[0] * nc + onTower[1] not in levelAt  # rests on the tower: solid
+    k = levelAt[between[0] * nc + between[1]]
+    assert built.levels.bottom[k] == pytest.approx(buildings.bottomOrthometric_m[park])
+    assert built.levels.top[k] == pytest.approx(parkTop)
+
+
+def testRasterize_withoutGroundEveryUnsupportedPartFloats(plane: SyntheticScene, skyPark: Path):
+    geom = _geometry(plane)
+    buildings = _load(plane, geom, skyPark)
+    built = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    bridge = list(buildings.sourceFeatureIds).index("bridge")
+    node = _node(geom, -375.0, 360.0)
+    assert built.ids[node] == bridge + 1
+    nc = built.ids.shape[1]
+    assert node[0] * nc + node[1] in set(built.levels.flat.tolist())
+
+
+def testRasterize_domeTopFollowsTheRoof(plane: SyntheticScene, skyPark: Path):
+    geom = _geometry(plane)
+    buildings = _load(plane, geom, skyPark)
+    built = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    hall = list(buildings.sourceFeatureIds).index("hall")
+    eave = buildings.eaveOrthometric_m[hall]
+    rise = buildings.roofs[hall].rise_m
+    centre, ring = _node(geom, -300.0, 360.0), _node(geom, -290.0, 360.0)
+    assert built.ids[centre] == hall + 1
+    assert built.top[centre] == pytest.approx(eave + rise, abs=0.1)
+    e, n = geom.nodesEnu()
+    r = np.hypot(e[ring] + 300.0, n[ring] - 360.0) / 20.0
+    assert built.top[ring] == pytest.approx(eave + rise * np.sqrt(1.0 - r**2), abs=0.3)
+    assert built.top[ring] < built.top[centre]
+
+
+def testRasterize_chunkedEqualsWholeWithRaisedParts(plane: SyntheticScene, skyPark: Path):
+    geom = _geometry(plane, s=4.0)
+    buildings = _load(plane, geom, skyPark)
+    whole = rasterizeBuildings(buildings, ChunkColumns(geom, slice(None), slice(None)))
+    ids = np.zeros_like(whole.ids)
+    top = np.full(whole.top.shape, np.nan)
+    for rows, cols in geom.iterChunks(37, 53):
+        part = rasterizeBuildings(buildings, ChunkColumns(geom, rows, cols))
+        ids[rows, cols], top[rows, cols] = part.ids, part.top
+    np.testing.assert_array_equal(ids, whole.ids)
+    np.testing.assert_allclose(top, whole.top)

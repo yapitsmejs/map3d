@@ -15,8 +15,9 @@ whose rows are the grid x, y, z axes in ENU) and swath size, `map3d` produces:
   - up to K stacked elevated-deck levels;
   - land class, feature IDs and per-node provenance.
 - **A 3D Tiles 1.1 mesh** for visualization: the true ground with individual
-  trees (from canopy data), LOD1 buildings and true 3D bridge decks, in a clean
-  map-like style. Buildings use imagery-derived palettes when reliable, with
+  trees (from canopy data), buildings with mapped building parts, raised parts
+  and roof shapes (domes, vaults, gables, ...), and true 3D bridge decks, in a
+  clean map-like style. Buildings use imagery-derived palettes when reliable, with
   clearly procedural facade windows and neutral fallback. Includes an offline viewer.
 
 It runs fully offline from portable **data packs** of open data:
@@ -112,8 +113,8 @@ with buildScene(request, pack="marina.pack") as scene:   # large scenes are memo
 `scene.json` documents the frame, node convention, datum, every layer's units,
 the provenance and land-class codes, the deck model and source attributions.
 The spec covers the details, including the known limitations (§13): deck
-heights are estimated, buildings are LOD1, and coarse sources are
-interpolated.
+heights are estimated, most buildings are LOD1 (roof shapes only where
+mapped), and coarse sources are interpolated.
 
 ## Development
 

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import shutil
+
 import numpy as np
 import pytest
+import shapely
 from _support import decodePng, sceneOver
 
 from map3d.mesh import scenery
 from map3d.mesh.buildingAppearance import BuildingAppearance
+from map3d.pack.geoparquet import writeGeoParquet
+from map3d.pack.ingest import ingestFiles
 from map3d.pack.synthetic import SyntheticScene, makeSyntheticPack
-from map3d.scene import Scene
+from map3d.request import SceneRequest
+from map3d.scene import Scene, buildScene
 
 
 @pytest.fixture(scope="module")
@@ -234,3 +240,89 @@ def testDecks_slabClippedToTileKeepsUVsInRange(scene: Scene):
     farAway = scenery.TileExtent(-500.0, -480.0, -500.0, -480.0)
     tops2, sides2 = scenery.deckParts(scene, np.array([0]), farAway)
     assert tops2.isEmpty and sides2.isEmpty
+
+
+@pytest.fixture(scope="module")
+def shaped(plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory) -> Scene:
+    """A domed hall, a gabled house and a raised walkway on the synthetic plane."""
+    tmp = tmp_path_factory.mktemp("shaped")
+    pack = tmp / "shaped.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def lonLat(poly: shapely.Polygon) -> shapely.Polygon:
+        e, n = shapely.get_coordinates(poly.exterior).T
+        lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    geoms = [
+        lonLat(shapely.Point(-300.0, 360.0).buffer(20.0, quad_segs=16)),
+        lonLat(shapely.box(-250.0, 340.0, -230.0, 350.0)),
+        lonLat(shapely.box(-380.0, 300.0, -340.0, 304.0)),
+    ]
+    writeGeoParquet(
+        tmp / "o.parquet",
+        np.array(geoms, dtype=object),
+        {
+            "sourceFeatureId": ["hall", "house", "walkway"],
+            "height_m": [30.0, 8.0, 15.0],
+            "numFloors": [None, None, None],
+            "minHeight_m": [None, None, 12.0],
+            "roofShape": ["dome", "gabled", None],
+            "roofHeight_m": [None, 3.0, None],
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp / "o.parquet"])
+    axes = np.eye(3)
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    return buildScene(SceneRequest(centre, 5.0, axes, 1000.0, 1000.0), pack)
+
+
+def _index(scene: Scene, featureId: str) -> int:
+    return list(scene.models.buildings.sourceFeatureIds).index(featureId)
+
+
+def _ellToUp(scene: Scene, i: int, orthometric: float) -> float:
+    b = scene.models.buildings
+    c = shapely.centroid(b.geometries[i])
+    lon, lat = float(shapely.get_x(c)), float(shapely.get_y(c))
+    und = float(scene.models.ground.undulation_m(np.array([lat]), np.array([lon]))[0])
+    return float(scene.geometry.frame.geodeticToEnu(lat, lon, orthometric + und)[2])
+
+
+def testShapedRoof_domeIsSmoothAndReachesTheTop(shaped: Scene):
+    i = _index(shaped, "hall")
+    b = shaped.models.buildings
+    roofs, walls = scenery.buildingParts(shaped, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    top = roofs.positions_ENU_m[:, 2].max()
+    assert top == pytest.approx(_ellToUp(shaped, i, b.roofOrthometric_m[i]), abs=0.05)
+    # Shared vertices (smooth shading): far fewer vertices than triangle corners.
+    assert roofs.positions_ENU_m.shape[0] < roofs.triangles.shape[0]
+    p = roofs.positions_ENU_m[roofs.triangles]
+    assert (np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])[:, 2] > 0).all()
+    # Walls stop at the eaves; the dome sits on them.
+    eave = _ellToUp(shaped, i, b.eaveOrthometric_m[i])
+    assert walls.positions_ENU_m[:, 2].max() == pytest.approx(eave, abs=0.05)
+
+
+def testShapedRoof_gableWallsRiseToTheRidge(shaped: Scene):
+    i = _index(shaped, "house")
+    b = shaped.models.buildings
+    roofs, walls = scenery.buildingParts(shaped, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    ridge = _ellToUp(shaped, i, b.roofOrthometric_m[i])
+    assert roofs.positions_ENU_m[:, 2].max() == pytest.approx(ridge, abs=0.02)
+    assert walls.positions_ENU_m[:, 2].max() == pytest.approx(ridge, abs=0.02)
+    # Faceted: every triangle keeps its own corners (sharp ridge).
+    assert roofs.positions_ENU_m.shape[0] == 3 * roofs.triangles.shape[0]
+    assert walls.uv is not None and np.isfinite(walls.uv).all()
+
+
+def testRaisedPart_hasAnUndersideAndWallsFromItsMinHeight(shaped: Scene):
+    i = _index(shaped, "walkway")
+    b = shaped.models.buildings
+    roofs, walls = scenery.buildingParts(shaped, np.array([i]), FULL, BuildingAppearance.neutral(b))
+    bottom = _ellToUp(shaped, i, b.bottomOrthometric_m[i])
+    assert walls.positions_ENU_m[:, 2].min() == pytest.approx(bottom, abs=0.02)
+    p = roofs.positions_ENU_m[roofs.triangles]
+    nz = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])[:, 2]
+    assert (nz > 0).sum() == (nz < 0).sum() == 2  # a roof and an underside
+    assert p[nz < 0][..., 2].max() == pytest.approx(bottom, abs=0.02)

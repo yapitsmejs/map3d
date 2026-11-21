@@ -4,8 +4,12 @@ Reads the public GeoParquet release on S3 (``overturemaps-us-west-2``) with
 Arrow's own S3 client, pushing a filter on the ``bbox`` struct column down to
 row-group statistics, and writes the canonical pack schemas:
 
-- **buildings:** ``sourceFeatureId``, ``height_m``, ``numFloors``. Underground
-  buildings are excluded.
+- **buildings:** ``sourceFeatureId``, ``height_m``, ``numFloors``, plus the
+  optional 3D columns ``minHeight_m``, ``minFloor``, ``roofShape``,
+  ``roofHeight_m``, ``roofDirection_deg`` and ``roofOrientation`` (OSM Simple 3D
+  Buildings tags). Where a building is mapped as **building parts**
+  (``building_part`` rows), the parts replace its outline, as Simple 3D
+  Buildings renderers do. Underground buildings and parts are excluded.
 - **transport:** ``sourceFeatureId``, ``kind`` (road/rail/footway), ``isBridge``,
   ``level``, ``width_m``. Overture's linear-referenced rules (``between``
   fractions along the segment) are honoured by splitting segments at rule
@@ -69,7 +73,7 @@ def latestRelease(fs: pafs.FileSystem, bucket: str = BUCKET) -> str:
 def fetchOvertureBuildings(
     fs: pafs.FileSystem, releaseBase: str, bounds: Bounds, outPath: Path
 ) -> Path:
-    """Extract buildings intersecting ``bounds`` into canonical GeoParquet.
+    """Extract buildings (and building parts) intersecting ``bounds`` into canonical GeoParquet.
 
     Args:
         fs: Filesystem holding the release.
@@ -80,27 +84,65 @@ def fetchOvertureBuildings(
     Returns:
         ``outPath``.
     """
-    dataset = ds.dataset(
-        f"{releaseBase}/theme=buildings/type=building", filesystem=fs, format="parquet"
+    buildings = _readBuildingType(fs, f"{releaseBase}/theme=buildings/type=building", bounds, [])
+    parts = _readBuildingType(
+        fs, f"{releaseBase}/theme=buildings/type=building_part", bounds, ["building_id"]
     )
+    replaced = {str(v) for v in parts.get("building_id", [])}
+    keepBuilding = [str(i) not in replaced for i in buildings["id"]]
+    geoms: list[Any] = []
+    cols: dict[str, list[Any]] = {name: [] for name in _CANONICAL.values()}
+    for table, keep in ((buildings, keepBuilding), (parts, [True] * len(parts["id"]))):
+        for k in np.flatnonzero(np.asarray(keep, dtype=bool)):
+            geoms.append(table["geometry"][k])
+            for raw, name in _CANONICAL.items():
+                cols[name].append(table[raw][k])
+    writeGeoParquet(outPath, np.array(geoms, dtype=object), cols)
+    return outPath
+
+
+# Overture attribute -> canonical pack column.
+_CANONICAL = {
+    "id": "sourceFeatureId",
+    "height": "height_m",
+    "num_floors": "numFloors",
+    "min_height": "minHeight_m",
+    "min_floor": "minFloor",
+    "roof_shape": "roofShape",
+    "roof_height": "roofHeight_m",
+    "roof_direction": "roofDirection_deg",
+    "roof_orientation": "roofOrientation",
+}
+_FLOAT_ATTRS = ("height", "min_height", "roof_height", "roof_direction")
+
+
+def _readBuildingType(
+    fs: pafs.FileSystem, path: str, bounds: Bounds, extra: list[str]
+) -> dict[str, list[Any]]:
+    """Rows of one building type intersecting ``bounds``, as columns (missing columns are null)."""
+    names = [*_CANONICAL, *extra]
+    empty: dict[str, list[Any]] = {name: [] for name in [*names, "geometry"]}
+    if fs.get_file_info(path).type == pafs.FileType.NotFound:
+        return empty
+    dataset = ds.dataset(path, filesystem=fs, format="parquet")
+    present = [n for n in names if n in dataset.schema.names]
     underground = pc.field("is_underground")
     table = dataset.to_table(
-        columns=["id", "height", "num_floors", "geometry"],
+        columns=[*present, "geometry"],
         filter=_bboxFilter(bounds) & (underground.is_null() | (underground == False)),  # noqa: E712
     )
     geoms = shapely.from_wkb(table.column("geometry").to_numpy(zero_copy_only=False))
     keep = shapely.intersects(geoms, shapely.box(*bounds))
     table = table.filter(keep)
-    writeGeoParquet(
-        outPath,
-        geoms[keep],
-        {
-            "sourceFeatureId": table.column("id").to_pylist(),
-            "height_m": table.column("height").cast("float64").to_pylist(),
-            "numFloors": table.column("num_floors").to_pylist(),
-        },
-    )
-    return outPath
+    out: dict[str, list[Any]] = {"geometry": list(geoms[keep])}
+    for name in names:
+        if name not in present:
+            out[name] = [None] * table.num_rows
+        elif name in _FLOAT_ATTRS:
+            out[name] = table.column(name).cast("float64").to_pylist()
+        else:
+            out[name] = table.column(name).to_pylist()
+    return out
 
 
 def fetchOvertureTransport(

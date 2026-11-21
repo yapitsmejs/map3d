@@ -35,6 +35,7 @@ import numpy.typing as npt
 import shapely
 
 from map3d.gridGeometry import GridGeometry
+from map3d.layers._levels import LevelEntries, stackLevels
 from map3d.layers._vectors import mostlyCovered, objectColumn, outlineGround, textColumn
 from map3d.layers.columns import ChunkColumns
 from map3d.layers.pixels import chunkBox, rasterizePixels, toPixelGeometries
@@ -124,6 +125,8 @@ class DeckSet:
             "height_m": self.levelHeight_m.copy(),
             "heightSource": np.array(["DECK_ESTIMATED"] * n, dtype=np.str_),
             "deckLevel": self.levels.copy(),
+            "minHeight_m": np.maximum(self.levelHeight_m - DECK_THICKNESS_m, 0.0),
+            "roofShape": np.array(["flat"] * n, dtype=np.str_),
         }
 
 
@@ -354,7 +357,11 @@ def _endTapers(
 
 
 def rasterizeDecks(
-    decks: DeckSet, columns: ChunkColumns, ground: GroundModel, maxLevels: int
+    decks: DeckSet,
+    columns: ChunkColumns,
+    ground: GroundModel,
+    maxLevels: int,
+    extraLevels: LevelEntries | None = None,
 ) -> DeckChunk:
     """Rasterize decks into up to ``maxLevels`` stacked levels for a chunk.
 
@@ -364,18 +371,38 @@ def rasterizeDecks(
         ground: Ground model; centerline decks follow the ground it samples
             at each node (plus :func:`deckTopAboveGround_m`).
         maxLevels: ``K``, the number of levels to store.
+        extraLevels: Other elevated surfaces stacked with the decks (raised
+            building parts); they don't count towards ``maxTop`` / ``maxDeck``.
 
     Returns:
-        The chunk's deck levels.
+        The chunk's elevated levels.
     """
     nr, nc = columns.shape
-    r0, c0 = columns.rows.start, columns.cols.start
-    tops = np.full((maxLevels, nr, nc), np.nan)
-    bottoms = np.full((maxLevels, nr, nc), np.nan)
     maxTop = np.full((nr, nc), np.nan)
     maxDeck = np.zeros((nr, nc), dtype=np.int64)
+    extra = LevelEntries.empty() if extraLevels is None else extraLevels
+    flat, top, owner = _deckEntries(decks, columns, ground)
+    if flat.size:
+        order = np.lexsort((top, flat))
+        flat, top, owner = flat[order], top[order], owner[order]
+        isLast = np.ones(flat.size, dtype=bool)
+        isLast[:-1] = flat[1:] != flat[:-1]
+        maxTop.ravel()[flat[isLast]] = top[isLast]
+        maxDeck.ravel()[flat[isLast]] = owner[isLast]
+    entries = LevelEntries.concatenate([LevelEntries(flat, top, top - DECK_THICKNESS_m), extra])
+    tops, bottoms, overflow = stackLevels(entries, (nr, nc), maxLevels, MERGE_TOLERANCE_m)
+    return DeckChunk(tops, bottoms, maxTop, maxDeck, overflow)
+
+
+def _deckEntries(
+    decks: DeckSet, columns: ChunkColumns, ground: GroundModel
+) -> tuple[npt.NDArray[np.int64], FloatArray, npt.NDArray[np.int64]]:
+    """Deck tops at the chunk nodes they cover: ``(flat node, top, deck index + 1)``."""
+    nr, nc = columns.shape
+    r0, c0 = columns.rows.start, columns.cols.start
+    none = (np.zeros(0, dtype=np.int64), np.zeros(0), np.zeros(0, dtype=np.int64))
     if len(decks) == 0:
-        return DeckChunk(tops, bottoms, maxTop, maxDeck, 0)
+        return none
     hits = np.flatnonzero(shapely.intersects(decks.pixelShapes, chunkBox(columns)))
     nodeLat, nodeLon = columns.nodeLatLon()
     nodeGround = ground.orthometricAt(nodeLat, nodeLon)
@@ -409,30 +436,8 @@ def rasterizeDecks(
         values.append(top)
         owners.append(np.full(rr.size, i + 1, dtype=np.int64))
     if not flats:
-        return DeckChunk(tops, bottoms, maxTop, maxDeck, 0)
-    flat = np.concatenate(flats)
-    top = np.concatenate(values)
-    owner = np.concatenate(owners)
-    order = np.lexsort((top, flat))
-    flat, top, owner = flat[order], top[order], owner[order]
-    isFirst = np.ones(flat.size, dtype=bool)
-    isFirst[1:] = flat[1:] != flat[:-1]
-    newLevel = isFirst.copy()
-    newLevel[1:] |= (top[1:] - top[:-1]) >= MERGE_TOLERANCE_m
-    groupStart = np.maximum.accumulate(np.where(isFirst, np.arange(flat.size), 0))
-    levelCum = np.cumsum(newLevel)
-    level = levelCum - levelCum[groupStart]
-    isLast = np.ones(flat.size, dtype=bool)
-    isLast[:-1] = flat[1:] != flat[:-1]
-    maxTop.ravel()[flat[isLast]] = top[isLast]
-    maxDeck.ravel()[flat[isLast]] = owner[isLast]
-    stored = level < maxLevels
-    for k in range(maxLevels):
-        sel = stored & (level == k)
-        np.fmax.at(tops[k].ravel(), flat[sel], top[sel])
-        np.fmin.at(bottoms[k].ravel(), flat[sel], top[sel] - DECK_THICKNESS_m)
-    overflow = int(np.unique(flat[level >= maxLevels]).size)
-    return DeckChunk(tops, bottoms, maxTop, maxDeck, overflow)
+        return none
+    return np.concatenate(flats), np.concatenate(values), np.concatenate(owners)
 
 
 def _punchAtGradeCorridors(

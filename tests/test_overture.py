@@ -67,6 +67,42 @@ def release(tmp_path: Path) -> str:
             },
         ],
     )
+    _write(
+        base / "theme=buildings" / "type=building_part" / "part-0.parquet",
+        [
+            {
+                "id": f"p-{k}",
+                "building_id": "b-in",
+                "height": 42.0 if k else 60.0,
+                "min_height": 30.0 if k else None,
+                "num_floors": None,
+                "min_floor": None,
+                "roof_shape": "dome" if k else None,
+                "roof_height": 8.0 if k else None,
+                "roof_direction": None,
+                "roof_orientation": None,
+                "is_underground": False,
+                "geometry": shapely.box(103.81 + 5e-4 * k, 1.29, 103.8105 + 5e-4 * k, 1.291),
+            }
+            for k in range(2)
+        ]
+        + [
+            {
+                "id": "p-under",
+                "building_id": "b-noattrs",
+                "height": 3.0,
+                "min_height": None,
+                "num_floors": None,
+                "min_floor": None,
+                "roof_shape": None,
+                "roof_height": None,
+                "roof_direction": None,
+                "roof_orientation": None,
+                "is_underground": True,
+                "geometry": shapely.box(103.82, 1.30, 103.821, 1.301),
+            }
+        ],
+    )
     line = shapely.LineString([(103.81, 1.30), (103.83, 1.30)])
     flags = lambda values, between=None: [{"values": values, "between": between}]  # noqa: E731
     _write(
@@ -147,10 +183,37 @@ def testBuildings_canonicalAndFiltered(tmp_path: Path, release: str):
         pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "b.parquet"
     )
     table, geoms = readGeoParquet(out)
-    assert table.column("sourceFeatureId").to_pylist() == ["b-in", "b-noattrs"]
-    assert table.column("height_m").to_pylist() == [42.0, None]
-    assert table.column("numFloors").to_pylist() == [12, None]
-    assert geoms.shape == (2,)
+    # b-in is mapped as parts, which replace it; the underground part is dropped.
+    assert table.column("sourceFeatureId").to_pylist() == ["b-noattrs", "p-0", "p-1"]
+    assert table.column("height_m").to_pylist() == [None, 60.0, 42.0]
+    assert table.column("numFloors").to_pylist() == [None, None, None]
+    assert table.column("minHeight_m").to_pylist() == [None, None, 30.0]
+    assert table.column("roofShape").to_pylist() == [None, None, "dome"]
+    assert table.column("roofHeight_m").to_pylist() == [None, None, 8.0]
+    assert set(table.column_names) >= {"minFloor", "roofDirection_deg", "roofOrientation"}
+    assert geoms.shape == (3,)
+
+
+def testBuildings_olderReleaseWithoutPartsOr3dColumns(tmp_path: Path):
+    base = tmp_path / "bucket" / "release" / "2024-01-01.0"
+    _write(
+        base / "theme=buildings" / "type=building" / "part-0.parquet",
+        [
+            {
+                "id": "b-old",
+                "height": 9.0,
+                "num_floors": 3,
+                "is_underground": False,
+                "geometry": shapely.box(103.81, 1.29, 103.811, 1.291),
+            }
+        ],
+    )
+    out = overture.fetchOvertureBuildings(
+        pafs.LocalFileSystem(), str(base.as_posix()), BOUNDS, tmp_path / "b.parquet"
+    )
+    table, _ = readGeoParquet(out)
+    assert table.column("sourceFeatureId").to_pylist() == ["b-old"]
+    assert table.column("roofShape").to_pylist() == [None]
 
 
 def testTransport_splitsFlagsDropsTunnelsAndWater(tmp_path: Path, release: str):

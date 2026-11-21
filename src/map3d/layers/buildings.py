@@ -8,10 +8,17 @@
    storey height, then explicit height, then the building-height raster (median
    inside the footprint), then floors x storey height, then a default.
 3. **Placement:** the base is the lowest ground under the footprint outline and
-   the roof is base + height. The footprint is converted to grid pixel
-   coordinates at roof height, so the roof sits exactly in its node columns.
-4. **Rasterization:** any cell touched by a footprint gets the building
-   (``all_touched``); where footprints overlap, the tallest roof wins.
+   the top is base + height. A raised part (``minHeight_m``, else ``minFloor`` x
+   storey height; ignored unless below the top) starts at base + min height.
+   The footprint is converted to grid pixel coordinates at top height, so the
+   roof sits exactly in its node columns.
+4. **Roof shape:** mapped roof shapes become height fields
+   (:mod:`map3d.layers.roofs`); the roof's highest point is the top.
+5. **Rasterization:** any cell touched by a footprint gets the building
+   (``all_touched``). Per node, building parts that stand on the ground or on
+   each other (gaps under :data:`FLOATING_GAP_m`) form one solid column; where
+   footprints overlap, the highest surface wins. Raised parts with open space
+   beneath them are also reported as elevated levels (with the decks).
 """
 
 from __future__ import annotations
@@ -27,21 +34,31 @@ import shapely
 from rasterio.features import rasterize
 
 from map3d.gridGeometry import GridGeometry
-from map3d.layers._vectors import floatColumn, mostlyCovered, outlineGround, textColumn
+from map3d.layers._levels import LevelEntries
+from map3d.layers._vectors import (
+    floatColumn,
+    mostlyCovered,
+    objectColumn,
+    outlineGround,
+    textColumn,
+)
 from map3d.layers.columns import ChunkColumns
 from map3d.layers.groundFix import GroundCorrection
-from map3d.layers.pixels import burnChunk, toPixelGeometries
+from map3d.layers.pixels import burnChunk, chunkBox, rasterizePixels, toPixelGeometries
 from map3d.layers.provenance import HeightSource
+from map3d.layers.roofs import Roof, RoofShape, makeRoof, roofShapeCodes
 from map3d.layers.terrain import GroundModel
 from map3d.pack.reader import Pack, RasterWindow
 from map3d.pack.registry import getSource
 
 __all__ = [
     "DEFAULT_BUILDING_HEIGHT_m",
+    "FLOATING_GAP_m",
     "MIN_RASTER_HEIGHT_m",
     "SMALL_DEFAULT_HEIGHT_m",
     "SMALL_FOOTPRINT_m2",
     "STOREY_HEIGHT_m",
+    "BuildingChunk",
     "BuildingSet",
     "loadBuildings",
     "rasterizeBuildings",
@@ -54,6 +71,8 @@ DEFAULT_BUILDING_HEIGHT_m = 9.0
 SMALL_DEFAULT_HEIGHT_m = 3.0  # one storey: the default for sheds, kiosks, shelters
 SMALL_FOOTPRINT_m2 = 50.0  # footprints under this get SMALL_DEFAULT_HEIGHT_m
 MIN_RASTER_HEIGHT_m = 2.0  # raster heights below this are treated as missing
+FLOATING_GAP_m = 2.0  # a raised part this close above what is under it rests on it
+_NO_SURFACE_m = -1.0e4  # stands in for "nothing below" when stacking parts
 
 
 @dataclass(frozen=True, eq=False)
@@ -68,8 +87,11 @@ class BuildingSet:
         heightSource: :class:`HeightSource` code of the resolved height.
         nativeResolution_m: Resolution of the height source (0 for vector attributes).
         baseOrthometric_m: Lowest ground under the footprint (MSL).
-        roofOrthometric_m: Roof height (MSL).
-        pixelGeometries: Footprints in grid pixel coordinates ``(col, row)`` at roof height.
+        roofOrthometric_m: Top, i.e. the roof's highest point (MSL).
+        pixelGeometries: Footprints in grid pixel coordinates ``(col, row)`` at top height.
+        minHeight_m: Bottom of a raised part above its base (0 = on the ground).
+        roofShape: :class:`~map3d.layers.roofs.RoofShape` code (as mapped).
+        roofs: Roof height field per building, ``None`` for flat roofs.
         groundCorrection: Ground cap applied under buildings, if any.
     """
 
@@ -82,10 +104,44 @@ class BuildingSet:
     baseOrthometric_m: FloatArray
     roofOrthometric_m: FloatArray
     pixelGeometries: npt.NDArray[np.object_]
+    minHeight_m: FloatArray
+    roofShape: npt.NDArray[np.uint8]
+    roofs: tuple[Roof | None, ...]
     groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
         return int(self.height_m.size)
+
+    @property
+    def bottomOrthometric_m(self) -> FloatArray:
+        """Underside of each building (its base unless it is a raised part)."""
+        result: FloatArray = self.baseOrthometric_m + self.minHeight_m
+        return result
+
+    @property
+    def eaveOrthometric_m(self) -> FloatArray:
+        """Where walls meet the roof: the top minus the roof's rise."""
+        rise = np.array([0.0 if r is None else r.rise_m for r in self.roofs])
+        result: FloatArray = self.roofOrthometric_m - rise.reshape(self.roofOrthometric_m.shape)
+        return result
+
+    def topAt(self, index: int, lon_deg: npt.ArrayLike, lat_deg: npt.ArrayLike) -> FloatArray:
+        """Orthometric roof surface of building ``index`` at geographic positions.
+
+        Args:
+            index: Building index.
+            lon_deg: Longitudes.
+            lat_deg: Latitudes.
+
+        Returns:
+            The roof height field (the flat top for flat roofs).
+        """
+        roof = self.roofs[index]
+        top = float(self.roofOrthometric_m[index])
+        if roof is None:
+            return np.full(np.shape(lon_deg), top)
+        result: FloatArray = top - roof.rise_m + roof.riseAt(lon_deg, lat_deg)
+        return result
 
     def featureTable(self) -> dict[str, npt.NDArray[Any]]:
         """Columns of the scene ``features`` table for these buildings.
@@ -104,6 +160,10 @@ class BuildingSet:
                 [HeightSource(c).name for c in self.heightSource], dtype=np.str_
             ),
             "deckLevel": np.full(n, -1, dtype=np.int64),
+            "minHeight_m": self.minHeight_m.copy(),
+            "roofShape": np.array(
+                [RoofShape(c).name.lower() for c in self.roofShape], dtype=np.str_
+            ),
         }
 
 
@@ -117,19 +177,24 @@ def loadBuildings(
         geometry: Scene grid geometry.
         ground: Ground model (for base heights and the geoid).
         correctGround: Remove building residue from the ground under footprints
-            (:mod:`map3d.layers.groundFix`) before placing bases.
+            (:mod:`map3d.layers.groundFix`) before placing bases. Raised parts
+            don't take part.
 
     Returns:
         The placed buildings (possibly empty).
     """
     bounds = geometry.footprintBounds_deg(margin_m=geometry.gridSpacing_m)
-    geoms, sourceIds, featureIds, heights, floors, authoritative = _fuse(pack, bounds)
+    fused = _fuse(pack, bounds)
+    geoms = fused.geoms
     rasterHeight, rasterRes = _rasterHeights(pack, bounds, geoms)
     area_m2 = shapely.area(toPixelGeometries(geoms, 0.0, geometry)) * geometry.gridSpacing_m**2
     height, code, nativeRes = _resolveHeights(
-        heights, floors, authoritative, rasterHeight, rasterRes, area_m2
+        fused.heights, fused.floors, fused.authoritative, rasterHeight, rasterRes, area_m2
     )
-    correction = GroundCorrection.build(geometry, ground, geoms) if correctGround else None
+    minHeight = _resolveMinHeights(fused.minHeights, fused.minFloors, height)
+    correction = (
+        GroundCorrection.build(geometry, ground, geoms[minHeight <= 0.0]) if correctGround else None
+    )
     if correction is not None:
         ground = dataclasses.replace(ground, correction=correction)
     base = _baseHeights(geoms, ground)
@@ -138,64 +203,218 @@ def loadBuildings(
     roofEll = roof + ground.undulation_m(shapely.get_y(centroids), shapely.get_x(centroids))
     pixel = toPixelGeometries(geoms, roofEll, geometry)
     gridBox = shapely.box(0.0, 0.0, geometry.nCols, geometry.nRows)
-    keep = np.isfinite(base) & shapely.intersects(pixel, gridBox)
+    keep = np.flatnonzero(np.isfinite(base) & shapely.intersects(pixel, gridBox))
+    roofs = tuple(
+        None
+        if fused.roofShape[i] == RoofShape.FLAT
+        else makeRoof(
+            geoms[i],
+            int(fused.roofShape[i]),
+            float(height[i] - minHeight[i]),
+            roofHeight_m=float(fused.roofHeights[i]),
+            direction_deg=float(fused.roofDirections[i]),
+            orientation=fused.roofOrientations[i],
+        )
+        for i in keep
+    )
     return BuildingSet(
         geometries=geoms[keep],
-        sourceIds=sourceIds[keep],
-        sourceFeatureIds=featureIds[keep],
+        sourceIds=fused.sourceIds[keep],
+        sourceFeatureIds=fused.featureIds[keep],
         height_m=height[keep],
         heightSource=code[keep],
         nativeResolution_m=nativeRes[keep],
         baseOrthometric_m=base[keep],
         roofOrthometric_m=roof[keep],
         pixelGeometries=pixel[keep],
+        minHeight_m=minHeight[keep],
+        roofShape=fused.roofShape[keep],
+        roofs=roofs,
         groundCorrection=correction,
     )
 
 
-def rasterizeBuildings(buildings: BuildingSet, columns: ChunkColumns) -> npt.NDArray[np.int64]:
-    """Feature ids (``index + 1``, 0 = none) of the tallest building touching each cell.
+@dataclass(frozen=True, eq=False)
+class BuildingChunk:
+    """Building rasterization of one chunk.
+
+    Attributes:
+        ids: Feature id (``index + 1``) of the highest building surface at each
+            node; 0 where there is none.
+        top: Orthometric height of that surface (NaN where there is none).
+        levels: Raised parts with open space beneath them, as elevated levels.
+    """
+
+    ids: npt.NDArray[np.int64]
+    top: FloatArray
+    levels: LevelEntries
+
+
+def rasterizeBuildings(
+    buildings: BuildingSet, columns: ChunkColumns, groundH: FloatArray | None = None
+) -> BuildingChunk:
+    """Building surfaces and raised levels at a chunk's nodes.
+
+    Parts on the ground are burned with the tallest top winning, and their roof
+    height fields evaluated at the nodes. Each raised part is then stacked on
+    what is under it: if its underside is within :data:`FLOATING_GAP_m` of the
+    solid column (or the ground) it extends that column, otherwise it is an
+    elevated level with open space beneath.
 
     Args:
         buildings: Placed buildings.
         columns: The chunk.
+        groundH: Orthometric ground at the nodes; ``None`` treats every raised
+            part over open ground as elevated.
 
     Returns:
-        Chunk-shaped int64 array.
+        The chunk's building surfaces.
     """
-    ids = np.arange(1, len(buildings) + 1, dtype=np.int64)
-    burned = burnChunk(
-        buildings.pixelGeometries,
-        ids,
-        columns,
-        allTouched=True,
-        dtype="int32",
-        priority=buildings.roofOrthometric_m,
-    )
-    result: npt.NDArray[np.int64] = np.asarray(burned, dtype=np.int64)
-    return result
-
-
-def _fuse(
-    pack: Pack, bounds: tuple[float, float, float, float]
-) -> tuple[
-    npt.NDArray[np.object_],
-    npt.NDArray[np.str_],
-    npt.NDArray[np.str_],
-    FloatArray,
-    FloatArray,
-    npt.NDArray[np.bool_],
-]:
-    geoms: list[Any] = []
-    sourceIds: list[str] = []
-    featureIds: list[str] = []
-    heights: list[float] = []
-    floors: list[float] = []
-    authoritative: list[bool] = []
-    for sourceId in pack.sourcesFor("buildings"):
-        selection = pack.readVectors(
-            sourceId, bounds, columns=["sourceFeatureId", "height_m", "numFloors"]
+    shape = columns.shape
+    ids = np.zeros(shape, dtype=np.int64)
+    top = np.full(shape, np.nan)
+    if len(buildings) == 0:
+        return BuildingChunk(ids, top, LevelEntries.empty())
+    grounded = np.flatnonzero(buildings.minHeight_m <= 0.0)
+    if grounded.size:
+        burned = burnChunk(
+            buildings.pixelGeometries[grounded],
+            grounded + 1,
+            columns,
+            allTouched=True,
+            dtype="int32",
+            priority=buildings.roofOrthometric_m[grounded],
         )
+        ids = np.asarray(burned, dtype=np.int64)
+        top = _surfaceAt(buildings, columns, ids)
+    raised = np.flatnonzero(buildings.minHeight_m > 0.0)
+    raised = raised[shapely.intersects(buildings.pixelGeometries[raised], chunkBox(columns))]
+    entries = _raisedEntries(buildings, columns, raised)
+    if entries[0].size == 0:
+        return BuildingChunk(ids, top, LevelEntries.empty())
+    return _stackRaised(ids, top, groundH, *entries)
+
+
+def _surfaceAt(
+    buildings: BuildingSet, columns: ChunkColumns, ids: npt.NDArray[np.int64]
+) -> FloatArray:
+    """Roof surface of the building at each node (flat tops, or roof height fields)."""
+    top = np.where(ids > 0, buildings.roofOrthometric_m[np.maximum(ids - 1, 0)], np.nan)
+    shaped = [int(i) for i in np.unique(ids[ids > 0]) if buildings.roofs[i - 1] is not None]
+    if shaped:
+        lat, lon = columns.nodeLatLon()
+        for i in shaped:
+            cells = ids == i
+            top[cells] = buildings.topAt(i - 1, lon[cells], lat[cells])
+    return top
+
+
+def _raisedEntries(
+    buildings: BuildingSet, columns: ChunkColumns, indices: npt.NDArray[np.int64]
+) -> tuple[npt.NDArray[np.int64], FloatArray, FloatArray, npt.NDArray[np.int64]]:
+    """``(flat node, top, underside, index + 1)`` of raised parts at the nodes they cover."""
+    nr, nc = columns.shape
+    flats: list[npt.NDArray[np.int64]] = [np.zeros(0, dtype=np.int64)]
+    tops: list[FloatArray] = [np.zeros(0)]
+    bottoms: list[FloatArray] = [np.zeros(0)]
+    owners: list[npt.NDArray[np.int64]] = [np.zeros(0, dtype=np.int64)]
+    for i in indices:
+        mask = rasterizePixels(
+            [(buildings.pixelGeometries[i], 1)],
+            (nr, nc),
+            columns.rows.start,
+            columns.cols.start,
+            allTouched=True,
+            dtype="uint8",
+        )
+        rr, cc = np.nonzero(mask)
+        lat, lon = columns.nodeLatLon()
+        flats.append((rr * nc + cc).astype(np.int64))
+        tops.append(buildings.topAt(int(i), lon[rr, cc], lat[rr, cc]))
+        bottoms.append(np.full(rr.size, buildings.bottomOrthometric_m[i]))
+        owners.append(np.full(rr.size, i + 1, dtype=np.int64))
+    return (
+        np.concatenate(flats),
+        np.concatenate(tops),
+        np.concatenate(bottoms),
+        np.concatenate(owners),
+    )
+
+
+def _stackRaised(
+    ids: npt.NDArray[np.int64],
+    top: FloatArray,
+    groundH: FloatArray | None,
+    flat: npt.NDArray[np.int64],
+    partTop: FloatArray,
+    partBottom: FloatArray,
+    owner: npt.NDArray[np.int64],
+) -> BuildingChunk:
+    """Merge raised parts into the solid columns they rest on; the rest become levels.
+
+    Per node, the solid column (or the ground) and the raised parts are sorted
+    by underside; a part whose underside is more than :data:`FLOATING_GAP_m`
+    above everything before it starts a new group, i.e. an elevated level.
+    """
+    cells = np.unique(flat)
+    solid = top.ravel()[cells]
+    ground = np.full(cells.size, np.nan) if groundH is None else groundH.ravel()[cells]
+    solid = np.where(np.isfinite(solid), solid, np.nan_to_num(ground, nan=_NO_SURFACE_m))
+    # One baseline entry per node (its solid column, or the ground), then the parts.
+    f = np.concatenate([cells, flat])
+    lo = np.concatenate([np.full(cells.size, 2.0 * _NO_SURFACE_m), partBottom])
+    hi = np.concatenate([solid, partTop])
+    own = np.concatenate([ids.ravel()[cells], owner])
+    order = np.lexsort((lo, f))
+    f, lo, hi, own = f[order], lo[order], hi[order], own[order]
+    isFirst = np.ones(f.size, dtype=bool)
+    isFirst[1:] = f[1:] != f[:-1]
+    offset = np.searchsorted(cells, f) * 1.0e6  # keeps the running max within each node
+    reach = np.maximum.accumulate(hi + offset) - offset
+    previous = np.concatenate([[-np.inf], reach[:-1]])
+    newGroup = isFirst | (lo > previous + FLOATING_GAP_m)
+    group = np.cumsum(newGroup) - 1
+    starts = np.flatnonzero(newGroup)
+    ends = np.append(starts[1:], f.size) - 1
+    groupTop = np.maximum.reduceat(hi, starts)
+    groupBottom = lo[starts]
+    groupFlat = f[starts]
+    groupOwner = own[np.lexsort((hi, group))[ends]]
+    elevated = ~isFirst[starts]
+    levels = LevelEntries(groupFlat[elevated], groupTop[elevated], groupBottom[elevated])
+    # The highest surface at each node, and the building it belongs to.
+    byNode = np.lexsort((groupTop, groupFlat))
+    last = np.ones(byNode.size, dtype=bool)
+    last[:-1] = groupFlat[byNode][1:] != groupFlat[byNode][:-1]
+    pick = byNode[last]
+    ids = ids.copy()
+    top = top.copy()
+    ids.ravel()[groupFlat[pick]] = groupOwner[pick]
+    top.ravel()[groupFlat[pick]] = np.where(groupOwner[pick] > 0, groupTop[pick], np.nan)
+    return BuildingChunk(ids, top, levels)
+
+
+@dataclass(frozen=True, eq=False)
+class _Fused:
+    geoms: npt.NDArray[np.object_]
+    sourceIds: npt.NDArray[np.str_]
+    featureIds: npt.NDArray[np.str_]
+    heights: FloatArray
+    floors: FloatArray
+    authoritative: npt.NDArray[np.bool_]
+    minHeights: FloatArray
+    minFloors: FloatArray
+    roofShape: npt.NDArray[np.uint8]
+    roofHeights: FloatArray
+    roofDirections: FloatArray
+    roofOrientations: npt.NDArray[np.object_]
+
+
+def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
+    geoms: list[Any] = []
+    cols: dict[str, list[Any]] = {k: [] for k in _Fused.__dataclass_fields__ if k != "geoms"}
+    for sourceId in pack.sourcesFor("buildings"):
+        selection = pack.readVectors(sourceId, bounds)
         candidates = shapely.make_valid(selection.geometries)
         keep = shapely.area(candidates) > 0
         if geoms:
@@ -203,19 +422,58 @@ def _fuse(
         idx = np.flatnonzero(keep)
         table = selection.table
         geoms.extend(candidates[idx])
-        sourceIds.extend([sourceId] * idx.size)
-        featureIds.extend(textColumn(table, "sourceFeatureId")[idx])
-        heights.extend(floatColumn(table, "height_m")[idx])
-        floors.extend(floatColumn(table, "numFloors")[idx])
-        authoritative.extend([getSource(sourceId).authoritative] * idx.size)
-    return (
-        np.array(geoms, dtype=object),
-        np.array(sourceIds, dtype=np.str_),
-        np.array(featureIds, dtype=np.str_),
-        np.array(heights, dtype=np.float64),
-        np.array(floors, dtype=np.float64),
-        np.array(authoritative, dtype=bool),
+        cols["sourceIds"].extend([sourceId] * idx.size)
+        cols["featureIds"].extend(textColumn(table, "sourceFeatureId")[idx])
+        cols["heights"].extend(floatColumn(table, "height_m")[idx])
+        cols["floors"].extend(floatColumn(table, "numFloors")[idx])
+        cols["authoritative"].extend([getSource(sourceId).authoritative] * idx.size)
+        cols["minHeights"].extend(_optionalFloat(table, "minHeight_m")[idx])
+        cols["minFloors"].extend(_optionalFloat(table, "minFloor")[idx])
+        cols["roofShape"].extend(roofShapeCodes(_optionalObject(table, "roofShape"))[idx])
+        cols["roofHeights"].extend(_optionalFloat(table, "roofHeight_m")[idx])
+        cols["roofDirections"].extend(_optionalFloat(table, "roofDirection_deg")[idx])
+        cols["roofOrientations"].extend(_optionalObject(table, "roofOrientation")[idx])
+    return _Fused(
+        geoms=np.array(geoms, dtype=object),
+        sourceIds=np.array(cols["sourceIds"], dtype=np.str_),
+        featureIds=np.array(cols["featureIds"], dtype=np.str_),
+        heights=np.array(cols["heights"], dtype=np.float64),
+        floors=np.array(cols["floors"], dtype=np.float64),
+        authoritative=np.array(cols["authoritative"], dtype=bool),
+        minHeights=np.array(cols["minHeights"], dtype=np.float64),
+        minFloors=np.array(cols["minFloors"], dtype=np.float64),
+        roofShape=np.array(cols["roofShape"], dtype=np.uint8),
+        roofHeights=np.array(cols["roofHeights"], dtype=np.float64),
+        roofDirections=np.array(cols["roofDirections"], dtype=np.float64),
+        roofOrientations=np.array(cols["roofOrientations"], dtype=object),
     )
+
+
+def _optionalFloat(table: Any, name: str) -> FloatArray:
+    if name in table.column_names:
+        return floatColumn(table, name)
+    return np.full(table.num_rows, np.nan)
+
+
+def _optionalObject(table: Any, name: str) -> npt.NDArray[np.object_]:
+    if name in table.column_names:
+        return objectColumn(table, name)
+    return np.full(table.num_rows, None, dtype=object)
+
+
+def _resolveMinHeights(
+    minHeights: FloatArray, minFloors: FloatArray, height: FloatArray
+) -> FloatArray:
+    """Bottom of each part above its base: mapped min height, else min floor x storey height.
+
+    A min height that doesn't leave the part at least a metre tall is ignored.
+    """
+    fromFloors = np.where(
+        np.isfinite(minFloors) & (minFloors > 0), minFloors * STOREY_HEIGHT_m, 0.0
+    )
+    value = np.where(np.isfinite(minHeights) & (minHeights > 0), minHeights, fromFloors)
+    result: FloatArray = np.where(value <= height - 1.0, value, 0.0)
+    return result
 
 
 def _rasterHeights(

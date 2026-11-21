@@ -6,8 +6,13 @@ scene-centre ENU metres:
 - **Terrain:** an RTIN mesh of the ground model over a tile, sampled on a
   ``(2^k+1)^2`` lattice in grid coordinates. Each vertex sits on its node
   column at the ground's ellipsoidal height.
-- **Buildings:** LOD1 extrusions. Roofs are constrained-Delaunay triangulated
-  at roof height; walls run from base to roof along the local vertical.
+- **Buildings:** extrusions from the underside (the base, or a raised part's
+  min height) to the eaves, with mapped roof shapes
+  (:mod:`map3d.layers.roofs`): the footprint is triangulated along the roof's
+  creases and lifted onto its height field; curved roofs share vertices so
+  they shade smoothly, faceted ones keep sharp edges. Walls rise to meet the
+  roof at gable and barrel ends. Raised parts get a downward-facing underside.
+  Flat roofs are constrained-Delaunay triangulated at roof height.
 - **Decks:** slabs whose top follows the deck profile (ground interpolated
   between the bridge ends + level height), with an underside and side walls.
 - **Textures:** one conceptual land-class palette per tile, projected top-down.
@@ -32,6 +37,7 @@ from map3d.layers.landCover import (
     CLASS_ROAD,
     remapClasses,
 )
+from map3d.layers.roofs import Roof
 from map3d.mesh.buildingAppearance import NEUTRAL_ROOF, BuildingAppearance, facadeUv
 from map3d.mesh.gltf import MeshPart, encodePng
 from map3d.mesh.martini import checkGridSize, rtinErrors, rtinMesh
@@ -97,6 +103,9 @@ _OVERLAY_STYLE = {
     CLASS_DECK: "deck",
     CLASS_RAIL: "rail",
 }
+
+
+_MIN_WALL_m = 0.05  # wall segments lower than this (where a roof meets the eaves) are skipped
 
 
 @dataclass(frozen=True)
@@ -182,7 +191,7 @@ def buildingParts(
     extent: TileExtent,
     appearance: BuildingAppearance,
 ) -> tuple[MeshPart, MeshPart]:
-    """LOD1 extrusions of the selected buildings.
+    """Extrusions of the selected buildings, with their roof shapes.
 
     Args:
         scene: Built scene.
@@ -191,30 +200,113 @@ def buildingParts(
         appearance: Per-building facade tints (imagery-derived or neutral).
 
     Returns:
-        ``(roofs, walls)``: textured roofs and textured, vertex-tinted walls.
-        Wall UVs repeat procedural window bays and floor bands at physical scale.
+        ``(roofs, walls)``: textured roofs (and undersides of raised parts) and
+        textured, vertex-tinted walls. Wall UVs repeat procedural window bays
+        and floor bands at physical scale.
     """
     if indices.size == 0:
         return MeshPart.empty(withUv=True), MeshPart.empty(withUv=True, withColors=True)
     b = scene.models.buildings
-    geoms = b.geometries[indices]
+    shaped = np.array([b.roofs[i] is not None for i in indices], dtype=bool)
+    flat = indices[~shaped]
+    roofs: list[MeshPart] = []
+    walls: list[MeshPart] = []
+    if flat.size:
+        geoms = b.geometries[flat]
+        undulation = _undulation(scene, geoms)
+        roofEll = b.roofOrthometric_m[flat] + undulation
+        bottomEll = b.bottomOrthometric_m[flat] + undulation
+        roofs.append(_flatFaces(scene, geoms, roofEll, extent, up=True))
+        raised = b.minHeight_m[flat] > 0.0
+        if raised.any():
+            roofs.append(_flatFaces(scene, geoms[raised], bottomEll[raised], extent, up=False))
+        walls.append(
+            _walls(scene.geometry.frame, geoms, bottomEll, roofEll, appearance.wallColors[flat])
+        )
+    for i in indices[shaped]:
+        roof = b.roofs[i]
+        assert roof is not None
+        und = float(_undulation(scene, b.geometries[i : i + 1])[0])
+        bottomEll = float(b.bottomOrthometric_m[i]) + und
+        eaveEll = float(b.eaveOrthometric_m[i]) + und
+        roofs.append(_shapedRoof(scene, roof, eaveEll, extent))
+        if b.minHeight_m[i] > 0.0:
+            roofs.append(
+                _flatFaces(scene, b.geometries[i : i + 1], np.array([bottomEll]), extent, up=False)
+            )
+        walls.append(_shapedWalls(scene, roof, bottomEll, eaveEll, appearance.wallColors[i]))
+    return MeshPart.concatenate(roofs), MeshPart.concatenate(walls)
+
+
+def _undulation(scene: Scene, geoms: npt.NDArray[np.object_]) -> FloatArray:
     centroids = shapely.centroid(geoms)
-    undulation = scene.models.ground.undulation_m(
+    result: FloatArray = scene.models.ground.undulation_m(
         shapely.get_y(centroids), shapely.get_x(centroids)
     )
-    roofEll = b.roofOrthometric_m[indices] + undulation
-    baseEll = b.baseOrthometric_m[indices] + undulation
+    return result
+
+
+def _flatFaces(
+    scene: Scene,
+    geoms: npt.NDArray[np.object_],
+    heightEll: FloatArray,
+    extent: TileExtent,
+    up: bool,
+) -> MeshPart:
+    """Footprints triangulated at a flat height, facing up (roofs) or down (undersides)."""
+    corners, cornerOwner = _triCorners(geoms)
+    e, n, u = scene.geometry.frame.geodeticToEnu(
+        corners[:, 1], corners[:, 0], heightEll[cornerOwner]
+    )
+    pos = np.column_stack([e, n, u])
+    tris = np.arange(pos.shape[0], dtype=np.uint32).reshape(-1, 3)
+    gx, gy = scene.geometry.enuToGrid(e, n)
+    return MeshPart(pos, _upward(pos, tris, up=up), extent.uv(gx, gy))
+
+
+def _shapedRoof(scene: Scene, roof: Roof, eaveEll: float, extent: TileExtent) -> MeshPart:
+    """A roof's triangulation lifted onto its height field."""
+    corners = roof.triangles().reshape(-1, 2)
+    tris = np.arange(corners.shape[0], dtype=np.uint32).reshape(-1, 3)
+    if roof.curved:
+        # Shared vertices give curved roofs smooth normals.
+        _, first, inverse = np.unique(
+            np.round(corners, 4), axis=0, return_index=True, return_inverse=True
+        )
+        corners = corners[first]
+        tris = inverse.reshape(-1, 3).astype(np.uint32)
+        tris = tris[
+            (tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 0] != tris[:, 2])
+        ]
+    rise = roof.rise(corners[:, 0], corners[:, 1])
+    lon, lat = roof.toLonLat(corners[:, 0], corners[:, 1])
+    e, n, u = scene.geometry.frame.geodeticToEnu(lat, lon, eaveEll + rise)
+    pos = np.column_stack([e, n, u])
+    gx, gy = scene.geometry.enuToGrid(e, n)
+    return MeshPart(pos, _upward(pos, tris), extent.uv(gx, gy))
+
+
+def _shapedWalls(
+    scene: Scene, roof: Roof, bottomEll: float, eaveEll: float, colour: npt.NDArray[np.uint8]
+) -> MeshPart:
+    """Walls from the underside up to the eaves, rising to meet the roof at gable ends."""
+    start, end = roof.outlineSegments()
+    h0 = eaveEll - bottomEll + roof.rise(start[:, 0], start[:, 1])
+    h1 = eaveEll - bottomEll + roof.rise(end[:, 0], end[:, 1])
+    keep = np.maximum(h0, h1) > _MIN_WALL_m
+    start, end, h0, h1 = start[keep], end[keep], h0[keep], h1[keep]
     frame = scene.geometry.frame
 
-    corners, cornerOwner = _triCorners(geoms)
-    e, n, u = frame.geodeticToEnu(corners[:, 1], corners[:, 0], roofEll[cornerOwner])
-    roofPos = np.column_stack([e, n, u])
-    roofTris = np.arange(roofPos.shape[0], dtype=np.uint32).reshape(-1, 3)
-    gx, gy = scene.geometry.enuToGrid(e, n)
-    roofs = MeshPart(roofPos, _upward(roofPos, roofTris), extent.uv(gx, gy))
+    def enu(xy: FloatArray, h: FloatArray | float) -> FloatArray:
+        lon, lat = roof.toLonLat(xy[:, 0], xy[:, 1])
+        e, n, u = frame.geodeticToEnu(lat, lon, np.broadcast_to(h, lon.shape))
+        return np.column_stack([e, n, u])
 
-    walls = _walls(frame, geoms, baseEll, roofEll, appearance.wallColors[indices])
-    return roofs, walls
+    p0, p1 = enu(start, bottomEll), enu(end, bottomEll)
+    p2, p3 = enu(end, bottomEll + h1), enu(start, bottomEll + h0)
+    length_m = np.linalg.norm(end - start, axis=1)
+    colours = np.repeat(np.asarray(colour, dtype=np.uint8)[None], start.shape[0], axis=0)
+    return _quads(p0, p1, p2, p3, colours, facadeUv(length_m, h0, h1))
 
 
 def deckParts(

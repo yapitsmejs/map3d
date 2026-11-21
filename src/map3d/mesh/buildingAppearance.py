@@ -231,23 +231,34 @@ def _coordinatedColors(rgb: FloatArray, featureId: str) -> tuple[ColorArray, Col
     )
 
 
-def facadeUv(length_m: FloatArray, height_m: FloatArray) -> npt.NDArray[np.float32]:
+def facadeUv(
+    length_m: FloatArray, height_m: FloatArray, heightEnd_m: FloatArray | None = None
+) -> npt.NDArray[np.float32]:
     """UVs for wall quads, repeating one window bay per approximately 3 metres.
+
+    Floors are counted up from the bottom edge, so where a wall's top slopes
+    (a gable end) the window rows stay level and the top cuts through them.
 
     Args:
         length_m: Horizontal facade-segment lengths, shape ``(n,)``.
-        height_m: Building heights, shape ``(n,)``.
+        height_m: Wall heights (at the segment start), shape ``(n,)``.
+        heightEnd_m: Wall heights at the segment end, if the top slopes.
 
     Returns:
         ``(n, 4, 2)`` UVs ordered bottom-start, bottom-end, top-end, top-start.
     """
+    h0 = np.asarray(height_m, dtype=np.float64)
+    h1 = h0 if heightEnd_m is None else np.asarray(heightEnd_m, dtype=np.float64)
+    tallest = np.maximum(np.maximum(h0, h1), 1e-9)
     bays = np.maximum(1.0, np.rint(np.asarray(length_m) / FACADE_BAY_WIDTH_m))
-    floors = np.maximum(1.0, np.rint(np.asarray(height_m) / FACADE_FLOOR_HEIGHT_m))
+    floors = np.maximum(1.0, np.rint(tallest / FACADE_FLOOR_HEIGHT_m))
     uv = np.zeros((bays.size, 4, 2), dtype=np.float32)
     uv[:, 1, 0] = bays
     uv[:, 2, 0] = bays
     uv[:, 0, 1] = floors
     uv[:, 1, 1] = floors
+    uv[:, 2, 1] = floors * (1.0 - h1 / tallest)
+    uv[:, 3, 1] = floors * (1.0 - h0 / tallest)
     return uv
 
 

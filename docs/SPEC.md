@@ -139,9 +139,9 @@ node's cell footprint (cell-max):
 |---|---|---|---|
 | `groundHeight_datum_m` / `groundHeight_ENU_m` | (Ny, Nx) | f4 | Bare-earth ground. |
 | `surfaceHeight_datum_m` / `surfaceHeight_ENU_m` | (Ny, Nx) | f4 | Top surface, i.e. the cell-max DSM over terrain, buildings, canopy and decks. Canopy never wins a node a road layer owns (§6.4). |
-| `buildingHeight_m` | (Ny, Nx) | f4 | Building height above ground (NaN where there is no building). |
+| `buildingHeight_m` | (Ny, Nx) | f4 | Height of the top-most building surface above ground (NaN where there is no building). Follows mapped roof shapes. |
 | `canopyHeight_m` | (Ny, Nx) | f4 | Vegetation canopy height above ground (NaN/0 where there is none). |
-| `deckTopHeight_datum_m` / `deckTopHeight_ENU_m` | (K, Ny, Nx) | f4 | Top of elevated structure level k (k = 0 is the lowest). |
+| `deckTopHeight_datum_m` / `deckTopHeight_ENU_m` | (K, Ny, Nx) | f4 | Top of elevated structure level k (k = 0 is the lowest): decks, and raised building parts with open space beneath (e.g. a cantilevered sky park). |
 | `deckBottomHeight_datum_m` / `deckBottomHeight_ENU_m` | (K, Ny, Nx) | f4 | Underside of level k. Clearance below level k = bottom[k] − top[k−1] (or − ground when k = 0). |
 | `landClass` | (Ny, Nx) | u1 | Class of the top-most visible surface (§6.4). |
 | `featureId` | (Ny, Nx) | i8 | ID of the top-most feature (building/deck); 0 = none. Indexes the `features` table. |
@@ -214,7 +214,8 @@ and trees over them draw as objects, not as the surface.
   - **Terrain:** adaptive triangulation (e.g. RTIN) of the ground model, with
     an error tolerance, so mesh density is independent of `gridSpacing_m`.
   - **Buildings:** best available geometry. LOD1 (footprint extruded to a flat
-    roof) by default, and LOD2 roof shapes where open data provides them.
+    roof) by default, and LOD2 roof shapes, building parts and raised parts
+    where open data provides them (§8).
   - **Elevated structures:** true 3D decks (road/rail centerline swept to
     width, with thickness) with open space underneath. Every level is
     included, not just `K`.
@@ -240,8 +241,8 @@ and trees over them draw as objects, not as the surface.
   - **Imagery choice:** `buildingImageryPath` / `--building-imagery` supplies an
     RGB orthophoto; otherwise the pack's imagery is used. This does not restore
     a satellite style or drape the terrain with imagery.
-  - **Shading:** materials are lit, with vertex normals (smooth on terrain
-    and tree crowns, flat on roofs and walls). Walls use the facade texture
+  - **Shading:** materials are lit, with vertex normals (smooth on terrain,
+    tree crowns and curved roofs; flat on other roofs and walls). Walls use the facade texture
     multiplied by their per-building tint.
   - **Not drawn:** road labels, lane markings, or measured architectural details.
 - `map3d view <tilesetDir>` serves the tileset on localhost with a bundled
@@ -312,6 +313,38 @@ and trees over them draw as objects, not as the surface.
 | Elevated-structure footprints | — | LTA Vehicular Bridge/Underpass/Flyover polygons (location only, no deck heights) |
 | Imagery | Sentinel-2 cloudless 2024 by EOX (s2maps.eu WMTS, zoom 14 ≈ 10 m; CC BY-NC-SA 4.0) | BYO RGB orthophoto (`--building-imagery`) for building palettes |
 | Geoid | EGM2008 grid (PROJ-data `us_nga_egm08_25.tif`) | — |
+
+**Building parts, raised parts and roof shapes (OSM Simple 3D Buildings, via
+Overture):**
+- **Parts:** where a building is mapped as `building_part`s, the parts replace
+  its outline (`map3d prepare`). Parts carry their own heights and shapes.
+- **Raised parts:** `min_height` (else `min_floor` × storey height) lifts a
+  part's underside above its base; it is ignored unless at least 1 m below
+  the top. Raised parts take no part in ground correction.
+- **Roof shapes** (`map3d.layers.roofs`): skillion, gabled (also gambrel,
+  saltbox), hipped (also half-hipped, mansard), pyramidal, dome, onion and
+  round. A roof is a height field over its footprint whose highest point is
+  the building's top; `roof_height` sets its rise (capped at the part's
+  height), otherwise a per-shape default (domes and pyramids: the radius of a
+  circle of the footprint's area; round: half the width; pitched roofs a
+  30° (skillion 15°) pitch; pitched and round defaults take at most half the
+  part's height). `roof_direction`
+  (bearing the slope faces) and `roof_orientation` turn the ridge. Round and
+  hipped roofs on footprints that are not near-rectangular follow the distance
+  to the outline instead, so e.g. a conservatory's round roof comes down to the
+  eaves on every side.
+- **Grid:** per node, parts on the ground burn as before (tallest top wins)
+  with their roof height fields evaluated at the node. A raised part extends
+  the solid column under it if its underside is within 2 m of that column's
+  top (or the ground): a sky park resting on its towers is one column. Over
+  open space it is an **elevated level**, stored in the deck-level layers with
+  its top and underside, and it sets the surface if it is highest.
+- **Mesh:** walls run from the underside to the eaves and rise to meet gable
+  and barrel ends; roofs are the footprint triangulated along the shape's
+  creases and lifted onto the height field; raised parts get an underside.
+  Curved roofs (dome, onion, round) share vertices so they shade smoothly.
+- **Features table:** `minHeight_m` and `roofShape` per building (decks: their
+  underside above ground, `flat`).
 
 **Building height precedence (authoritative first):** local government data →
 OSM explicit `height` → Google Open Buildings 2.5D → OSM `building:levels` ×
@@ -544,7 +577,9 @@ map3d info    sg.pack
 - At 0.5 m, terrain (30 m), land cover (10 m) and building heights (~4 m
   raster) are interpolated. Only footprint edges are truly sharp.
 - Open LOD2 roof data is scarce, so expect mostly LOD1 buildings even in
-  Singapore.
+  Singapore. Mapped roof shapes are idealised (a dome is a smooth dome, without
+  e.g. the Esplanade's sunshades); free-form shells are approximated by the
+  nearest shape.
 - Deck elevations are mostly heuristic (§8).
 - Sentinel-2 imagery is ~10 m, so many buildings lack reliable independent
   colours and use neutral fallback. Higher-resolution orthophotos improve roof
