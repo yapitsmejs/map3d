@@ -462,3 +462,56 @@ def testWalls_floorBandsFollowMappedStoreys(towers: Scene):
     assert walls.uv[:, 1].max() == pytest.approx(wallHeight / 2.5, rel=1e-4)
     unmapped = _index(towers, "round")
     assert np.isnan(b.floorHeight_m[unmapped])
+
+
+def testWheelAndTrunklessLoft_meshes(
+    plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory
+):
+    tmp = tmp_path_factory.mktemp("wheel")
+    pack = tmp / "wheel.pack"
+    shutil.copytree(plane.packDir, pack)
+
+    def lonLat(poly: shapely.Polygon) -> shapely.Polygon:
+        e, n = shapely.get_coordinates(poly.exterior).T
+        lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+        return shapely.Polygon(np.column_stack([lon, lat]))
+
+    radius, hub = 60.0, 75.0
+    s = np.linspace(-55.0, 55.0, 12)
+    half = np.sqrt(radius**2 - s**2)
+    spans = [lonLat(shapely.box(x - 4.0, 297.5, x + 4.0, 302.5)) for x in s]
+    rings = [lonLat(shapely.Point(-300.0, 380.0).buffer(r)) for r in (5.0, 7.0)]
+    writeGeoParquet(
+        tmp / "o.parquet",
+        np.array(spans + rings, dtype=object),
+        {
+            "sourceFeatureId": [f"span{k}" for k in range(12)] + ["ring1", "ring2"],
+            "height_m": [*(hub + half).tolist(), 33.0, 41.0],
+            "numFloors": [None] * 14,
+            "minHeight_m": [*(hub - half).tolist(), 30.0, 36.0],
+        },
+    )
+    ingestFiles(pack, "overtureBuildings", [tmp / "o.parquet"])
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    scene = buildScene(SceneRequest(centre, 5.0, np.eye(3), 1000.0, 1000.0), pack)
+    b = scene.models.buildings
+    appearance = BuildingAppearance.fromScene(scene)
+    ids = list(b.sourceFeatureIds)
+    spanIdx = np.array([ids.index(f"span{k}") for k in range(12)])
+    assert len(b.wheels) == 1 and set(b.wheels[0].members) == set(spanIdx.tolist())
+    assert set(appearance.facadeStyles[spanIdx]) == {FacadeStyle.PLAIN}
+    assert all(b.minHeight_m[i] > 0 for i in spanIdx)  # spans are not grounded
+    roofs, walls = scenery.buildingParts(scene, spanIdx, FULL, appearance)
+    assert roofs.isEmpty and walls.triangles.shape[0] > 0
+    up = walls.positions_ENU_m[:, 2]
+    wheel = b.wheels[0]
+    assert wheel.radius_m == pytest.approx(radius, rel=0.01)
+    hubUp = _ellToUp(scene, int(spanIdx[0]), wheel.hubHeight_m)
+    assert up.max() == pytest.approx(hubUp + radius + 2.5 + 1.8, abs=0.5)  # capsule tops
+    assert np.allclose(walls.uv, 0.5)  # untextured: blank panel
+    # Two rings with no trunk mapped stand on a trunk from the ground.
+    r1, r2 = ids.index("ring1"), ids.index("ring2")
+    assert [loft.members for loft in b.lofts] == [(r1, r2)]
+    _, side = scenery.buildingParts(scene, np.array([r1, r2]), FULL, appearance)
+    base = _ellToUp(scene, r1, b.baseOrthometric_m[r1])
+    assert side.positions_ENU_m[:, 2].min() == pytest.approx(base, abs=0.05)

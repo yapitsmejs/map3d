@@ -35,7 +35,13 @@ def testBuildingAppearance_neutralWhenPackHasNoImagery(scene: Scene):
     assert appearance.attribution is None
     assert appearance.coloredCount == 0
     np.testing.assert_array_equal(appearance.roofColors[0], [214, 214, 212])
-    np.testing.assert_array_equal(appearance.wallColors[0], [240, 240, 244])
+    # Walls take a stable tint from a palette of plausible facade colours.
+    from map3d.mesh.buildingAppearance import _NEUTRAL_WALLS
+
+    palette = {tuple(c) for c in _NEUTRAL_WALLS.tolist()}
+    assert all(tuple(w) in palette for w in appearance.wallColors.tolist())
+    again = BuildingAppearance.fromScene(scene)
+    np.testing.assert_array_equal(again.wallColors, appearance.wallColors)
 
 
 def testBuildingAppearance_unavailablePackCoverageFallsBack(scene: Scene, monkeypatch):
@@ -155,7 +161,9 @@ def testFacadeStyles_glassMetalAndLowRaisedParts(scene: Scene):
     assert list(facadeStyles(styled)) == [FacadeStyle.GLASS, FacadeStyle.PLAIN, FacadeStyle.PLAIN]
     assert list(facadeStyles(b)) == [FacadeStyle.WINDOWS] * 3
     appearance = BuildingAppearance.neutral(b).withMappedColors(styled)
-    assert appearance.styleCounts() == {"windows": 0, "glass": 1, "plain": 2, "lattice": 0}
+    counts = appearance.styleCounts()
+    assert counts["glass"] == 1 and counts["plain"] == 2
+    assert sum(counts.values()) == 3
 
 
 def testRoofMaterial_givesATypicalColourUnlessAColourIsMapped(scene: Scene):
@@ -177,12 +185,73 @@ def testRoofMaterial_givesATypicalColourUnlessAColourIsMapped(scene: Scene):
 
 
 def testFacadeTextures_distinctRepeatingTiles():
-    from map3d.mesh.buildingAppearance import FacadeStyle, facadeTextureFor
+    from map3d.mesh.buildingAppearance import FACADE_VARIANTS, FacadeStyle, facadeTextureFor
 
-    tiles = [decodePng(facadeTextureFor(s)) for s in FacadeStyle]
-    assert all(t.shape == (96, 96, 3) for t in tiles)
-    windows, glass, plain, lattice = tiles
+    tiles = {
+        (s, v): decodePng(facadeTextureFor(s, v))
+        for s in FacadeStyle
+        for v in range(FACADE_VARIANTS)
+    }
+    assert all(t.shape == (96, 96, 3) for t in tiles.values())
+    np.testing.assert_array_equal(tiles[(FacadeStyle.WINDOWS, 0)], decodePng(facadeTexture()))
+    glass = tiles[(FacadeStyle.GLASS, 0)]
     assert glass[..., 2].mean() > glass[..., 0].mean()  # glass is bluish
-    assert plain.std() < windows.std() and plain.std() < glass.std()  # plain is plain
-    np.testing.assert_array_equal(windows, decodePng(facadeTexture()))
+    plain = tiles[(FacadeStyle.PLAIN, 0)]
+    assert all(plain.std() < t.std() for k, t in tiles.items() if k[0] != FacadeStyle.PLAIN)
+    lattice = tiles[(FacadeStyle.LATTICE, 0)]
     assert lattice.min() < 130 and lattice.max() > 220  # dark struts on a light ground
+    # Every multi-variant style draws two different tiles, and styles differ.
+    distinct = {t.tobytes() for t in tiles.values()}
+    assert len(distinct) == len(FacadeStyle) * FACADE_VARIANTS - 2  # plain, lattice: one each
+
+
+def testFacadeStyles_fromClassSourceHeightAndRoofMaterial(scene: Scene):
+    import dataclasses
+
+    import shapely
+
+    from map3d.mesh.buildingAppearance import FacadeStyle, facadeStyles, facadeVariants
+
+    b = scene.models.buildings
+    box = b.geometries[0]
+    round_ = shapely.buffer(shapely.centroid(box), 5e-5)  # ~5.5 m radius
+    rows = [
+        # (class, source, height, roof material, geometry, floors) -> style
+        ("office", "overtureBuildings", 40.0, None, box, 10, FacadeStyle.RIBBON),
+        ("office", "overtureBuildings", 150.0, None, box, 40, FacadeStyle.GLASS),
+        ("apartments", "overtureBuildings", 40.0, None, box, 12, FacadeStyle.RESIDENTIAL),
+        (None, "sgHdbBuildings", 40.0, None, box, 12, FacadeStyle.RESIDENTIAL),
+        ("retail", "overtureBuildings", 12.0, None, box, 3, FacadeStyle.RETAIL),
+        ("parking", "overtureBuildings", 15.0, None, box, 5, FacadeStyle.PARKING),
+        ("warehouse", "overtureBuildings", 12.0, None, box, 1, FacadeStyle.INDUSTRIAL),
+        ("church", "overtureBuildings", 20.0, None, box, 2, FacadeStyle.HERITAGE),
+        ("church", "overtureBuildings", 60.0, None, box, 12, FacadeStyle.WINDOWS),
+        (None, "overtureBuildings", 12.0, "roof_tiles", box, 3, FacadeStyle.HERITAGE),
+        (None, "overtureBuildings", 150.0, None, box, None, FacadeStyle.GLASS),
+        (None, "overtureBuildings", 30.0, None, box, None, FacadeStyle.WINDOWS),
+        (None, "overtureBuildings", 30.0, None, round_, None, FacadeStyle.PLAIN),
+        ("roof", "overtureBuildings", 5.0, None, box, None, FacadeStyle.PLAIN),
+    ]
+    n = len(rows)
+    column = lambda k: np.array([r[k] for r in rows], dtype=object)  # noqa: E731
+    styled = dataclasses.replace(
+        b,
+        geometries=column(4),
+        sourceIds=np.array([r[1] for r in rows]),
+        sourceFeatureIds=np.array([f"f{k}" for k in range(n)]),
+        height_m=np.array([r[2] for r in rows]),
+        minHeight_m=np.zeros(n),
+        roofMaterial=column(3),
+        facadeMaterial=np.full(n, None, dtype=object),
+        buildingClass=column(0),
+        numFloors=np.array([np.nan if r[5] is None else r[5] for r in rows], dtype=float),
+        roofs=(None,) * n,
+        heightSource=np.zeros(n, dtype=np.uint8),
+        baseOrthometric_m=np.zeros(n),
+        roofOrthometric_m=np.array([r[2] for r in rows]),
+        anchorOrthometric_m=np.zeros(n),
+    )
+    assert [FacadeStyle(s) for s in facadeStyles(styled)] == [r[6] for r in rows]
+    variants = facadeVariants(styled)
+    assert set(variants.tolist()) == {0, 1}  # both variants in use
+    np.testing.assert_array_equal(variants, facadeVariants(styled))  # stable

@@ -15,8 +15,9 @@ Stacks that narrow upward (set-back towers) keep their steps.
 
 Mapping is rarely that tidy, so within a cluster of concentric round parts
 the profile is a chain by top height: parts thinner than
-:data:`MIN_THICKNESS_m` (planters, kerbs) stay separate buildings, and of
-parts sharing a top the widest shapes the profile. The other parts of the
+:data:`MIN_THICKNESS_m` (planters, kerbs) stay separate buildings, of parts
+sharing a top the widest shapes the profile, and a wider base below the
+trunk is left out (it stays a building of its own). The other parts of the
 cluster are absorbed into the loft (not drawn on their own).
 """
 
@@ -43,7 +44,7 @@ FloatArray = npt.NDArray[np.float64]
 
 ROUNDNESS = 0.85  # 4 pi area / perimeter^2 of a round part (a square is 0.79)
 CENTRE_TOLERANCE_m = 2.0
-MAX_GAP_m = 6.0
+MAX_GAP_m = 10.0
 MIN_FLARE = 1.2  # top radius / bottom radius
 MIN_THICKNESS_m = 1.0  # thinner round parts (planters) are not part of a loft
 _SAME_TOP_m = 0.25
@@ -114,7 +115,8 @@ def findLofts(
         near = near[(top_m[near] - bottom_m[near]) >= MIN_THICKNESS_m]
         if near.size < 2:
             continue
-        stack = _profileChain(near, top_m, radius)
+        stack, base = _profileChain(near, top_m, radius)
+        near = near[~np.isin(near, base)]
         if stack.size >= 2 and _isFlaringStack(stack, bottom_m, top_m, radius):
             assigned[near] = True
             lofts.append(
@@ -129,12 +131,20 @@ def findLofts(
 
 def _profileChain(
     near: npt.NDArray[np.int64], top: FloatArray, radius: FloatArray
-) -> npt.NDArray[np.int64]:
-    """Parts ordered by top; of parts sharing a top, the widest."""
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    """``(profile, base)``: parts ordered by top (the widest of those sharing a top),
+    and the wider base parts left below it."""
     order = near[np.lexsort((-radius[near], top[near]))]
     keep = np.ones(order.size, dtype=bool)
     keep[1:] = np.diff(top[order]) > _SAME_TOP_m
-    return order[keep]
+    chain = order[keep]
+    # The longest run from the top down that never widens going down: a wide
+    # base below the trunk (a planter) is not part of the funnel.
+    r = radius[chain]
+    start = chain.size - 1
+    while start > 0 and r[start - 1] <= r[start] / _RADIUS_SLACK:
+        start -= 1
+    return chain[start:], chain[:start]
 
 
 def _isFlaringStack(

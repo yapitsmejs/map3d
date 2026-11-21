@@ -90,6 +90,7 @@ class BuildingAppearance:
         attribution: Imagery attribution to add to the tileset, if any.
         mapped: Which buildings have a mapped facade or roof colour (or roof material).
         facadeStyles: :class:`FacadeStyle` code per building (all windows if ``None``).
+        facadeVariants: Texture variant per building (all 0 if ``None``).
     """
 
     roofColors: ColorArray
@@ -99,6 +100,7 @@ class BuildingAppearance:
     attribution: str | None = None
     mapped: npt.NDArray[np.bool_] | None = None
     facadeStyles: npt.NDArray[np.uint8] | None = None
+    facadeVariants: npt.NDArray[np.uint8] | None = None
 
     @property
     def coloredCount(self) -> int:
@@ -130,6 +132,11 @@ class BuildingAppearance:
         """
         roofs, walls = self.roofColors.copy(), self.wallColors.copy()
         mapped = np.zeros(len(buildings), dtype=bool)
+        plain = ~self.imageryDerived
+        for j in np.flatnonzero(plain):
+            walls[j] = _NEUTRAL_WALLS[
+                _hash(str(buildings.sourceFeatureIds[j])) % len(_NEUTRAL_WALLS)
+            ]
         for i in range(len(buildings)):
             roof = _harmonized(parseColor(buildings.roofColor[i]))
             if roof is None:
@@ -152,6 +159,7 @@ class BuildingAppearance:
             self.attribution,
             mapped,
             facadeStyles(buildings),
+            facadeVariants(buildings),
         )
 
     @classmethod
@@ -285,14 +293,113 @@ def _fromImagery(
 class FacadeStyle(IntEnum):
     """Which illustrative facade tile a building's walls use."""
 
-    WINDOWS = 0
-    GLASS = 1
-    PLAIN = 2
-    LATTICE = 3  # lofted structures (a steel frame, e.g. the Supertrees)
+    WINDOWS = 0  # punched windows: the default
+    GLASS = 1  # glass curtain wall
+    PLAIN = 2  # blank cladding: canopies, sheds, structures without storeys
+    LATTICE = 3  # steel lattice: lofted structures (the Supertrees)
+    RIBBON = 4  # continuous window bands: offices
+    RESIDENTIAL = 5  # windows with ledges or balconies: flats, HDB blocks
+    RETAIL = 6  # large panes or blank mall walls: shops, malls
+    INDUSTRIAL = 7  # profiled cladding, high strip windows: warehouses, factories
+    PARKING = 8  # open decks between parapets: car parks
+    HERITAGE = 9  # tall shuttered windows: shophouses, civic and religious buildings
+
+
+FACADE_VARIANTS = 2  # texture variants per style (styles with one variant repeat it)
+TALL_OFFICE_m = 80.0  # offices this tall are glazed
+TALL_UNCLASSIFIED_m = 120.0  # unclassified towers this tall are glazed
+SMALL_ROUND_m2 = 300.0  # round parts smaller than this without storeys are structures
+
+_CLASS_STYLES = {
+    **dict.fromkeys(
+        (
+            "apartments",
+            "residential",
+            "house",
+            "detached",
+            "semidetached_house",
+            "terrace",
+            "dormitory",
+            "bungalow",
+            "hut",
+            "cabin",
+            "static_caravan",
+        ),
+        FacadeStyle.RESIDENTIAL,
+    ),
+    **dict.fromkeys(("office", "commercial", "hotel", "bank", "service"), FacadeStyle.RIBBON),
+    **dict.fromkeys(
+        (
+            "retail",
+            "supermarket",
+            "kiosk",
+            "marketplace",
+            "mall",
+            "shop",
+            "train_station",
+            "transportation",
+            "entertainment",
+        ),
+        FacadeStyle.RETAIL,
+    ),
+    **dict.fromkeys(
+        (
+            "industrial",
+            "warehouse",
+            "factory",
+            "manufacture",
+            "hangar",
+            "storage_tank",
+            "agricultural",
+            "farm_auxiliary",
+            "greenhouse",
+            "sports_hall",
+            "sports_centre",
+            "stadium",
+        ),
+        FacadeStyle.INDUSTRIAL,
+    ),
+    **dict.fromkeys(("parking", "garage", "garages", "carport"), FacadeStyle.PARKING),
+    **dict.fromkeys(
+        (
+            "religious",
+            "church",
+            "cathedral",
+            "chapel",
+            "mosque",
+            "temple",
+            "shrine",
+            "synagogue",
+            "civic",
+            "government",
+            "public",
+            "museum",
+            "school",
+            "kindergarten",
+            "college",
+            "townhall",
+            "courthouse",
+            "fire_station",
+        ),
+        FacadeStyle.HERITAGE,
+    ),
+    **dict.fromkeys(
+        ("roof", "shed", "outbuilding", "toilets", "transformer_tower", "bunker", "ruins"),
+        FacadeStyle.PLAIN,
+    ),
+}
+_HERITAGE_MAX_m = 30.0  # civic and religious buildings taller than this read as offices
 
 
 def facadeStyles(buildings: BuildingSet) -> npt.NDArray[np.uint8]:
-    """Facade style per building from its mapped material and shape.
+    """Facade style per building from its class, source, height, materials and shape.
+
+    In order (later rules win): the class (offices ribbon windows, flats
+    balconies, shops large panes, ...; HDB blocks are flats; tall offices
+    glass, as are unclassified towers of :data:`TALL_UNCLASSIFIED_m`); low
+    tiled-roof buildings shuttered windows (shophouses); mapped
+    facade materials (glass, metal); structures without storeys (small round
+    parts, thin raised parts) plain; lofts lattice; wheels plain.
 
     Args:
         buildings: Placed buildings.
@@ -300,15 +407,86 @@ def facadeStyles(buildings: BuildingSet) -> npt.NDArray[np.uint8]:
     Returns:
         :class:`FacadeStyle` codes.
     """
+    n = len(buildings)
+    styles = np.full(n, FacadeStyle.WINDOWS, dtype=np.uint8)
+    classes = (
+        np.full(n, None, dtype=object)
+        if buildings.buildingClass is None
+        else buildings.buildingClass
+    )
+    for i, value in enumerate(classes):
+        style = _CLASS_STYLES.get(str(value).strip().lower()) if value else None
+        if style is not None:
+            styles[i] = style
+    styles[buildings.sourceIds == "sgHdbBuildings"] = FacadeStyle.RESIDENTIAL
+    height = buildings.height_m
+    office = styles == FacadeStyle.RIBBON
+    styles[office & (height >= TALL_OFFICE_m)] = FacadeStyle.GLASS
+    styles[(styles == FacadeStyle.HERITAGE) & (height > _HERITAGE_MAX_m)] = FacadeStyle.WINDOWS
+    unclassified = np.array([not value for value in classes], dtype=bool)
+    tower = unclassified & (styles == FacadeStyle.WINDOWS) & (height >= TALL_UNCLASSIFIED_m)
+    styles[tower] = FacadeStyle.GLASS
+    roofMaterial = np.array([str(m).strip().lower() for m in buildings.roofMaterial])
+    tiled = (roofMaterial == "roof_tiles") & (height <= 20.0)
+    styles[tiled & np.isin(styles, (FacadeStyle.WINDOWS, FacadeStyle.RETAIL))] = (
+        FacadeStyle.HERITAGE
+    )
     material = np.array([str(m).strip().lower() for m in buildings.facadeMaterial])
-    partHeight = buildings.height_m - buildings.minHeight_m
-    styles = np.full(len(buildings), FacadeStyle.WINDOWS, dtype=np.uint8)
     styles[material == "metal"] = FacadeStyle.PLAIN
-    styles[(buildings.minHeight_m > 0.0) & (partHeight < PLAIN_RAISED_HEIGHT_m)] = FacadeStyle.PLAIN
     styles[material == "glass"] = FacadeStyle.GLASS
+    partHeight = height - buildings.minHeight_m
+    styles[(buildings.minHeight_m > 0.0) & (partHeight < PLAIN_RAISED_HEIGHT_m)] = FacadeStyle.PLAIN
+    styles[_smallRoundStructures(buildings)] = FacadeStyle.PLAIN
     for loft in buildings.lofts:
-        styles[list(loft.members)] = FacadeStyle.LATTICE
+        styles[[*loft.members, *loft.absorbed]] = FacadeStyle.LATTICE
+    for wheel in buildings.wheels:
+        styles[list(wheel.members)] = FacadeStyle.PLAIN
     return styles
+
+
+def facadeVariants(buildings: BuildingSet) -> npt.NDArray[np.uint8]:
+    """A stable texture variant per building (from its feature id), for variety."""
+    return np.array(
+        [_hash(str(f)) % FACADE_VARIANTS for f in buildings.sourceFeatureIds], dtype=np.uint8
+    )
+
+
+def _smallRoundStructures(buildings: BuildingSet) -> npt.NDArray[np.bool_]:
+    """Small round parts with no mapped storeys: columns, trunks, tanks, not rooms."""
+    geoms = buildings.geometries
+    if geoms.size == 0:
+        return np.zeros(0, dtype=bool)
+    lat = shapely.get_y(shapely.centroid(geoms))
+    kx = 111_320.0 * np.cos(np.radians(lat))
+    area = shapely.area(geoms) * kx * 110_574.0
+    perimeter = shapely.length(shapely.get_exterior_ring(geoms)) * np.sqrt(kx * 110_574.0)
+    roundness = np.where(perimeter > 0, 4.0 * np.pi * area / np.maximum(perimeter, 1e-9) ** 2, 0.0)
+    floors = np.full(len(buildings), np.nan) if buildings.numFloors is None else buildings.numFloors
+    result: npt.NDArray[np.bool_] = (
+        (roundness >= 0.85) & (area < SMALL_ROUND_m2) & ~(np.isfinite(floors) & (floors > 0))
+    )
+    return result
+
+
+def _hash(text: str) -> int:
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=2).digest()[0]
+
+
+# Plausible tints for walls with neither a mapped nor an imagery colour: cool
+# and warm whites, creams, light greys.
+_NEUTRAL_WALLS = np.array(
+    [
+        (240, 240, 244),
+        (238, 233, 223),
+        (229, 231, 233),
+        (240, 231, 216),
+        (226, 230, 238),
+        (245, 242, 234),
+        (232, 226, 218),
+        (236, 238, 232),
+    ],
+    dtype=np.uint8,
+)
 
 
 # Typical colours of mapped roof materials (OSM roof:material), harmonised on use.
@@ -441,14 +619,145 @@ def facadeTexture() -> bytes:
     return encodePng(image)
 
 
-def facadeTextureFor(style: int) -> bytes:
-    """The repeating facade PNG of a :class:`FacadeStyle`."""
-    return {
-        FacadeStyle.WINDOWS: facadeTexture,
-        FacadeStyle.GLASS: _glassTexture,
-        FacadeStyle.PLAIN: _plainTexture,
-        FacadeStyle.LATTICE: _latticeTexture,
-    }[FacadeStyle(style)]()
+def facadeTextureFor(style: int, variant: int = 0) -> bytes:
+    """The repeating facade PNG of a :class:`FacadeStyle` and variant (one bay x one storey)."""
+    return _styleTexture(int(style), int(variant) % FACADE_VARIANTS)
+
+
+@functools.lru_cache(maxsize=32)
+def _styleTexture(style: int, variant: int) -> bytes:
+    if style == FacadeStyle.WINDOWS and variant == 0:
+        return facadeTexture()
+    if style == FacadeStyle.GLASS and variant == 0:
+        return _glassTexture()
+    if style == FacadeStyle.PLAIN:
+        return _plainTexture()
+    if style == FacadeStyle.LATTICE:
+        return _latticeTexture()
+    return encodePng(_DRAW[FacadeStyle(style)](variant))
+
+
+def _tile(value: int = 240) -> npt.NDArray[np.uint8]:
+    return np.full((_FACADE_TEXTURE_SIZE, _FACADE_TEXTURE_SIZE, 3), value, dtype=np.uint8)
+
+
+def _drawWindows(variant: int) -> npt.NDArray[np.uint8]:
+    """Variant 1: a pair of narrow windows per bay."""
+    image = _tile(255)
+    for c0, c1 in ((14, 42), (54, 82)):
+        image[18:70, c0:c1] = 150
+        image[22:66, c0 + 3 : c1 - 3] = 80
+    image[70:74, 10:86] = 205  # sill
+    image[84:96] = 188  # floor band
+    return image
+
+
+def _drawGlass(variant: int) -> npt.NDArray[np.uint8]:
+    """Variant 1: darker, more reflective glazing without a centre mullion."""
+    size = _FACADE_TEXTURE_SIZE
+    shade = np.linspace(205, 150, size)[:, None]
+    image = np.stack([shade * 0.82, shade * 0.9, shade], axis=-1).astype(np.uint8)
+    image = np.broadcast_to(image, (size, size, 3)).copy()
+    image[:, :2] = image[:, -2:] = 120
+    image[-10:] = (120, 128, 138)
+    return image
+
+
+def _drawRibbon(variant: int) -> npt.NDArray[np.uint8]:
+    """A continuous window band with mullions, over a solid spandrel."""
+    image = _tile(238)
+    top, bottom = (22, 66) if variant == 0 else (14, 72)
+    image[top:bottom] = (92, 104, 118)
+    step = 24 if variant == 0 else 32
+    image[top:bottom, ::step] = 175
+    image[top:bottom, 1::step] = 175
+    image[bottom : bottom + 3] = 210
+    return image
+
+
+def _drawResidential(variant: int) -> npt.NDArray[np.uint8]:
+    """Variant 0: a window with a ledge and an air-con shelf; 1: a balcony door and railing."""
+    image = _tile(246)
+    if variant == 0:
+        image[20:60, 18:62] = 160
+        image[23:57, 21:59] = 92
+        image[23:57, 39:41] = 160  # casement divider
+        image[60:66, 12:68] = 214  # ledge
+        image[46:66, 70:88] = 222  # air-con shelf
+        image[46:48, 70:88] = 196
+    else:
+        image[12:78, 14:82] = 150
+        image[15:78, 17:79] = 96
+        image[56:78, 10:86] = 236  # balcony railing
+        image[56:78, 14:82:6] = 190
+        image[56:58, 10:86] = 200
+    image[86:96] = 220  # slab edge
+    return image
+
+
+def _drawRetail(variant: int) -> npt.NDArray[np.uint8]:
+    """Variant 0: large shop panes; 1: a blank mall wall with a signage band."""
+    image = _tile(236)
+    if variant == 0:
+        image[8:84, 6:90] = 140
+        image[10:82, 8:88] = (98, 112, 122)
+        image[10:82, 47:49] = 140
+    else:
+        image[...] = 242
+        image[60:72] = 180  # signage band
+        image[:, ::48] = 226  # panel joints
+    return image
+
+
+def _drawIndustrial(variant: int) -> npt.NDArray[np.uint8]:
+    """Profiled cladding; variant 0 has a high strip window."""
+    image = _tile(238)
+    image[:, ::8] = 220
+    image[:, 1::8] = 226
+    if variant == 0:
+        image[8:22] = (120, 132, 142)
+        image[8:22, ::24] = 190
+    image[92:96] = 212
+    return image
+
+
+def _drawParking(variant: int) -> npt.NDArray[np.uint8]:
+    """An open deck between parapets; variant 1 screened with louvres."""
+    image = _tile(234)
+    image[34:84] = 72  # open deck
+    if variant == 1:
+        image[34:84:6] = 196  # louvres
+        image[35:84:6] = 186
+    image[34:84, :5] = image[34:84, -5:] = 214  # columns at the bay edges
+    return image
+
+
+def _drawHeritage(variant: int) -> npt.NDArray[np.uint8]:
+    """A tall window with louvred shutters (variant 1: a pair of narrow ones), and a cornice."""
+    image = _tile(250)
+    windows = ((30, 66),) if variant == 0 else ((14, 42), (54, 82))
+    for c0, c1 in windows:
+        width = c1 - c0
+        image[14:80, c0:c1] = 150
+        image[17:80, c0 + 3 : c1 - 3] = 168  # shutters
+        image[17:80:4, c0 + 3 : c1 - 3] = 150  # louvres
+        image[17:80, c0 + width // 2 - 1 : c0 + width // 2 + 1] = 140
+    image[80:84] = 214  # sill
+    image[88:96] = 230  # cornice band
+    image[88:90] = 206
+    return image
+
+
+_DRAW = {
+    FacadeStyle.WINDOWS: _drawWindows,
+    FacadeStyle.GLASS: _drawGlass,
+    FacadeStyle.RIBBON: _drawRibbon,
+    FacadeStyle.RESIDENTIAL: _drawResidential,
+    FacadeStyle.RETAIL: _drawRetail,
+    FacadeStyle.INDUSTRIAL: _drawIndustrial,
+    FacadeStyle.PARKING: _drawParking,
+    FacadeStyle.HERITAGE: _drawHeritage,
+}
 
 
 @functools.lru_cache(maxsize=1)

@@ -32,6 +32,7 @@ import shapely
 
 from map3d import __version__
 from map3d.mesh.buildingAppearance import (
+    FACADE_VARIANTS,
     BuildingAppearance,
     FacadeStyle,
     facadeTexture,
@@ -198,7 +199,9 @@ def _writeTile(
     b = scene.models.buildings
     inTile = _inTile(buildingXY, r, sx, sy, ix, iy, n)
     selB = (
-        np.flatnonzero(inTile & (b.height_m >= minHeight))
+        # A raised part counts by its own extent, so a distant view never keeps
+        # a crown or canopy whose supporting part it drops.
+        np.flatnonzero(inTile & ((b.height_m - b.minHeight_m) >= minHeight))
         if len(b)
         else np.array([], dtype=np.int64)
     )
@@ -217,14 +220,22 @@ def _writeTile(
         if appearance.facadeStyles is None
         else appearance.facadeStyles[selB]
     )
+    variants = (
+        np.zeros(selB.size, dtype=np.uint8)
+        if appearance.facadeVariants is None
+        else appearance.facadeVariants[selB]
+    )
+    keys = styles.astype(np.int64) * FACADE_VARIANTS + variants
     roofParts: list[MeshPart] = []
     wallsByStyle: dict[int, MeshPart] = {}
-    for style in np.unique(styles):
-        styleRoofs, styleWalls = buildingParts(scene, selB[styles == style], extent, appearance)
+    for key in np.unique(keys):
+        styleRoofs, styleWalls = buildingParts(scene, selB[keys == key], extent, appearance)
         roofParts.append(styleRoofs)
-        wallsByStyle[int(style)] = styleWalls
+        wallsByStyle[int(key)] = styleWalls
     roofs = MeshPart.concatenate(roofParts) if roofParts else MeshPart.empty(withUv=True)
-    walls = wallsByStyle.pop(int(FacadeStyle.WINDOWS), MeshPart.empty(withUv=True, withColors=True))
+    walls = wallsByStyle.pop(
+        int(FacadeStyle.WINDOWS) * FACADE_VARIANTS, MeshPart.empty(withUv=True, withColors=True)
+    )
     tops, sides = deckParts(scene, selD, extent)
     textured = MeshPart.concatenate([terrain, roofs, tops])
     colored = sides
@@ -243,7 +254,10 @@ def _writeTile(
         instanced=instanced,
         facades=walls,
         facadeTexture=params.facadePng,
-        otherFacades=[(w, facadeTextureFor(s)) for s, w in sorted(wallsByStyle.items())],
+        otherFacades=[
+            (w, facadeTextureFor(k // FACADE_VARIANTS, k % FACADE_VARIANTS))
+            for k, w in sorted(wallsByStyle.items())
+        ],
     )
 
     allWalls = [walls, *wallsByStyle.values()]

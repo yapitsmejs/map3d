@@ -21,7 +21,9 @@
    uphill. Walls reach down to the **base**, the lowest ground under the
    outline, so the downhill side stands on a plinth. A raised part
    (``minHeight_m``, else ``minFloor`` x storey height; ignored unless below
-   the top) starts at anchor + min height.
+   the top) starts at anchor + min height; one with nothing beneath it whose
+   lower levels are evidently unmapped is taken down to the ground
+   (:func:`_groundUnsupported`).
    The footprint is converted to grid pixel coordinates at top height, so the
    roof sits exactly in its node columns.
 4. **Roof shape:** mapped roof shapes become height fields
@@ -62,12 +64,14 @@ from map3d.layers.pixels import burnChunk, chunkBox, rasterizePixels, toPixelGeo
 from map3d.layers.provenance import HeightSource
 from map3d.layers.roofs import Roof, RoofShape, makeRoof, roofShapeCodes
 from map3d.layers.terrain import GroundModel
+from map3d.layers.wheels import Wheel, findWheels
 from map3d.pack.reader import Pack, RasterWindow
 from map3d.pack.registry import getSource
 
 __all__ = [
     "DEFAULT_BUILDING_HEIGHT_m",
     "FLOATING_GAP_m",
+    "UNSUPPORTED_MIN_THICKNESS_m",
     "INHERIT_OVERLAP",
     "MIN_RASTER_HEIGHT_m",
     "SMALL_DEFAULT_HEIGHT_m",
@@ -115,6 +119,7 @@ class BuildingSet:
         anchorOrthometric_m: Median ground under the footprint, which heights
             are measured from (MSL); the base if not given.
         numFloors: Mapped storey count (NaN where unknown), for facade floor bands.
+        buildingClass: Mapped building class (``office``, ``apartments``, ...), or ``None``.
         groundCorrection: Ground cap applied under buildings, if any.
     """
 
@@ -136,6 +141,7 @@ class BuildingSet:
     roofMaterial: npt.NDArray[np.object_]
     anchorOrthometric_m: FloatArray | None = None
     numFloors: FloatArray | None = None
+    buildingClass: npt.NDArray[np.object_] | None = None
     groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
@@ -167,6 +173,16 @@ class BuildingSet:
     def lofts(self) -> list[Loft]:
         """Stacks of concentric round parts that widen upward (:mod:`map3d.layers.lofts`)."""
         return findLofts(self.geometries, self.bottomOrthometric_m, self.roofOrthometric_m)
+
+    @functools.cached_property
+    def wheels(self) -> list[Wheel]:
+        """Observation wheels mapped as rows of spans (:mod:`map3d.layers.wheels`)."""
+        return findWheels(self.geometries, self.bottomOrthometric_m, self.roofOrthometric_m)
+
+    @functools.cached_property
+    def wheelOf(self) -> dict[int, int]:
+        """Building index -> index of the wheel it belongs to."""
+        return {i: k for k, wheel in enumerate(self.wheels) for i in wheel.members}
 
     @functools.cached_property
     def loftOf(self) -> dict[int, int]:
@@ -247,6 +263,7 @@ def loadBuildings(
         fused.heights, fused.floors, fused.authoritative, rasterHeight, rasterRes, area_m2
     )
     minHeight = _resolveMinHeights(fused.minHeights, fused.minFloors, height)
+    minHeight = _groundUnsupported(geoms, minHeight, height)
     correction = (
         GroundCorrection.build(geometry, ground, geoms[minHeight <= 0.0]) if correctGround else None
     )
@@ -286,6 +303,7 @@ def loadBuildings(
         roofOrthometric_m=roof[keep],
         anchorOrthometric_m=anchor[keep],
         numFloors=fused.floors[keep],
+        buildingClass=fused.buildingClass[keep],
         pixelGeometries=pixel[keep],
         minHeight_m=minHeight[keep],
         roofShape=fused.roofShape[keep],
@@ -476,6 +494,7 @@ class _Fused:
     roofColor: npt.NDArray[np.object_]
     facadeMaterial: npt.NDArray[np.object_]
     roofMaterial: npt.NDArray[np.object_]
+    buildingClass: npt.NDArray[np.object_]
 
 
 def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
@@ -508,6 +527,7 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         cols["roofColor"].extend(_optionalObject(table, "roofColor")[idx])
         cols["facadeMaterial"].extend(_optionalObject(table, "facadeMaterial")[idx])
         cols["roofMaterial"].extend(_optionalObject(table, "roofMaterial")[idx])
+        cols["buildingClass"].extend(_optionalObject(table, "buildingClass")[idx])
     return _Fused(
         geoms=np.array(geoms, dtype=object),
         sourceIds=np.array(cols["sourceIds"], dtype=np.str_),
@@ -525,6 +545,7 @@ def _fuse(pack: Pack, bounds: tuple[float, float, float, float]) -> _Fused:
         roofColor=np.array(cols["roofColor"], dtype=object),
         facadeMaterial=np.array(cols["facadeMaterial"], dtype=object),
         roofMaterial=np.array(cols["roofMaterial"], dtype=object),
+        buildingClass=np.array(cols["buildingClass"], dtype=object),
     )
 
 
@@ -595,6 +616,70 @@ def _converted(name: str, value: Any) -> Any:
     if name in ("roofHeights", "roofDirections"):
         return np.nan if value is None else float(value)
     return value
+
+
+UNSUPPORTED_MIN_THICKNESS_m = 6.0  # unsupported raised parts this thick reach the ground
+_SUPPORT_SHARE = 0.05  # a raised part with less than this much beneath it is unsupported
+_MAX_ELONGATION = 4.0  # longer, thinner raised parts (link bridges) may span open space
+
+
+def _groundUnsupported(
+    geoms: npt.NDArray[np.object_], minHeight: FloatArray, height: FloatArray
+) -> FloatArray:
+    """Extend raised parts with nothing beneath them down to the ground.
+
+    A raised part needs something under it: another part reaching up to within
+    :data:`FLOATING_GAP_m` of its underside over at least 5 % of its footprint.
+    Without that, the building's lower levels are simply unmapped (e.g. a tower
+    part from 45 m whose podium is not mapped), so a part at least
+    :data:`UNSUPPORTED_MIN_THICKNESS_m` thick that is not long and thin is taken
+    down to the ground. Thin parts (canopies) and long thin parts (link bridges)
+    stay raised; so do stacks drawn as lofts, which get their own trunk, and
+    the spans of observation wheels.
+
+    Heights here are relative to each part's own base, which is close enough to
+    compare neighbouring parts.
+    """
+    raised = np.flatnonzero(minHeight > 0.0)
+    if raised.size == 0:
+        return minHeight
+    lofted = {
+        i for loft in findLofts(geoms, minHeight, height) for i in (*loft.members, *loft.absorbed)
+    }
+    lofted |= {i for wheel in findWheels(geoms, minHeight, height) for i in wheel.members}
+    tree = shapely.STRtree(geoms)
+    out = minHeight.copy()
+    for i in raised:
+        if i in lofted or height[i] - minHeight[i] < UNSUPPORTED_MIN_THICKNESS_m:
+            continue
+        if _isBridgeLike(geoms[i]):
+            continue
+        near = tree.query(geoms[i], predicate="intersects")
+        below = near[
+            (near != i)
+            & (height[near] >= minHeight[i] - FLOATING_GAP_m)
+            & (minHeight[near] < minHeight[i] - 0.5)
+        ]
+        if below.size:
+            support = shapely.area(shapely.intersection(geoms[i], shapely.union_all(geoms[below])))
+            if support >= _SUPPORT_SHARE * shapely.area(geoms[i]):
+                continue
+        out[i] = 0.0
+    return out
+
+
+_BRIDGE_MAX_WIDTH_m = 15.0
+
+
+def _isBridgeLike(geom: Any) -> bool:
+    """Long and narrow: more than 4x as long as wide, and under 15 m wide."""
+    rect = shapely.get_coordinates(shapely.oriented_envelope(geom))
+    if rect.shape[0] < 4:
+        return True
+    scale = np.array([np.cos(np.radians(rect[0, 1])), 1.0]) * 111_320.0
+    sides = np.hypot(*(np.diff(rect[:3], axis=0) * scale).T)
+    width = float(sides.min())
+    return width < _BRIDGE_MAX_WIDTH_m and float(sides.max()) > _MAX_ELONGATION * max(width, 1e-9)
 
 
 def _optionalFloat(table: Any, name: str) -> FloatArray:

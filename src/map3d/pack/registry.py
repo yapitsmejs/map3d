@@ -46,6 +46,7 @@ BUILDING_3D_COLUMNS = (
     "roofColor",
     "facadeMaterial",
     "roofMaterial",
+    "buildingClass",
 )
 VerticalReference = Literal["EGM2008", "WGS84", "aboveGround"]
 

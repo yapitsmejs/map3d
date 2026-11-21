@@ -8,9 +8,16 @@ row-group statistics, and writes the canonical pack schemas:
   optional 3D columns ``minHeight_m``, ``minFloor``, ``roofShape``,
   ``roofHeight_m``, ``roofDirection_deg``, ``roofOrientation``, ``facadeColor``,
   ``roofColor``, ``facadeMaterial`` and ``roofMaterial`` (OSM Simple 3D
-  Buildings tags). Where a building is mapped as **building parts**
-  (``building_part`` rows), the parts replace its outline, as Simple 3D
-  Buildings renderers do. Underground buildings and parts are excluded.
+  Buildings tags), and ``buildingClass`` (Overture ``class``, else
+  ``subtype``; parts take their building's). Where a building is mapped as
+  **building parts** (``building_part`` rows), the parts replace its outline,
+  as Simple 3D Buildings renderers do, unless the parts leave the outline's
+  base unmapped: mappers often let a building's own height describe its
+  podium and map only the tower above it as a part (``min_height`` = the
+  podium height). Such an outline (with its own height or floor count, less
+  than 90 % covered by ground-level parts) is kept as the base, no taller than
+  the lowest part (the lowest ``min_height`` of a raised part, or the top of a
+  ground-level one). Underground buildings and parts are excluded.
 - **water:** polygonal water (ocean, reservoirs, rivers, ponds, pools) clipped
   to the box, as land-cover polygons of class water (``landClass`` 80).
 - **land use:** surface-like ``land_use`` (parks, grass, plazas, construction
@@ -94,21 +101,86 @@ def fetchOvertureBuildings(
     Returns:
         ``outPath``.
     """
-    buildings = _readBuildingType(fs, f"{releaseBase}/theme=buildings/type=building", bounds, [])
+    buildings = _readBuildingType(
+        fs, f"{releaseBase}/theme=buildings/type=building", bounds, ["class", "subtype"]
+    )
     parts = _readBuildingType(
         fs, f"{releaseBase}/theme=buildings/type=building_part", bounds, ["building_id"]
     )
-    replaced = {str(v) for v in parts.get("building_id", [])}
-    keepBuilding = [str(i) not in replaced for i in buildings["id"]]
+    classes = {
+        str(i): c or s
+        for i, c, s in zip(buildings["id"], buildings["class"], buildings["subtype"], strict=True)
+    }
+    ownParts: dict[str, list[int]] = {}
+    for k, parent in enumerate(parts["building_id"]):
+        ownParts.setdefault(str(parent), []).append(k)
     geoms: list[Any] = []
-    cols: dict[str, list[Any]] = {name: [] for name in _CANONICAL.values()}
-    for table, keep in ((buildings, keepBuilding), (parts, [True] * len(parts["id"]))):
-        for k in np.flatnonzero(np.asarray(keep, dtype=bool)):
-            geoms.append(table["geometry"][k])
-            for raw, name in _CANONICAL.items():
-                cols[name].append(table[raw][k])
+    cols: dict[str, list[Any]] = {name: [] for name in [*_CANONICAL.values(), "buildingClass"]}
+
+    def emit(table: dict[str, list[Any]], k: int, buildingClass: Any, **override: Any) -> None:
+        geoms.append(table["geometry"][k])
+        for raw, name in _CANONICAL.items():
+            cols[name].append(override.get(raw, table[raw][k]))
+        cols["buildingClass"].append(buildingClass)
+
+    for k, ident in enumerate(buildings["id"]):
+        own = ownParts.get(str(ident))
+        if own is None:
+            emit(buildings, k, classes[str(ident)])
+            continue
+        podium = _podium(buildings, k, parts, own)
+        if podium is not None:
+            emit(buildings, k, classes[str(ident)], **podium)
+    for k, parent in enumerate(parts["building_id"]):
+        emit(parts, k, classes.get(str(parent)))
     writeGeoParquet(outPath, np.array(geoms, dtype=object), cols)
     return outPath
+
+
+_PODIUM_COVERED = 0.9  # outlines this covered by ground-level parts are fully replaced
+
+
+def _partTop(table: dict[str, list[Any]], k: int) -> float | None:
+    height, floors = table["height"][k], table["num_floors"][k]
+    if height is not None:
+        return float(height)
+    return None if floors is None else 3.0 * float(floors)
+
+
+def _partBottom(table: dict[str, list[Any]], k: int) -> float:
+    minHeight, minFloor = table["min_height"][k], table["min_floor"][k]
+    if minHeight is not None and minHeight > 0:
+        return float(minHeight)
+    return 0.0 if not minFloor else 3.0 * float(minFloor)
+
+
+def _podium(
+    buildings: dict[str, list[Any]], k: int, parts: dict[str, list[Any]], own: list[int]
+) -> dict[str, Any] | None:
+    """Overrides that keep a parted building's outline as its base, or ``None`` to drop it."""
+    top = _partTop(buildings, k)
+    if top is None:
+        return None
+    outline = buildings["geometry"][k]
+    grounded = [j for j in own if _partBottom(parts, j) <= 0.0]
+    if grounded:
+        cover = shapely.union_all([parts["geometry"][j] for j in grounded])
+        covered = shapely.area(shapely.intersection(outline, cover)) / max(
+            shapely.area(outline), 1e-30
+        )
+        if covered >= _PODIUM_COVERED:
+            return None
+    levels = [_partBottom(parts, j) or _partTop(parts, j) for j in own]
+    cap = min((v for v in levels if v), default=None)
+    if cap is None or top <= cap + 0.5:
+        return {}
+    floors = buildings["num_floors"][k]
+    return {
+        "height": cap,
+        "num_floors": None if floors is None else min(int(floors), max(1, round(cap / 3.0))),
+        "roof_shape": None,
+        "roof_height": None,
+    }
 
 
 # Overture attribute -> canonical pack column.

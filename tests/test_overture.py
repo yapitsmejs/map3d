@@ -41,6 +41,8 @@ def release(tmp_path: Path) -> str:
                 "id": "b-in",
                 "height": 42.0,
                 "num_floors": 12,
+                "class": "office",
+                "subtype": "commercial",
                 "is_underground": False,
                 "geometry": shapely.box(103.81, 1.29, 103.811, 1.291),
             },
@@ -228,17 +230,21 @@ def testBuildings_canonicalAndFiltered(tmp_path: Path, release: str):
         pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "b.parquet"
     )
     table, geoms = readGeoParquet(out)
-    # b-in is mapped as parts, which replace it; the underground part is dropped.
-    assert table.column("sourceFeatureId").to_pylist() == ["b-noattrs", "p-0", "p-1"]
-    assert table.column("height_m").to_pylist() == [None, 60.0, 42.0]
-    assert table.column("numFloors").to_pylist() == [None, None, None]
-    assert table.column("minHeight_m").to_pylist() == [None, None, 30.0]
-    assert table.column("roofShape").to_pylist() == [None, None, "dome"]
-    assert table.column("roofHeight_m").to_pylist() == [None, None, 8.0]
+    # b-in is mapped as parts. Its ground-level part covers only half of it, so
+    # its outline stays as the base below the lowest part (p-1 from 30 m), capped
+    # there; the underground part is dropped.
+    assert table.column("sourceFeatureId").to_pylist() == ["b-in", "b-noattrs", "p-0", "p-1"]
+    assert table.column("height_m").to_pylist() == [30.0, None, 60.0, 42.0]
+    assert table.column("numFloors").to_pylist() == [10, None, None, None]
+    assert table.column("minHeight_m").to_pylist() == [None, None, None, 30.0]
+    assert table.column("roofShape").to_pylist() == [None, None, None, "dome"]
+    assert table.column("roofHeight_m").to_pylist() == [None, None, None, 8.0]
     assert set(table.column_names) >= {"minFloor", "roofDirection_deg", "roofOrientation"}
-    assert table.column("facadeColor").to_pylist() == [None, None, "#5D7877"]
-    assert table.column("roofColor").to_pylist() == [None, None, None]
-    assert geoms.shape == (3,)
+    assert table.column("facadeColor").to_pylist() == [None, None, None, "#5D7877"]
+    assert table.column("roofColor").to_pylist() == [None, None, None, None]
+    # Parts take their building's class.
+    assert table.column("buildingClass").to_pylist() == ["office", None, "office", "office"]
+    assert geoms.shape == (4,)
 
 
 def testBuildings_olderReleaseWithoutPartsOr3dColumns(tmp_path: Path):
@@ -327,3 +333,57 @@ def testLandUse_surfaceClassesOnlyFromLandUseAndLand(tmp_path: Path, release: st
         "l-wood": 10,
         "l-beach": 60,
     }
+
+
+def testBuildings_partsCoveringTheOutlineReplaceIt(tmp_path: Path):
+    base = tmp_path / "bucket" / "release" / "2026-01-01.0"
+    outline = shapely.box(103.81, 1.29, 103.811, 1.291)
+    row = {"is_underground": False, "min_height": None, "class": None, "subtype": None}
+    _write(
+        base / "theme=buildings" / "type=building" / "part-0.parquet",
+        [
+            {
+                **row,
+                "id": "tall",
+                "height": 90.0,
+                "num_floors": 30,
+                "subtype": "residential",
+                "geometry": outline,
+            },
+            {
+                **row,
+                "id": "noHeight",
+                "height": None,
+                "num_floors": None,
+                "geometry": shapely.box(103.812, 1.29, 103.813, 1.291),
+            },
+        ],
+    )
+    _write(
+        base / "theme=buildings" / "type=building_part" / "part-0.parquet",
+        [
+            {
+                "id": "whole",
+                "building_id": "tall",
+                "height": 90.0,
+                "min_height": None,
+                "is_underground": False,
+                "geometry": outline,
+            },
+            {
+                "id": "tower",
+                "building_id": "noHeight",
+                "height": 50.0,
+                "min_height": 20.0,
+                "is_underground": False,
+                "geometry": shapely.box(103.812, 1.29, 103.8125, 1.2905),
+            },
+        ],
+    )
+    out = overture.fetchOvertureBuildings(
+        pafs.LocalFileSystem(), str(base.as_posix()), BOUNDS, tmp_path / "b.parquet"
+    )
+    table, _ = readGeoParquet(out)
+    # Fully covered outlines, and outlines with no height of their own, are replaced.
+    assert table.column("sourceFeatureId").to_pylist() == ["whole", "tower"]
+    assert table.column("buildingClass").to_pylist() == ["residential", None]

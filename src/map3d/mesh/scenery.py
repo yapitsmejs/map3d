@@ -41,6 +41,7 @@ from map3d.layers.landCover import (
 from map3d.layers.lofts import Loft
 from map3d.layers.pixels import rasterizeAffine
 from map3d.layers.roofs import Roof
+from map3d.layers.wheels import Wheel
 from map3d.mesh.buildingAppearance import (
     NEUTRAL_ROOF,
     BuildingAppearance,
@@ -224,7 +225,14 @@ def buildingParts(
             cap, side = _loftParts(scene, b.lofts[k], extent, appearance.wallColors[i])
             roofs.append(cap)
             walls.append(side)
-    indices = np.array([i for i in indices if int(i) not in loftOf], dtype=np.int64)
+    wheelOf = b.wheelOf
+    for i in indices:
+        k = wheelOf.get(int(i))
+        if k is not None and b.wheels[k].members[0] == i:  # drawn once, by its first span
+            walls.append(_wheelParts(scene, b.wheels[k]))
+    indices = np.array(
+        [i for i in indices if int(i) not in loftOf and int(i) not in wheelOf], dtype=np.int64
+    )
     shaped = np.array([b.roofs[i] is not None for i in indices], dtype=bool)
     flat = indices[~shaped]
     if flat.size:
@@ -265,7 +273,98 @@ def buildingParts(
     return MeshPart.concatenate(roofs), MeshPart.concatenate(walls)
 
 
+WHEEL_COLOR = (236, 238, 240)
+CAPSULE_COLOR = (176, 206, 226)
+_WHEEL_SEGMENTS = 72
+_WHEEL_SPOKES = 28
+_WHEEL_CAPSULES = 28
+
+
+def _wheelParts(scene: Scene, wheel: Wheel) -> MeshPart:
+    """An observation wheel: rim, spokes, hub, capsules and an A-frame of support legs.
+
+    The rim's centre, radius and width come from the mapped spans; spokes,
+    capsules and legs are illustrative (counts and sizes typical of large
+    observation wheels). Drawn in the plain facade style (UVs on a blank panel).
+    """
+    lon0, lat0 = wheel.hub_deg
+    kx, ky = _metresPerDegree(lat0)
+    und = float(scene.models.ground.undulation_m(np.array([lat0]), np.array([lon0]))[0])
+    axis = np.array([*wheel.axis, 0.0])
+    normal = np.array([-wheel.axis[1], wheel.axis[0], 0.0])
+    up = np.array([0.0, 0.0, 1.0])
+    hub = np.array([0.0, 0.0, wheel.hubHeight_m])
+    r, w = wheel.radius_m, max(wheel.width_m, 2.0)
+
+    def rim(phi: FloatArray, radius: float) -> FloatArray:
+        points: FloatArray = hub + radius * (
+            np.cos(phi)[:, None] * axis + np.sin(phi)[:, None] * up
+        )
+        return points
+
+    beams: list[tuple[FloatArray, FloatArray, float, float, FloatArray, tuple[int, int, int]]] = []
+    phi = np.linspace(0.0, 2.0 * np.pi, _WHEEL_SEGMENTS + 1)
+    ring = rim(phi, r)
+    for p0, p1 in zip(ring[:-1], ring[1:], strict=True):
+        beams.append((p0, p1, 0.5 * w, 1.2, normal, WHEEL_COLOR))
+    spokes = rim(np.linspace(0.0, 2.0 * np.pi, _WHEEL_SPOKES, endpoint=False), r)
+    for side in (-0.4, 0.4):
+        for p in spokes:
+            beams.append((hub + side * w * normal, p, 0.15, 0.15, normal, WHEEL_COLOR))
+    beams.append((hub - 0.8 * w * normal, hub + 0.8 * w * normal, 3.0, 3.0, axis, WHEEL_COLOR))
+    capsules = rim(np.linspace(0.0, 2.0 * np.pi, _WHEEL_CAPSULES, endpoint=False), r + 2.5)
+    for p in capsules:
+        tangent = np.cross(normal, (p - hub) / np.linalg.norm(p - hub))
+        beams.append((p - 2.2 * tangent, p + 2.2 * tangent, 1.6, 1.8, normal, CAPSULE_COLOR))
+    for along in (-0.3, 0.3):
+        foot = np.array([0.0, 0.0, 0.0]) + along * r * axis + 0.25 * r * normal
+        foot[2] = wheel.hubHeight_m - r - 5.0
+        beams.append((hub + 0.8 * w * normal, foot, 1.5, 1.5, axis, WHEEL_COLOR))
+    parts = [_beam(scene, lon0, lat0, kx, ky, und, *beam) for beam in beams]
+    return MeshPart.concatenate(parts)
+
+
+def _beam(
+    scene: Scene,
+    lon0: float,
+    lat0: float,
+    kx: float,
+    ky: float,
+    und: float,
+    p0: FloatArray,
+    p1: FloatArray,
+    halfWidth: float,
+    halfDepth: float,
+    side: FloatArray,
+    colour: tuple[int, int, int],
+) -> MeshPart:
+    """A box from ``p0`` to ``p1`` (local metres: east, north, height), ``side`` setting its width axis."""
+    d = p1 - p0
+    d = d / max(float(np.linalg.norm(d)), 1e-9)
+    e1 = side - (side @ d) * d
+    n1 = float(np.linalg.norm(e1))
+    e1 = e1 / n1 if n1 > 1e-6 else np.array([0.0, 0.0, 1.0])
+    e2 = np.cross(d, e1)
+    offsets = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    corners = np.array(
+        [p + a * halfWidth * e1 + b * halfDepth * e2 for p in (p0, p1) for a, b in offsets]
+    )
+    e, n, u = scene.geometry.frame.geodeticToEnu(
+        corners[:, 1] / ky + lat0, corners[:, 0] / kx + lon0, corners[:, 2] + und
+    )
+    pos = np.column_stack([e, n, u])
+    faces = [(0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7), (0, 3, 2, 1), (4, 5, 6, 7)]
+    tris = np.array([t for a, b, c, q in faces for t in ((a, b, c), (a, c, q))], dtype=np.uint32)
+    return MeshPart(
+        pos,
+        tris,
+        uv=np.full((8, 2), 0.5, dtype=np.float32),
+        colors=np.tile(np.array(colour, dtype=np.uint8), (8, 1)),
+    )
+
+
 _LOFT_SIDES = 36  # outline samples per loft ring
+_LOFT_TRUNK = 0.4  # trunk radius (of the lowest ring's) for stacks with no trunk mapped
 
 
 def _loftParts(
@@ -275,12 +374,14 @@ def _loftParts(
 
     The profile runs from the bottom part's underside to its top, then to the
     top of each part above, each ring taking that part's outline (sampled
-    along rays from the shared centre). Ring vertices are shared, so the
+    along rays from the shared centre). A raised stack with no trunk mapped
+    stands on a trunk from the ground, :data:`_LOFT_TRUNK` of its lowest
+    ring's radius. Ring vertices are shared, so the
     surface shades smoothly.
 
     Returns:
-        ``(caps, side)``: top (and, for a raised stack, bottom) caps, textured
-        top-down; the side, with lattice facade UVs and the stack's tint.
+        ``(caps, side)``: the top cap, textured top-down; the side, with
+        lattice facade UVs and the stack's tint.
     """
     b = scene.models.buildings
     members = list(loft.members)
@@ -293,6 +394,11 @@ def _loftParts(
         float(b.roofOrthometric_m[i]) for i in members
     ]
     rings = [radii[0], *radii]
+    if b.minHeight_m[members[0]] > 0.0:
+        # No trunk mapped: stand the stack on one from the ground.
+        trunk = _LOFT_TRUNK * float(np.mean(radii[0])) * np.ones_like(theta)
+        profile = [float(b.baseOrthometric_m[members[0]]), *profile]
+        rings = [trunk, trunk, *radii]
     z: FloatArray = np.maximum.accumulate(np.array(profile)) + und
     frame = scene.geometry.frame
     levels, cols = len(z), theta.size
@@ -319,8 +425,6 @@ def _loftParts(
         colors=np.tile(np.asarray(colour, np.uint8), (pos.shape[0], 1)),
     )
     caps = [_loftCap(scene, rings[-1], z[-1], lon0, lat0, kx, ky, theta, extent, up=True)]
-    if b.minHeight_m[members[0]] > 0.0:
-        caps.append(_loftCap(scene, rings[0], z[0], lon0, lat0, kx, ky, theta, extent, up=False))
     return MeshPart.concatenate(caps), side
 
 

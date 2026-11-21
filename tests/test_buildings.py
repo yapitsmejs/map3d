@@ -510,3 +510,46 @@ def testLoad_slopeAnchorsAtMedianGroundAndRoofsClearTheHill(tmp_path: Path):
     assert buildings.baseOrthometric_m[i] == pytest.approx(np.nanmin(h), abs=0.3)  # wall bottoms
     assert buildings.roofOrthometric_m[i] >= np.nanmax(h) + 3.0 - 0.3  # clears the uphill ground
     assert buildings.anchorOrthometric_m[i] == pytest.approx(np.nanmedian(h), abs=0.5)
+
+
+def testFloatingParts_unmappedBaseReachesTheGroundButCanopiesAndBridgesDoNot(
+    plane: SyntheticScene, tmp_path: Path
+):
+    pack = _copyPack(plane, tmp_path)
+    box = lambda e0, n0, e1, n1: _enuBox(plane, e0, n0, e1, n1)  # noqa: E731
+    rows = [
+        # A tower from 45 m whose lower floors are not mapped at all.
+        {
+            "id": "tower",
+            "geometry": box(-380, 250, -350, 280),
+            "height_m": 99.0,
+            "minHeight_m": 45.0,
+        },
+        # A thin canopy on (unmapped) columns, and a 60 m x 6 m link bridge.
+        {
+            "id": "canopy",
+            "geometry": box(-330, 250, -300, 280),
+            "height_m": 6.0,
+            "minHeight_m": 4.5,
+        },
+        {
+            "id": "bridge",
+            "geometry": box(-300, 340, -240, 346),
+            "height_m": 30.0,
+            "minHeight_m": 20.0,
+        },
+        # A crown resting on its shaft.
+        {"id": "shaft", "geometry": box(-230, 250, -210, 270), "height_m": 120.0},
+        {
+            "id": "crown",
+            "geometry": box(-228, 252, -212, 268),
+            "height_m": 140.0,
+            "minHeight_m": 120.0,
+        },
+    ]
+    ingestFiles(pack, "overtureBuildings", [_write3d(tmp_path / "o.parquet", rows)])
+    buildings = _load(plane, _geometry(plane), pack)
+    minHeight = dict(zip(buildings.sourceFeatureIds, buildings.minHeight_m, strict=True))
+    assert minHeight["tower"] == 0.0
+    assert minHeight["canopy"] == 4.5 and minHeight["bridge"] == 20.0
+    assert minHeight["crown"] == 120.0

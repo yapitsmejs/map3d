@@ -255,12 +255,23 @@ and trees over them draw as objects, not as the surface.
     vegetation-like samples are rejected. Footprints under one source pixel or
     with fewer than two usable samples keep neutral colours. Walls receive a
     coordinated lighter, desaturated tint with deterministic per-feature variation.
-  - **Facade styles** (from mapped OSM `building:material`, via Overture
-    `facade_material`): a glass curtain wall (mullions, spandrels, a sky
-    reflection) for `glass`; plain panels for `metal` and for raised parts under
-    6 m tall (canopies, link bridges, with no storeys to show); punched windows
-    otherwise. Each style is its own wall primitive and repeating PNG in a
-    tile. A mapped `roof:material` (tiles, grass, metal, glass, concrete, ...)
+  - **Facade styles**, one repeating 96² tile per storey and bay, in two
+    variants each (chosen per building from its feature id): from the Overture
+    class, ribbon windows for offices, commercial and hotels (glass curtain
+    walls from 80 m), balconies or ledged windows for flats and all HDB
+    blocks, shop panes or blank mall walls for retail, stations and
+    entertainment, profiled cladding for industrial buildings and sports
+    halls, open decks or louvres for car parks, and tall shuttered windows for
+    civic and religious buildings up to 30 m and low tiled-roof buildings
+    (shophouses); unclassified towers of 120 m or more glass. Mapped
+    `facade_material` then sets glass or (metal) plain cladding. Structures
+    without storeys are plain: raised parts under 6 m tall (canopies, link
+    bridges), small round parts with no mapped storeys (columns, lone
+    Supertree trunks), observation wheels. Lofts use a steel lattice. Punched
+    windows remain the default. Each style and variant is its own wall
+    primitive and repeating PNG in a tile; walls with neither a mapped nor an
+    imagery colour take a stable tint from a palette of eight plausible
+    facade colours. A mapped `roof:material` (tiles, grass, metal, glass, concrete, ...)
     without a roof colour gives a typical roof colour, ahead of imagery. The
     tileset records `facadeStyles` counts.
   - **Curved walls and storeys:** each outline is walled as a chain; corners
@@ -324,7 +335,9 @@ and trees over them draw as objects, not as the surface.
       2.5 km² of crowns over 3.9 km² of canopy ≥ 2 m), found in ~4 s.
     - The grid layers are unchanged: they keep bare ground and canopy height.
   - **Buildings:** parent tiles keep buildings ≥ 10 m × 2^(levels above the
-    leaves − 1), so distant views keep the skyline.
+    leaves − 1), so distant views keep the skyline. A raised part counts by
+    its own extent (top − min height), so no distant view keeps a crown or
+    canopy while dropping the part beneath it.
   - **Decks:** in leaves and their parents.
   - **Geometric error:** max(terrain tolerance, omitted building height).
   - **Texture:** one 512² PNG per tile, projected top-down onto terrain, roofs
@@ -358,6 +371,24 @@ and trees over them draw as objects, not as the surface.
 Overture):**
 - **Parts:** where a building is mapped as `building_part`s, the parts replace
   its outline (`map3d prepare`). Parts carry their own heights and shapes.
+  Mappers often let the outline's own height describe the podium and map only
+  the tower above it (e.g. The Riverwalk: a 30 m outline, a 30–100 m part), so
+  an outline with its own height or floor count that its ground-level parts
+  cover less than 90 % stays as the base, capped at its lowest part (the
+  lowest raised part's `min_height`, or a ground-level part's top). Parts take
+  their building's Overture `class` (`buildingClass`).
+- **Unsupported raised parts:** a raised part with nothing reaching up to
+  within 2 m of its underside over 5 % of its footprint has unmapped lower
+  levels; if it is at least 6 m thick and not a narrow bridge (over 4x as long
+  as wide and under 15 m wide), it is taken down to the ground. Thin canopies,
+  link bridges, lofts and wheels stay raised.
+- **Observation wheels** (`map3d.layers.wheels`): a wheel such as the Singapore
+  Flyer is mapped as a row of small parts each spanning the wheel's height at
+  its position. Six or more such spans (under 150 m², at least 20 m tall,
+  linked within 25 m) on a straight line whose ends fit one circle (RMS misfit
+  under 6 % of the radius) are drawn as a wheel: rim, 28 spokes, hub, 28
+  capsules and an A-frame of legs (the rim is fitted; spokes, capsules and
+  legs are illustrative). The grid keeps the spans.
 - **Raised parts:** `min_height` (else `min_floor` × storey height) lifts a
   part's underside above its base; it is ignored unless at least 1 m below
   the top. Raised parts take no part in ground correction.
@@ -407,9 +438,11 @@ parts (a trunk, then rings that widen with height). A cluster of round parts
 (isoperimetric quotient ≥ 0.85) sharing a centre (within 2 m) whose chain by
 top height has gaps of at most 6 m, never narrows and ends at least 20 % wider
 than it starts is drawn as one loft: a smooth surface through the parts'
-outlines (36 rays from the centre), capped on top (and below, if raised).
-Parts thinner than 1 m (planters) stay separate; other cluster parts are
-absorbed into the loft. Narrowing stacks (set-back towers) keep their steps.
+outlines (36 rays from the centre), capped on top; a raised stack with no
+trunk mapped stands on a trunk from the ground (0.4 of its lowest ring's
+radius). Gaps up to 10 m are bridged; a wider base under the trunk (a planter)
+stays separate, as do parts thinner than 1 m; other cluster parts are absorbed
+into the loft. Narrowing stacks (set-back towers) keep their steps.
 Grid layers are unchanged. Marina Bay: 12 lofts, 10 of them Supertrees.
 
 **Attributes of dropped duplicates:** when fusion drops a feature as a
