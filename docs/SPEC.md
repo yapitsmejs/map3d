@@ -193,9 +193,12 @@ and trees over them draw as objects, not as the surface.
 
 - **Land cover:** sampled nearest-pixel at the node footprint. Impact
   Observatory codes are remapped to WorldCover codes.
-- **Ground roads/rails:** drawn with their width (defaults shared with deck
-  footprints: road 8 m, rail 8 m), cell centres only, so the corridor class,
-  the canopy carve and the deck buffers agree on where a road is.
+- **Roads/rails (including bridges):** every road/rail corridor burns its
+  class with its width (defaults shared with deck footprints: road 8 m, rail
+  8 m), cell centres only, so the corridor class, the canopy carve and the
+  deck buffers agree on where a road is. Bridges burn as the roads they
+  carry, so a viaduct's slab top paints road grey; footways leave the land
+  cover alone and tunnels are not surface roads.
 - **Canopy:** a raster (metres above ground) is cell-max pooled; tree points
   become crown discs of radius max(2 m, 0.25 × height). `surfaceHeight` takes
   ground + canopy where that is the highest candidate (provenance `CANOPY`).

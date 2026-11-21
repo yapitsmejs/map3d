@@ -118,34 +118,39 @@ class LandCoverModel:
         for sourceId in sourcesForRole("transport"):
             if sourceId not in pack.manifest.sources:
                 continue
-            selection = pack.readVectors(sourceId, bounds, columns=["kind", "isBridge", "width_m"])
+            selection = pack.readVectors(
+                sourceId, bounds, columns=["kind", "isBridge", "level", "width_m"]
+            )
             table = selection.table
-            # Footways (park paths, pavements) leave the underlying land cover alone.
-            ground = np.array(
+            # Every road/rail corridor burns its class - bridges included, so a
+            # viaduct's slab top paints as the road it carries. Footways (park
+            # paths, pavements) leave the underlying land cover alone, and
+            # tunnels are not surface roads.
+            burn = np.array(
                 [
-                    not bool(bridge) and kind != "footway"
-                    for bridge, kind in zip(
-                        table.column("isBridge").to_pylist(),
+                    kind != "footway" and level is not None and int(level) >= 0
+                    for kind, level in zip(
                         table.column("kind").to_pylist(),
+                        table.column("level").to_pylist(),
                         strict=True,
                     )
                 ],
                 dtype=bool,
             )
-            if not ground.any():
+            if not burn.any():
                 continue
-            kinds = np.array(table.column("kind").to_pylist(), dtype=object)[ground]
+            kinds = np.array(table.column("kind").to_pylist(), dtype=object)[burn]
             widths = np.array(
                 [
                     DEFAULT_WIDTH_m.get(str(k), DEFAULT_WIDTH_m["road"]) if w is None else float(w)
                     for k, w in zip(
                         kinds,
-                        np.array(table.column("width_m").to_pylist(), dtype=object)[ground],
+                        np.array(table.column("width_m").to_pylist(), dtype=object)[burn],
                         strict=True,
                     )
                 ]
             )
-            lines = toPixelGeometries(selection.geometries[ground], 0.0, geometry)
+            lines = toPixelGeometries(selection.geometries[burn], 0.0, geometry)
             shapes.extend(
                 # round caps: a node just past a dead-end still burns as road
                 shapely.buffer(lines, 0.5 * widths / geometry.gridSpacing_m, cap_style="round")

@@ -264,7 +264,8 @@ def testDeck_setsSurfaceClassFeatureAndLevels(built: Scene, plane: SyntheticScen
     assert built.layers["surfaceHeight_datum_m"][r, c] == pytest.approx(top, abs=1e-4)
     assert built.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED
     assert built.layers["featureId"][r, c] == 4
-    assert built.layers["landClass"][r, c] == 220
+    # bridges burn as the roads they carry: the corridor wins over the deck
+    assert built.layers["landClass"][r, c] == 210
     assert built.layers["nativeResolution_m"][r, c] == 0.0
     _, _, uRef = built.geometry.frame.columnPointAtHeight(
         built.geometry.nodesEnu()[0][r, c], built.geometry.nodesEnu()[1][r, c], float(top) + 8.0
@@ -440,5 +441,5 @@ def testDeck_classDefersToRoadCorridors(plane: SyntheticScene, tmp_path: Path):
     r, c = _rc(scene, 0.0, 0.0)  # the crossing: ground road under the bridge
     assert scene.layers["landClass"][r, c] == 210  # the corridor keeps its class
     assert scene.layers["heightSource"][r, c] == HeightSource.DECK_ESTIMATED  # surface = deck
-    r2, c2 = _rc(scene, 0.0, 200.0)  # on the bridge, off the ground road: deck
-    assert scene.layers["landClass"][r2, c2] == 220
+    r2, c2 = _rc(scene, 0.0, 200.0)  # on the bridge, off the ground road
+    assert scene.layers["landClass"][r2, c2] == 210  # the bridge's own corridor

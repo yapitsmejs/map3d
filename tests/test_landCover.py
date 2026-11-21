@@ -51,7 +51,7 @@ def testClasses_landCoverAndGroundRoads(plane: SyntheticScene):
     assert _at(geom, classes, -350.0, -350.0) == 10  # tree patch
     assert _at(geom, classes, 100.0, -450.0) == lc.CLASS_ROAD  # 8 m wide ground road
     assert _at(geom, classes, 100.0, -460.0) == 30  # 10 m off its centerline
-    assert _at(geom, classes, 0.0, 200.0) == 30  # the bridge is not a ground road
+    assert _at(geom, classes, 0.0, 200.0) == lc.CLASS_ROAD  # bridges burn as the roads they carry
 
 
 def testClasses_rotatedGridChunkedEqualsWhole(plane: SyntheticScene):

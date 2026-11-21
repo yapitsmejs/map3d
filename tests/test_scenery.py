@@ -132,7 +132,7 @@ def _decodePng(data: bytes) -> np.ndarray:
         (-160.0, -100.0, "roof"),
         (-350.0, -350.0, "underTrees"),  # canopy patch: the ground under the crowns
         (0.0, -450.0, "road"),  # ground-level road (centre line)
-        (0.0, 200.0, "deck"),  # bridge deck
+        (0.0, 200.0, "road"),  # bridges burn as the roads they carry
     ],
 )
 def testTexture_conceptualColours(scene: Scene, e: float, n: float, name: str):
