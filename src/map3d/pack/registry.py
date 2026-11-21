@@ -120,6 +120,9 @@ ROLES: dict[str, RoleSpec] = {
         # flyover/bridge/viaduct footprints (location only; no deck heights)
         RoleSpec("elevatedStructures", "vector", False, ("sourceFeatureId", "structureType")),
         RoleSpec("imagery", "raster", False),  # RGB imagery for the mesh drape
+        # crisp land-cover polygons (water, parks, ...) with a WorldCover class code,
+        # drawn over the land-cover raster
+        RoleSpec("landCoverPolygons", "vector", False, ("sourceFeatureId", "landClass")),
     )
 }
 
@@ -266,6 +269,16 @@ _SOURCE_LIST: tuple[SourceSpec, ...] = (
         10.0,
     ),
     _synthetic("syntheticLandCover", "landCover", "raster", "land cover", 5.0),
+    # --- land-cover polygons (priority order: drawn last wins) ---
+    SourceSpec(
+        "overtureWater",
+        "landCoverPolygons",
+        "vector",
+        "Overture Maps base water (oceans, reservoirs, rivers, ponds, pools)",
+        "ODbL 1.0",
+        "© Overture Maps Foundation, ODbL (OpenStreetMap contributors)",
+        0.0,
+    ),
     # --- transport ---
     SourceSpec(
         "overtureTransportation",

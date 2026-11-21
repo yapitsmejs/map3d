@@ -326,3 +326,36 @@ def testRaisedPart_hasAnUndersideAndWallsFromItsMinHeight(shaped: Scene):
     nz = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])[:, 2]
     assert (nz > 0).sum() == (nz < 0).sum() == 2  # a roof and an underside
     assert p[nz < 0][..., 2].max() == pytest.approx(bottom, abs=0.02)
+
+
+def testTexture_mappedWaterIsCrispAndUnmappedRasterWaterIsNot(
+    plane: SyntheticScene, tmp_path_factory: pytest.TempPathFactory
+):
+    tmp = tmp_path_factory.mktemp("water")
+    pack = tmp / "water.pack"
+    shutil.copytree(plane.packDir, pack)
+    e, n = shapely.get_coordinates(shapely.Point(100.0, 100.0).buffer(30.0).exterior).T
+    lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+    writeGeoParquet(
+        tmp / "w.parquet",
+        np.array([shapely.Polygon(np.column_stack([lon, lat]))], dtype=object),
+        {"sourceFeatureId": ["pond"], "landClass": [80]},
+    )
+    ingestFiles(pack, "overtureWater", [tmp / "w.parquet"])
+    centre = (plane.frame.lat0_deg, plane.frame.lon0_deg)
+    scene = buildScene(SceneRequest(centre, 5.0, np.eye(3), 1000.0, 1000.0), pack)
+    size = 500  # 2 m pixels
+    rgb = decodePng(
+        scenery.renderTexture(scene, FULL, BuildingAppearance.neutral(scene.models.buildings), size)
+    )
+
+    def pixel(e_m: float, n_m: float) -> np.ndarray:
+        gx, gy = scene.geometry.enuToGrid(np.array(e_m), np.array(n_m))
+        return rgb[int((FULL.y1 - gy) / 1000.0 * size), int((gx - FULL.x0) / 1000.0 * size)]
+
+    water, grass = scenery.CONCEPT_COLORS["water"], scenery.CONCEPT_COLORS["grass"]
+    np.testing.assert_array_equal(pixel(100.0, 100.0), water)
+    np.testing.assert_array_equal(pixel(100.0, 128.0), water)  # 2 m inside the edge
+    np.testing.assert_array_equal(pixel(100.0, 133.0), grass)  # 3 m outside: no blur
+    assert not np.array_equal(pixel(0.0, 450.0), water)  # raster water without a polygon
+    assert "overtureWater" in {s["sourceId"] for s in scene.metadata["sources"]}  # attributed

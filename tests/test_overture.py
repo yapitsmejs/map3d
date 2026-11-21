@@ -103,6 +103,29 @@ def release(tmp_path: Path) -> str:
             }
         ],
     )
+    _write(
+        base / "theme=base" / "type=water" / "part-0.parquet",
+        [
+            {
+                "id": "w-bay",
+                "subtype": "ocean",
+                "class": "ocean",
+                "geometry": shapely.box(103.83, 1.27, 103.85, 1.29),  # crosses the box edge
+            },
+            {
+                "id": "w-pool",
+                "subtype": "human_made",
+                "class": "swimming_pool",
+                "geometry": shapely.box(103.81, 1.30, 103.8101, 1.3001),
+            },
+            {
+                "id": "w-stream",
+                "subtype": "stream",
+                "class": "stream",
+                "geometry": shapely.LineString([(103.81, 1.31), (103.82, 1.31)]),
+            },
+        ],
+    )
     line = shapely.LineString([(103.81, 1.30), (103.83, 1.30)])
     flags = lambda values, between=None: [{"values": values, "between": between}]  # noqa: E731
     _write(
@@ -246,3 +269,14 @@ def testS3FileSystem_passesCaBundle(tmp_path: Path):
     fs = overture.s3FileSystem(bundle)
     assert isinstance(fs, pafs.S3FileSystem)
     assert isinstance(overture.s3FileSystem(None), pafs.S3FileSystem)
+
+
+def testWater_polygonsClippedToTheBoxLinesDropped(tmp_path: Path, release: str):
+    out = overture.fetchOvertureWater(
+        pafs.LocalFileSystem(), release, BOUNDS, tmp_path / "w.parquet"
+    )
+    table, geoms = readGeoParquet(out)
+    assert table.column("sourceFeatureId").to_pylist() == ["w-bay", "w-pool"]
+    assert table.column("landClass").to_pylist() == [80, 80]
+    x0, y0, x1, y1 = shapely.total_bounds(geoms)
+    assert (x0, y0) == pytest.approx((103.81, 1.28)) and (x1, y1) == pytest.approx((103.84, 1.3001))

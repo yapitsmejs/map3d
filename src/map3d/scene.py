@@ -531,7 +531,7 @@ def _usedSources(pack: Pack) -> list[SourceEntry]:
         entry = pack.primarySource(role)
         if entry is not None:
             used.append(entry)
-    for role in ("buildings", "transport", "elevatedStructures"):
+    for role in ("buildings", "transport", "elevatedStructures", "landCoverPolygons"):
         used += [pack.manifest.sources[s] for s in pack.sourcesFor(role)]
     return used
 

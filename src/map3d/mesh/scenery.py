@@ -28,6 +28,7 @@ import numpy as np
 import numpy.typing as npt
 import pyproj
 import shapely
+from rasterio.transform import Affine
 
 from map3d.layers.decks import DECK_THICKNESS_m, deckTopAboveGround_m
 from map3d.layers.landCover import (
@@ -35,8 +36,8 @@ from map3d.layers.landCover import (
     CLASS_DECK,
     CLASS_RAIL,
     CLASS_ROAD,
-    remapClasses,
 )
+from map3d.layers.pixels import rasterizeAffine
 from map3d.layers.roofs import Roof
 from map3d.mesh.buildingAppearance import NEUTRAL_ROOF, BuildingAppearance, facadeUv
 from map3d.mesh.gltf import MeshPart, encodePng
@@ -458,6 +459,7 @@ def renderTexture(
 
     - **Land cover:** the source raster's classes coloured and sampled
       bilinearly, so its coarse pixels blend softly (grid classes if absent).
+      Land-cover polygons (mapped water, ...) are drawn crisply over it.
     - **Crisp overlays** from the grid's ``landClass`` layer: roads, rail, decks
       and building roofs.
     - **Under trees:** a soft green wherever the canopy is at least
@@ -501,7 +503,7 @@ def _softLandCover(scene: Scene, lat: FloatArray, lon: FloatArray) -> FloatArray
         return rgb
     landLut = _styleLut(_LAND_COVER_STYLE)
     valid = np.isfinite(window.values)
-    codes = remapClasses(np.where(valid, window.values, 0).astype(np.int64), window.sourceId)
+    codes = scene.models.landCover.rasterClasses(np.where(valid, window.values, 0))
     for k in range(3):
         band = RasterWindow(
             np.where(valid, landLut[codes, k], np.nan),
@@ -533,6 +535,8 @@ def _conceptTexture(
     # Land cover is soft anyway: sample it at the texture resolution, then repeat.
     soft = np.repeat(np.repeat(_softLandCover(scene, lat, lon), k, axis=0), k, axis=1)
     rgb = np.where(np.isfinite(soft), soft, _styleLut(_LAND_COVER_STYLE)[classes])
+    cover = _coverClasses(scene, extent, size * k)
+    rgb[cover > 0] = _styleLut(_LAND_COVER_STYLE)[cover[cover > 0]]
     overlay = np.isin(classes, list(_OVERLAY_STYLE))
     rgb[overlay] = _styleLut(_OVERLAY_STYLE)[classes[overlay]]
     featureIds = np.asarray(scene.layers["featureId"])[row, col]
@@ -547,6 +551,33 @@ def _conceptTexture(
     averaged = rgb.reshape(size, k, size, k, 3).mean(axis=(1, 3))
     out: npt.NDArray[np.uint8] = np.clip(np.round(averaged), 0, 255).astype(np.uint8)
     return out
+
+
+def _coverClasses(scene: Scene, extent: TileExtent, n: int) -> npt.NDArray[np.uint8]:
+    """Land-cover polygon classes burned at ``n x n`` texture samples (0 = none)."""
+    landCover = scene.models.landCover
+    shapes = landCover.coverShapes
+    if shapes.size == 0:
+        return np.zeros((n, n), dtype=np.uint8)
+    geometry = scene.geometry
+    col, row = geometry.gridToPixel(
+        np.array([extent.x0, extent.x1, extent.x0]), np.array([extent.y1, extent.y1, extent.y0])
+    )
+    # Texture (column, row) -> grid pixel space; texture row 0 is the far +y edge.
+    transform = Affine(
+        (col[1] - col[0]) / n,
+        (col[2] - col[0]) / n,
+        col[0],
+        (row[1] - row[0]) / n,
+        (row[2] - row[0]) / n,
+        row[0],
+    )
+    box = shapely.box(min(col), min(row), max(col), max(row))
+    hit = np.flatnonzero(shapely.intersects(shapes, box))
+    if hit.size == 0:
+        return np.zeros((n, n), dtype=np.uint8)
+    pairs = zip(shapes[hit], landCover.coverClasses[hit].tolist(), strict=True)
+    return rasterizeAffine(pairs, (n, n), transform, allTouched=False, dtype="uint8")
 
 
 @functools.cache

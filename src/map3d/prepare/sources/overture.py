@@ -10,6 +10,8 @@ row-group statistics, and writes the canonical pack schemas:
   Buildings tags). Where a building is mapped as **building parts**
   (``building_part`` rows), the parts replace its outline, as Simple 3D
   Buildings renderers do. Underground buildings and parts are excluded.
+- **water:** polygonal water (ocean, reservoirs, rivers, ponds, pools) clipped
+  to the box, as land-cover polygons of class water (``landClass`` 80).
 - **transport:** ``sourceFeatureId``, ``kind`` (road/rail/footway), ``isBridge``,
   ``level``, ``width_m``. Overture's linear-referenced rules (``between``
   fractions along the segment) are honoured by splitting segments at rule
@@ -20,6 +22,7 @@ row-group statistics, and writes the canonical pack schemas:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +40,7 @@ __all__ = [
     "BUCKET",
     "fetchOvertureBuildings",
     "fetchOvertureTransport",
+    "fetchOvertureWater",
     "latestRelease",
     "s3FileSystem",
 ]
@@ -143,6 +147,73 @@ def _readBuildingType(
         else:
             out[name] = table.column(name).to_pylist()
     return out
+
+
+def fetchOvertureWater(
+    fs: pafs.FileSystem, releaseBase: str, bounds: Bounds, outPath: Path
+) -> Path:
+    """Extract polygonal water intersecting ``bounds`` as land-cover polygons.
+
+    Args:
+        fs: Filesystem holding the release.
+        releaseBase: ``<bucket>/release/<version>``.
+        bounds: ``(minLon, minLat, maxLon, maxLat)``.
+        outPath: Output GeoParquet path.
+
+    Returns:
+        ``outPath``.
+    """
+    return _fetchCoverPolygons(
+        fs,
+        f"{releaseBase}/theme=base/type=water",
+        bounds,
+        outPath,
+        lambda subtype, cls: WATER_CLASS,
+    )
+
+
+WATER_CLASS = 80  # WorldCover "permanent water bodies"
+
+
+def _fetchCoverPolygons(
+    fs: pafs.FileSystem,
+    path: str,
+    bounds: Bounds,
+    outPath: Path,
+    classify: Callable[[str | None, str | None], int | None],
+) -> Path:
+    """Polygons of an Overture base type, clipped to ``bounds``, with a land class each.
+
+    ``classify(subtype, class)`` returns a WorldCover code, or ``None`` to skip.
+    """
+    dataset = ds.dataset(path, filesystem=fs, format="parquet")
+    table = dataset.to_table(
+        columns=["id", "subtype", "class", "geometry"], filter=_bboxFilter(bounds)
+    )
+    geoms = shapely.from_wkb(table.column("geometry").to_numpy(zero_copy_only=False))
+    box = shapely.box(*bounds)
+    codes = [
+        classify(s, c)
+        for s, c in zip(
+            table.column("subtype").to_pylist(), table.column("class").to_pylist(), strict=True
+        )
+    ]
+    polygonal = np.isin(shapely.get_type_id(geoms), (3, 6, 7))  # (multi)polygons, collections
+    keep = polygonal & np.array([c is not None for c in codes], dtype=bool)
+    keep &= shapely.intersects(geoms, box)
+    idx = np.flatnonzero(keep)
+    clipped = shapely.intersection(shapely.make_valid(geoms[idx]), box)
+    # Clipping can leave lines or collections: keep the polygon parts.
+    parts, owner = shapely.get_parts(clipped, return_index=True)
+    poly = (shapely.get_type_id(parts) == 3) & (shapely.area(parts) > 0)
+    parts, src = parts[poly], idx[owner[poly]]
+    ids = table.column("id").to_pylist()
+    writeGeoParquet(
+        outPath,
+        np.asarray(parts, dtype=object),
+        {"sourceFeatureId": [ids[i] for i in src], "landClass": [int(codes[i]) for i in src]},
+    )
+    return outPath
 
 
 def fetchOvertureTransport(

@@ -164,3 +164,33 @@ def testClasses_segmentEndsBurnWithRoundCaps(plane: SyntheticScene, tmp_path: Pa
     classes = _classes(pack, geom)
     # the node whose centre projects ~1 m past the segment's east end
     assert _at(geom, classes, 101.0, -1.0) == lc.CLASS_ROAD
+
+
+def _waterPack(plane: SyntheticScene, tmp_path: Path) -> Path:
+    """The plane pack plus one mapped pond: a 60 m disc at (100, 100) in the grass."""
+    import shapely
+
+    from map3d.pack.geoparquet import writeGeoParquet
+
+    pack = tmp_path / "water.pack"
+    shutil.copytree(plane.packDir, pack)
+    e, n = shapely.get_coordinates(shapely.Point(100.0, 100.0).buffer(30.0).exterior).T
+    lat, lon, _ = plane.frame.columnPointAtHeight(e, n, 0.0)
+    writeGeoParquet(
+        tmp_path / "w.parquet",
+        np.array([shapely.Polygon(np.column_stack([lon, lat]))], dtype=object),
+        {"sourceFeatureId": ["pond"], "landClass": [80]},
+    )
+    ingestFiles(pack, "overtureWater", [tmp_path / "w.parquet"])
+    return pack
+
+
+def testCoverPolygons_burnCrispAndReplaceUnmappedRasterWater(plane: SyntheticScene, tmp_path: Path):
+    geom = _geometry(plane)
+    classes = _classes(_waterPack(plane, tmp_path), geom)
+    assert _at(geom, classes, 100.0, 100.0) == 80  # inside the pond
+    assert _at(geom, classes, 100.0, 127.0) == 80  # 3 m inside its edge
+    assert _at(geom, classes, 100.0, 133.0) == 30  # 3 m outside: grass
+    # Mapped water is complete: raster water with no polygon is the raster's edge.
+    assert _at(geom, classes, 0.0, 450.0) == 50
+    assert _at(geom, classes, 100.0, -450.0) == lc.CLASS_ROAD  # roads still on top
