@@ -386,7 +386,7 @@ def _icosphere(subdivisions: int = 1) -> MeshPart:
             cache[key] = len(points) - 1
         return cache[key]
 
-    fine = list(faces)
+    fine = [(a, b, c) for a, b, c in faces]
     for _ in range(subdivisions):
         fine = [
             tri

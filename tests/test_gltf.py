@@ -163,9 +163,7 @@ def testWriteGlb_instancedPartsUseGpuInstancing(tmp_path: Path):
     np.testing.assert_allclose(read(ext["TRANSLATION"]), [[10, 5, -20], [-3, 1, -4]])  # y-up
     np.testing.assert_allclose(read(ext["SCALE"]), [[2, 3, 2], [1, 1.5, 1]])
     # ENU yaw (x, y, z, w) -> glTF yaw about +y: (x, z, -y, w).
-    np.testing.assert_allclose(
-        read(ext["ROTATION"]), [[0, 0, 0, 1], [0, 0.6, 0, 0.8]], atol=1e-6
-    )
+    np.testing.assert_allclose(read(ext["ROTATION"]), [[0, 0, 0, 1], [0, 0.6, 0, 0.8]], atol=1e-6)
     prim = gltf.meshes[node.mesh].primitives[0]
     assert prim.attributes.NORMAL is not None
     mat = gltf.materials[prim.material]
