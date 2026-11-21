@@ -30,13 +30,6 @@ def neutral(scene: Scene) -> BuildingAppearance:
 FULL = scenery.TileExtent(-500.0, 500.0, -500.0, 500.0)  # the whole 1 km swath
 
 
-def testGridEnuRoundTrip(scene: Scene):
-    gx, gy = np.array([10.0, -200.0]), np.array([30.0, 400.0])
-    e, n = scenery.gridToEnu(scene.geometry, gx, gy)
-    bx, by = scenery.enuToGrid(scene.geometry, e, n)
-    np.testing.assert_allclose([bx, by], [gx, gy], atol=1e-9)
-
-
 def testTerrain_verticesSitOnGroundColumns(scene: Scene, plane: SyntheticScene):
     part = scenery.terrainPart(scene, FULL, gridSize=33, maxError_m=0.0)
     e, n, u = part.positions_ENU_m.T
@@ -127,7 +120,7 @@ def testTexture_conceptualColours(
     size = 500  # 2 m pixels
     rgb = decodePng(scenery.renderTexture(scene, extent, neutral, size=size))
     assert rgb.shape == (size, size, 3)
-    gx, gy = scenery.enuToGrid(scene.geometry, np.array(e), np.array(n))
+    gx, gy = scene.geometry.enuToGrid(np.array(e), np.array(n))
     col = int((gx - extent.x0) / (extent.x1 - extent.x0) * size)
     row = int((extent.y1 - gy) / (extent.y1 - extent.y0) * size)
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS[name])
@@ -137,7 +130,7 @@ def testTexture_imageryDerivedBuildingRoofColour(scene: Scene):
     appearance = BuildingAppearance.neutral(scene.models.buildings)
     appearance.roofColors[0] = [160, 100, 80]
     rgb = decodePng(scenery.renderTexture(scene, FULL, appearance, size=500))
-    gx, gy = scenery.enuToGrid(scene.geometry, np.array(-160.0), np.array(-100.0))
+    gx, gy = scene.geometry.enuToGrid(np.array(-160.0), np.array(-100.0))
     np.testing.assert_array_equal(rgb[int(500 - gy) // 2, int(gx + 500) // 2], [160, 100, 80])
 
 
@@ -164,7 +157,7 @@ def testTexture_conceptualWithoutLandCoverUsesGridClasses(
     )
     bare = dataclasses.replace(scene, models=models)
     rgb = decodePng(scenery.renderTexture(bare, FULL, neutral, size=100))
-    gx, gy = scenery.enuToGrid(scene.geometry, np.array(100.0), np.array(-390.0))
+    gx, gy = scene.geometry.enuToGrid(np.array(100.0), np.array(-390.0))
     col, row = int((gx + 500) / 10), int((500 - gy) / 10)
     np.testing.assert_array_equal(rgb[row, col], scenery.CONCEPT_COLORS["grass"])
 
@@ -212,7 +205,7 @@ def testDecks_slabClippedToTileKeepsUVsInRange(scene: Scene):
     assert (v >= -1e-6).all() and (v <= 1 + 1e-6).all()
     # tile extents are in grid metres (this scene is rotated 20 degrees)
     e, n, _ = tops.positions_ENU_m.T
-    gx, gy = scenery.enuToGrid(scene.geometry, e, n)
+    gx, gy = scene.geometry.enuToGrid(e, n)
     assert (gx >= extent.x0 - 1e-6).all() and (gx <= extent.x1 + 1e-6).all()
     assert (gy >= extent.y0 - 1e-6).all() and (gy <= extent.y1 + 1e-6).all()
 

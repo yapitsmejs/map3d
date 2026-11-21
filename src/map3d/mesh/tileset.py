@@ -37,6 +37,7 @@ from map3d.mesh.scenery import (
     TileExtent,
     buildingParts,
     deckParts,
+    extentBoxPx,
     renderTexture,
     terrainPart,
 )
@@ -196,7 +197,9 @@ def _writeTile(
     )
     # Decks are drawn in every tile they intersect, clipped to it (see deckParts).
     selD = (
-        _decksIntersecting(scene, ix, iy, n, sx, sy, r)
+        np.flatnonzero(
+            shapely.intersects(scene.models.decks.pixelShapes, extentBoxPx(scene, extent))
+        )
         if level >= depth - 1 and len(scene.models.decks)
         else np.array([], dtype=np.int64)
     )
@@ -271,23 +274,6 @@ def _treesInTile(
     return np.flatnonzero(inTile)
 
 
-def _decksIntersecting(
-    scene: Scene, ix: int, iy: int, n: int, sx: float, sy: float, r: TileExtent
-) -> npt.NDArray[np.int64]:
-    """Indices of decks whose footprint intersects a tile (pixel coords)."""
-    g = scene.geometry
-    s = g.gridSpacing_m
-    x0, y0 = r.x0 + ix * sx, r.y0 + iy * sy
-    box = shapely.box(
-        (x0 + 0.5 * g.nCols * s) / s,
-        (y0 + 0.5 * g.nRows * s) / s,
-        (x0 + sx + 0.5 * g.nCols * s) / s,
-        (y0 + sy + 0.5 * g.nRows * s) / s,
-    )
-    hits = shapely.intersects(scene.models.decks.pixelShapes, box)
-    return np.flatnonzero(hits)
-
-
 def _inTile(
     xy: FloatArray, r: TileExtent, sx: float, sy: float, ix: int, iy: int, n: int
 ) -> npt.NDArray[np.bool_]:
@@ -303,10 +289,7 @@ def _centroidsGrid(scene: Scene, pixelGeoms: npt.NDArray[np.object_]) -> FloatAr
     if pixelGeoms.size == 0:
         return np.zeros((0, 2))
     c = shapely.centroid(pixelGeoms)
-    s = scene.geometry.gridSpacing_m
-    gx = shapely.get_x(c) * s - 0.5 * scene.geometry.nCols * s
-    gy = shapely.get_y(c) * s - 0.5 * scene.geometry.nRows * s
-    return np.column_stack([gx, gy])
+    return np.column_stack(scene.geometry.pixelToGrid(shapely.get_x(c), shapely.get_y(c)))
 
 
 def _box(lo: FloatArray, hi: FloatArray) -> list[float]:

@@ -146,6 +146,24 @@ class GridGeometry:
         s = self.gridSpacing_m
         return (gx_m + 0.5 * self.nCols * s) / s, (gy_m + 0.5 * self.nRows * s) / s
 
+    def nodeIndex(
+        self, gx_m: FloatArray, gy_m: FloatArray
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """Index ``(col, row)`` of the node whose cell holds each point, clipped to the grid.
+
+        Args:
+            gx_m: Grid x, in meters.
+            gy_m: Grid y, in meters.
+
+        Returns:
+            ``(col, row)`` integer node indices.
+        """
+        col, row = self.gridToPixel(gx_m, gy_m)
+        return (
+            np.clip(np.asarray(col).astype(np.int64), 0, self.nCols - 1),
+            np.clip(np.asarray(row).astype(np.int64), 0, self.nRows - 1),
+        )
+
     def pixelToGrid(self, col: FloatArray, row: FloatArray) -> tuple[FloatArray, FloatArray]:
         """Pixel ``(col, row)`` to grid-frame coordinates (inverse of :meth:`gridToPixel`).
 

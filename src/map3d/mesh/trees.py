@@ -130,13 +130,12 @@ class TreeSet:
         ground = scene.models.ground
         hEll = ground.orthometricAt(lat, lon) + ground.undulation_m(lat, lon)
         e, n, u = g.frame.geodeticToEnu(lat, lon, hEll)
-        a = g.gridAxes_ENU
-        gx, gy = e * a[0, 0] + n * a[0, 1], e * a[1, 0] + n * a[1, 1]
+        gx, gy = g.enuToGrid(e, n)
         s = g.gridSpacing_m
-        halfW, halfH = 0.5 * g.nCols * s, 0.5 * g.nRows * s
-        keep = np.isfinite(u) & (np.abs(gx) <= halfW) & (np.abs(gy) <= halfH)
-        col = np.clip(((gx + halfW) / s).astype(np.int64), 0, g.nCols - 1)
-        row = np.clip(((gy + halfH) / s).astype(np.int64), 0, g.nRows - 1)
+        keep = (
+            np.isfinite(u) & (np.abs(gx) <= 0.5 * g.nCols * s) & (np.abs(gy) <= 0.5 * g.nRows * s)
+        )
+        col, row = g.nodeIndex(gx, gy)
         classes = np.asarray(scene.layers["landClass"])[row, col]
         keep &= ~np.isin(classes, [CLASS_BUILDING, CLASS_DECK, CLASS_ROAD, CLASS_RAIL])
         return cls(
@@ -215,11 +214,7 @@ def _treesFromSources(scene: Scene) -> tuple[FloatArray, FloatArray, FloatArray,
     pLat = pLon = pH = np.zeros(0)
     if canopy.treeDiscs.size:
         centres = shapely.centroid(canopy.treeDiscs)
-        s = g.gridSpacing_m
-        gx = shapely.get_x(centres) * s - 0.5 * g.nCols * s
-        gy = shapely.get_y(centres) * s - 0.5 * g.nRows * s
-        a = g.gridAxes_ENU
-        e, n = gx * a[0, 0] + gy * a[1, 0], gx * a[0, 1] + gy * a[1, 1]
+        e, n = g.gridToEnu(*g.pixelToGrid(shapely.get_x(centres), shapely.get_y(centres)))
         pLat, pLon, _ = g.frame.columnPointAtHeight(e, n, 0.0)
         pH = np.asarray(canopy.treeHeights_m, dtype=np.float64)
     if canopy.window is None:

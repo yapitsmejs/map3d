@@ -24,7 +24,6 @@ import numpy.typing as npt
 import pyproj
 import shapely
 
-from map3d.gridGeometry import GridGeometry
 from map3d.layers.decks import DECK_THICKNESS_m, deckTopAboveGround_m
 from map3d.layers.landCover import (
     CLASS_BUILDING,
@@ -49,8 +48,6 @@ __all__ = [
     "TileExtent",
     "buildingParts",
     "deckParts",
-    "enuToGrid",
-    "gridToEnu",
     "renderTexture",
     "terrainPart",
 ]
@@ -118,29 +115,6 @@ class TileExtent:
         return np.column_stack([u, v]).astype(np.float32)
 
 
-def gridToEnu(
-    geometry: GridGeometry, gx: FloatArray, gy: FloatArray
-) -> tuple[FloatArray, FloatArray]:
-    """Grid-frame horizontal coordinates -> ENU east/north."""
-    a = geometry.gridAxes_ENU
-    return gx * a[0, 0] + gy * a[1, 0], gx * a[0, 1] + gy * a[1, 1]
-
-
-def enuToGrid(
-    geometry: GridGeometry, e: FloatArray, n: FloatArray
-) -> tuple[FloatArray, FloatArray]:
-    """ENU east/north -> grid-frame horizontal coordinates."""
-    a = geometry.gridAxes_ENU
-    return e * a[0, 0] + n * a[0, 1], e * a[1, 0] + n * a[1, 1]
-
-
-def _pixelToGrid(
-    geometry: GridGeometry, col: FloatArray, row: FloatArray
-) -> tuple[FloatArray, FloatArray]:
-    s = geometry.gridSpacing_m
-    return col * s - 0.5 * geometry.nCols * s, row * s - 0.5 * geometry.nRows * s
-
-
 def _upward(
     positions: FloatArray, tris: npt.NDArray[np.uint32], up: bool = True
 ) -> npt.NDArray[np.uint32]:
@@ -188,7 +162,7 @@ def terrainPart(
     gx = np.linspace(extent.x0, extent.x1, size)
     gy = np.linspace(extent.y0, extent.y1, size)
     gxm, gym = np.meshgrid(gx, gy)
-    e, n = gridToEnu(scene.geometry, gxm, gym)
+    e, n = scene.geometry.gridToEnu(gxm, gym)
     lat, lon, _ = scene.geometry.frame.columnPointAtHeight(e, n, 0.0)
     ground = scene.models.ground
     height = np.nan_to_num(ground.orthometricAt(lat, lon), nan=0.0) + ground.undulation_m(lat, lon)
@@ -236,7 +210,7 @@ def buildingParts(
     e, n, u = frame.geodeticToEnu(corners[:, 1], corners[:, 0], roofEll[cornerOwner])
     roofPos = np.column_stack([e, n, u])
     roofTris = np.arange(roofPos.shape[0], dtype=np.uint32).reshape(-1, 3)
-    gx, gy = enuToGrid(scene.geometry, e, n)
+    gx, gy = scene.geometry.enuToGrid(e, n)
     roofs = MeshPart(roofPos, _upward(roofPos, roofTris), extent.uv(gx, gy))
 
     walls = _walls(frame, geoms, baseEll, roofEll, appearance.wallColors[indices])
@@ -264,7 +238,7 @@ def deckParts(
     if indices.size == 0:
         return MeshPart.empty(withUv=True), MeshPart.empty(withColors=True)
     d = scene.models.decks
-    box = _extentBoxPx(scene, extent)
+    box = extentBoxPx(scene, extent)
     clipped = []
     kept = []
     for k in indices:
@@ -278,8 +252,8 @@ def deckParts(
     shapes = np.array(clipped, dtype=object)
     px, pxOwner = _triCorners(shapes)
     topH = _deckTop(scene, d, indices, pxOwner, px)
-    gx, gy = _pixelToGrid(scene.geometry, px[:, 0], px[:, 1])
-    e, n = gridToEnu(scene.geometry, gx, gy)
+    gx, gy = scene.geometry.pixelToGrid(px[:, 0], px[:, 1])
+    e, n = scene.geometry.gridToEnu(gx, gy)
     topPos = np.column_stack([e, n, _columnUp(scene, e, n, topH)])
     bottomPos = np.column_stack([e, n, _columnUp(scene, e, n, topH - DECK_THICKNESS_m)])
     triIdx = np.arange(topPos.shape[0], dtype=np.uint32).reshape(-1, 3)
@@ -294,8 +268,8 @@ def deckParts(
     ends = np.concatenate([start, end])
     endOwner = np.concatenate([segOwner, segOwner])
     endTop = _deckTop(scene, d, indices, endOwner, ends)
-    sgx, sgy = _pixelToGrid(scene.geometry, ends[:, 0], ends[:, 1])
-    se, sn = gridToEnu(scene.geometry, sgx, sgy)
+    sgx, sgy = scene.geometry.pixelToGrid(ends[:, 0], ends[:, 1])
+    se, sn = scene.geometry.gridToEnu(sgx, sgy)
     upTop = _columnUp(scene, se, sn, endTop)
     upBottom = _columnUp(scene, se, sn, endTop - DECK_THICKNESS_m)
     m = segOwner.size
@@ -314,16 +288,12 @@ def deckParts(
     return tops, MeshPart.concatenate([underside, sides, _piers(scene, d, indices, extent)])
 
 
-def _extentBoxPx(scene: Scene, extent: TileExtent) -> Any:
+def extentBoxPx(scene: Scene, extent: TileExtent) -> Any:
     """The tile extent as a box in grid pixel coordinates."""
-    g = scene.geometry
-    s = g.gridSpacing_m
-    return shapely.box(
-        (extent.x0 + 0.5 * g.nCols * s) / s,
-        (extent.y0 + 0.5 * g.nRows * s) / s,
-        (extent.x1 + 0.5 * g.nCols * s) / s,
-        (extent.y1 + 0.5 * g.nRows * s) / s,
+    col, row = scene.geometry.gridToPixel(
+        np.array([extent.x0, extent.x1]), np.array([extent.y0, extent.y1])
     )
+    return shapely.box(col[0], row[0], col[1], row[1])
 
 
 def _onClipEdge(a: FloatArray, b: FloatArray, box: Any) -> npt.NDArray[np.bool_]:
@@ -362,8 +332,8 @@ def _piers(scene: Scene, d: Any, indices: npt.NDArray[np.int64], extent: TileExt
         points = shapely.line_interpolate_point(line, positions_m / length_m, normalized=True)
         px = np.column_stack([shapely.get_x(points), shapely.get_y(points)])
         topH = _deckTop(scene, d, np.array([k]), np.zeros(px.shape[0], dtype=np.int64), px)
-        gx, gy = _pixelToGrid(geometry, px[:, 0], px[:, 1])
-        e, n = gridToEnu(geometry, gx, gy)
+        gx, gy = geometry.pixelToGrid(px[:, 0], px[:, 1])
+        e, n = geometry.gridToEnu(gx, gy)
         lat, lon, _ = geometry.frame.columnPointAtHeight(e, n, 0.0)
         groundH = np.asarray(scene.models.ground.orthometricAt(lat, lon))
         keep = (topH - DECK_THICKNESS_m - groundH) > PIER_CLEARANCE_m
@@ -417,7 +387,7 @@ def renderTexture(
     gx = extent.x0 + t * (extent.x1 - extent.x0)
     gy = extent.y1 - t * (extent.y1 - extent.y0)
     gxm, gym = np.meshgrid(gx, gy)
-    e, n = gridToEnu(scene.geometry, gxm, gym)
+    e, n = scene.geometry.gridToEnu(gxm, gym)
     toGeo = _orthoToGeographic(scene.geometry.orthoCrs().to_wkt())
     lon, lat = (np.asarray(v) for v in toGeo.transform(e, n))
     return encodePng(_conceptTexture(scene, extent, size, lat, lon, appearance))
@@ -466,10 +436,7 @@ def _conceptTexture(
     gx, gy = np.meshgrid(
         extent.x0 + t * (extent.x1 - extent.x0), extent.y1 - t * (extent.y1 - extent.y0)
     )
-    g = scene.geometry
-    s = g.gridSpacing_m
-    col = np.clip(((gx + 0.5 * g.nCols * s) / s).astype(np.int64), 0, g.nCols - 1)
-    row = np.clip(((gy + 0.5 * g.nRows * s) / s).astype(np.int64), 0, g.nRows - 1)
+    col, row = scene.geometry.nodeIndex(gx, gy)
     classes = np.asarray(scene.layers["landClass"])[row, col]
     canopy = np.nan_to_num(np.asarray(scene.layers["canopyHeight_m"])[row, col], nan=0.0)
 
@@ -507,8 +474,8 @@ def _deckTop(
     """Orthometric deck-top height at pixel positions (mirrors the grid layers)."""
     deck = indices[owner]
     top = np.empty(owner.size)
-    gx, gy = _pixelToGrid(scene.geometry, px[:, 0], px[:, 1])
-    e, n = gridToEnu(scene.geometry, gx, gy)
+    gx, gy = scene.geometry.pixelToGrid(px[:, 0], px[:, 1])
+    e, n = scene.geometry.gridToEnu(gx, gy)
     lat, lon, _ = scene.geometry.frame.columnPointAtHeight(e, n, 0.0)
     groundAt = scene.models.ground.orthometricAt(lat, lon)
     for k in np.unique(deck):

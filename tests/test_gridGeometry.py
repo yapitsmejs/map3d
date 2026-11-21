@@ -85,6 +85,19 @@ def testPixelTransforms_nodeCentersAndRoundTrips():
     np.testing.assert_allclose(geom.gridToEnu(gx_m, gy_m), (e_m, n_m), atol=1e-12)
 
 
+def testGridEnuRoundTrip_rotated():
+    geom = _geom(axes=_heading(33.0))
+    gx_m, gy_m = np.array([10.0, -200.0]), np.array([30.0, 400.0])
+    np.testing.assert_allclose(geom.enuToGrid(*geom.gridToEnu(gx_m, gy_m)), (gx_m, gy_m), atol=1e-9)
+
+
+def testNodeIndex_findsTheCellAndClipsToTheGrid():
+    geom = _geom(lx=10.0, ly=7.0, s=1.0)  #: x in [-5, 5], y in [-3.5, 3.5]
+    col, row = geom.nodeIndex(np.array([-4.9, 0.2, 99.0]), np.array([-3.4, 0.0, -99.0]))
+    assert col.tolist() == [0, 5, geom.nCols - 1]
+    assert row.tolist() == [0, 3, 0]
+
+
 def testEnuToGrid_upTermOnlyAddsTheAxesUpComponent():
     geom = _geom()
     gx_m, gy_m = geom.enuToGrid(np.array([1.0]), np.array([2.0]), np.array([100.0]))
