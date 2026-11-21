@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,6 +57,7 @@ from map3d.layers._vectors import (
 )
 from map3d.layers.columns import ChunkColumns
 from map3d.layers.groundFix import GroundCorrection
+from map3d.layers.lofts import Loft, findLofts
 from map3d.layers.pixels import burnChunk, chunkBox, rasterizePixels, toPixelGeometries
 from map3d.layers.provenance import HeightSource
 from map3d.layers.roofs import Roof, RoofShape, makeRoof, roofShapeCodes
@@ -112,6 +114,7 @@ class BuildingSet:
         roofMaterial: Mapped roof material (e.g. ``roof_tiles``), ``None`` if unmapped.
         anchorOrthometric_m: Median ground under the footprint, which heights
             are measured from (MSL); the base if not given.
+        numFloors: Mapped storey count (NaN where unknown), for facade floor bands.
         groundCorrection: Ground cap applied under buildings, if any.
     """
 
@@ -132,6 +135,7 @@ class BuildingSet:
     facadeMaterial: npt.NDArray[np.object_]
     roofMaterial: npt.NDArray[np.object_]
     anchorOrthometric_m: FloatArray | None = None
+    numFloors: FloatArray | None = None
     groundCorrection: GroundCorrection | None = None
 
     def __len__(self) -> int:
@@ -147,6 +151,27 @@ class BuildingSet:
             self.minHeight_m > 0.0, anchor + self.minHeight_m, self.baseOrthometric_m
         )
         return result
+
+    @property
+    def floorHeight_m(self) -> FloatArray:
+        """Storey height for facade floor bands: height / mapped storeys, else NaN."""
+        floors = np.full(len(self), np.nan) if self.numFloors is None else self.numFloors
+        with np.errstate(divide="ignore", invalid="ignore"):
+            perFloor = self.height_m / floors
+        result: FloatArray = np.where(
+            np.isfinite(perFloor) & (floors > 0), np.clip(perFloor, 2.4, 6.0), np.nan
+        )
+        return result
+
+    @functools.cached_property
+    def lofts(self) -> list[Loft]:
+        """Stacks of concentric round parts that widen upward (:mod:`map3d.layers.lofts`)."""
+        return findLofts(self.geometries, self.bottomOrthometric_m, self.roofOrthometric_m)
+
+    @functools.cached_property
+    def loftOf(self) -> dict[int, int]:
+        """Building index -> index of the loft it belongs to."""
+        return {i: k for k, loft in enumerate(self.lofts) for i in (*loft.members, *loft.absorbed)}
 
     @property
     def eaveOrthometric_m(self) -> FloatArray:
@@ -260,6 +285,7 @@ def loadBuildings(
         baseOrthometric_m=base[keep],
         roofOrthometric_m=roof[keep],
         anchorOrthometric_m=anchor[keep],
+        numFloors=fused.floors[keep],
         pixelGeometries=pixel[keep],
         minHeight_m=minHeight[keep],
         roofShape=fused.roofShape[keep],

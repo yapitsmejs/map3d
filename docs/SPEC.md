@@ -263,6 +263,14 @@ and trees over them draw as objects, not as the surface.
     tile. A mapped `roof:material` (tiles, grass, metal, glass, concrete, ...)
     without a roof colour gives a typical roof colour, ahead of imagery. The
     tileset records `facadeStyles` counts.
+  - **Curved walls and storeys:** each outline is walled as a chain; corners
+    sharper than 30° split it into runs, and within a run neighbouring wall
+    quads share vertices (curved facades shade smoothly) and window bays run
+    on continuously, a whole number per run. Floor bands use the mapped storey
+    height (height / `num_floors`, 2.4–6 m) where known, else about 3 m, and
+    count up from the wall bottom so rows stay level under sloping tops.
+  - **Lofted structures** (§8) are drawn as one smooth surface with a steel
+    lattice facade texture.
   - **Procedural facades:** a shared repeating PNG supplies framed and divided
     windows, sills and floor bands. UV repetition uses approximately 3 m window
     bays and floors derived from building height. These are illustrative, not
@@ -392,6 +400,17 @@ building's height, if lower). Walls still reach down to the **base**, the
 lowest ground on the outline, so the downhill side stands on a plinth. Raised
 parts start at anchor + min height. Around Marina Bay and Fort Canning Hill
 this took the number of buildings with ground above their roof from 51 to 0.
+
+**Lofted structures** (`map3d.layers.lofts`): OSM maps funnel-shaped
+structures such as the Supertrees at Gardens by the Bay as stacked circular
+parts (a trunk, then rings that widen with height). A cluster of round parts
+(isoperimetric quotient ≥ 0.85) sharing a centre (within 2 m) whose chain by
+top height has gaps of at most 6 m, never narrows and ends at least 20 % wider
+than it starts is drawn as one loft: a smooth surface through the parts'
+outlines (36 rays from the centre), capped on top (and below, if raised).
+Parts thinner than 1 m (planters) stay separate; other cluster parts are
+absorbed into the loft. Narrowing stacks (set-back towers) keep their steps.
+Grid layers are unchanged. Marina Bay: 12 lofts, 10 of them Supertrees.
 
 **Attributes of dropped duplicates:** when fusion drops a feature as a
 duplicate and it is the same building as the accepted feature it overlaps

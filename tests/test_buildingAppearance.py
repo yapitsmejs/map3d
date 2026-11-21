@@ -155,7 +155,7 @@ def testFacadeStyles_glassMetalAndLowRaisedParts(scene: Scene):
     assert list(facadeStyles(styled)) == [FacadeStyle.GLASS, FacadeStyle.PLAIN, FacadeStyle.PLAIN]
     assert list(facadeStyles(b)) == [FacadeStyle.WINDOWS] * 3
     appearance = BuildingAppearance.neutral(b).withMappedColors(styled)
-    assert appearance.styleCounts() == {"windows": 0, "glass": 1, "plain": 2}
+    assert appearance.styleCounts() == {"windows": 0, "glass": 1, "plain": 2, "lattice": 0}
 
 
 def testRoofMaterial_givesATypicalColourUnlessAColourIsMapped(scene: Scene):
@@ -176,12 +176,13 @@ def testRoofMaterial_givesATypicalColourUnlessAColourIsMapped(scene: Scene):
     assert appearance.mappedCount == 2
 
 
-def testFacadeTextures_threeDistinctRepeatingTiles():
+def testFacadeTextures_distinctRepeatingTiles():
     from map3d.mesh.buildingAppearance import FacadeStyle, facadeTextureFor
 
     tiles = [decodePng(facadeTextureFor(s)) for s in FacadeStyle]
     assert all(t.shape == (96, 96, 3) for t in tiles)
-    windows, glass, plain = tiles
+    windows, glass, plain, lattice = tiles
     assert glass[..., 2].mean() > glass[..., 0].mean()  # glass is bluish
     assert plain.std() < windows.std() and plain.std() < glass.std()  # plain is plain
     np.testing.assert_array_equal(windows, decodePng(facadeTexture()))
+    assert lattice.min() < 130 and lattice.max() > 220  # dark struts on a light ground

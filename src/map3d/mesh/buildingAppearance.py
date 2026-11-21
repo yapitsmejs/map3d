@@ -21,7 +21,8 @@ Walls use one of three repeatable, illustrative facade tiles
 (:class:`FacadeStyle`): punched windows and floor bands (default), a glass
 curtain wall (mapped ``facade_material=glass``), or plain panels (mapped
 ``metal``, and raised parts under :data:`PLAIN_RAISED_HEIGHT_m` tall such as
-canopies and link bridges, which have no storeys to show).
+canopies and link bridges, which have no storeys to show). Lofted
+structures (:mod:`map3d.layers.lofts`) get a steel lattice.
 """
 
 from __future__ import annotations
@@ -58,7 +59,6 @@ __all__ = [
     "PLAIN_RAISED_HEIGHT_m",
     "facadeTexture",
     "facadeTextureFor",
-    "facadeUv",
     "parseColor",
 ]
 
@@ -288,6 +288,7 @@ class FacadeStyle(IntEnum):
     WINDOWS = 0
     GLASS = 1
     PLAIN = 2
+    LATTICE = 3  # lofted structures (a steel frame, e.g. the Supertrees)
 
 
 def facadeStyles(buildings: BuildingSet) -> npt.NDArray[np.uint8]:
@@ -305,6 +306,8 @@ def facadeStyles(buildings: BuildingSet) -> npt.NDArray[np.uint8]:
     styles[material == "metal"] = FacadeStyle.PLAIN
     styles[(buildings.minHeight_m > 0.0) & (partHeight < PLAIN_RAISED_HEIGHT_m)] = FacadeStyle.PLAIN
     styles[material == "glass"] = FacadeStyle.GLASS
+    for loft in buildings.lofts:
+        styles[list(loft.members)] = FacadeStyle.LATTICE
     return styles
 
 
@@ -419,37 +422,6 @@ def _coordinatedColors(rgb: FloatArray, featureId: str) -> tuple[ColorArray, Col
     )
 
 
-def facadeUv(
-    length_m: FloatArray, height_m: FloatArray, heightEnd_m: FloatArray | None = None
-) -> npt.NDArray[np.float32]:
-    """UVs for wall quads, repeating one window bay per approximately 3 metres.
-
-    Floors are counted up from the bottom edge, so where a wall's top slopes
-    (a gable end) the window rows stay level and the top cuts through them.
-
-    Args:
-        length_m: Horizontal facade-segment lengths, shape ``(n,)``.
-        height_m: Wall heights (at the segment start), shape ``(n,)``.
-        heightEnd_m: Wall heights at the segment end, if the top slopes.
-
-    Returns:
-        ``(n, 4, 2)`` UVs ordered bottom-start, bottom-end, top-end, top-start.
-    """
-    h0 = np.asarray(height_m, dtype=np.float64)
-    h1 = h0 if heightEnd_m is None else np.asarray(heightEnd_m, dtype=np.float64)
-    tallest = np.maximum(np.maximum(h0, h1), 1e-9)
-    bays = np.maximum(1.0, np.rint(np.asarray(length_m) / FACADE_BAY_WIDTH_m))
-    floors = np.maximum(1.0, np.rint(tallest / FACADE_FLOOR_HEIGHT_m))
-    uv = np.zeros((bays.size, 4, 2), dtype=np.float32)
-    uv[:, 1, 0] = bays
-    uv[:, 2, 0] = bays
-    uv[:, 0, 1] = floors
-    uv[:, 1, 1] = floors
-    uv[:, 2, 1] = floors * (1.0 - h1 / tallest)
-    uv[:, 3, 1] = floors * (1.0 - h0 / tallest)
-    return uv
-
-
 @functools.lru_cache(maxsize=1)
 def facadeTexture() -> bytes:
     """Return a transparent-free PNG containing one illustrative facade bay.
@@ -475,6 +447,7 @@ def facadeTextureFor(style: int) -> bytes:
         FacadeStyle.WINDOWS: facadeTexture,
         FacadeStyle.GLASS: _glassTexture,
         FacadeStyle.PLAIN: _plainTexture,
+        FacadeStyle.LATTICE: _latticeTexture,
     }[FacadeStyle(style)]()
 
 
@@ -498,4 +471,16 @@ def _plainTexture() -> bytes:
     size = _FACADE_TEXTURE_SIZE
     image = np.full((size, size, 3), 246, dtype=np.uint8)
     image[:, :1] = image[:1] = 228  # panel joints
+    return encodePng(image)
+
+
+@functools.lru_cache(maxsize=1)
+def _latticeTexture() -> bytes:
+    """One diamond of a steel lattice (two crossing diagonals and a ring band)."""
+    size = _FACADE_TEXTURE_SIZE
+    image = np.full((size, size, 3), 232, dtype=np.uint8)
+    yy, xx = np.mgrid[0:size, 0:size]
+    onDiagonal = (np.abs(xx - yy) < 3) | (np.abs(xx + yy - (size - 1)) < 3)
+    image[onDiagonal] = 120
+    image[:3] = image[-3:] = 150  # horizontal rings at the tile edges
     return encodePng(image)
