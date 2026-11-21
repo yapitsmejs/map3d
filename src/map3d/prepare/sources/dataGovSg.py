@@ -40,7 +40,6 @@ __all__ = [
     "adaptMasterPlanRail",
     "adaptUraBuildings",
     "downloadDataset",
-    "intersectsSingapore",
     "joinStreetCodes",
 ]
 
@@ -57,11 +56,6 @@ DATASETS: dict[str, tuple[str, bool]] = {
 }
 
 _EXCLUDED_STRUCTURES = {"Vehicular Tunnel", "Vehicular Underpass"}
-
-
-def intersectsSingapore(bounds: Bounds) -> bool:
-    """Whether a lon/lat box overlaps Singapore."""
-    return bool(shapely.intersects(shapely.box(*bounds), shapely.box(*SINGAPORE_BOUNDS)))
 
 
 def downloadDataset(

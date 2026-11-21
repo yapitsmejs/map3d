@@ -22,6 +22,7 @@ from typing import Any
 from rasterio.warp import transform_bounds
 
 from map3d.pack.manifest import Bounds
+from map3d.prepare import DEFAULT_BUILDINGS_YEAR
 from map3d.prepare.http import HttpSession
 from map3d.prepare.rasterClip import clipRaster
 
@@ -76,7 +77,7 @@ def tilesIntersecting(manifest: dict[str, Any], bounds: Bounds, epsg: int) -> li
 
 
 def fetchGoogleBuildings(
-    session: HttpSession, bounds: Bounds, workDir: Path, year: int = 2023
+    session: HttpSession, bounds: Bounds, workDir: Path, year: int = DEFAULT_BUILDINGS_YEAR
 ) -> list[Path]:
     """Clip the building-height band of every tile covering ``bounds``.
 

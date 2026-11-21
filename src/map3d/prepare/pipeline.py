@@ -15,14 +15,22 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from map3d.pack.ingest import ingestFiles
-from map3d.pack.manifest import MANIFEST_NAME, Bounds, Manifest, validateBounds
+from map3d.pack.manifest import (
+    MANIFEST_NAME,
+    Bounds,
+    Manifest,
+    boundsIntersect,
+    validateBounds,
+)
 from map3d.pack.registry import ROLES, getSource
+from map3d.prepare import DEFAULT_BUILDINGS_YEAR, defaultCacheDir
 from map3d.prepare.http import HttpSession
 from map3d.prepare.sources import dataGovSg, googleBuildings, imagery, overture, rasters
 
@@ -36,7 +44,7 @@ class PrepareContext:
     bounds: Bounds
     cacheDir: Path
     session: HttpSession
-    year: int = 2023
+    year: int = DEFAULT_BUILDINGS_YEAR
     _s3: Any = field(default=None, repr=False)
     _release: str | None = field(default=None, repr=False)
 
@@ -155,7 +163,7 @@ def preparePack(
     sources: Sequence[str] | None = None,
     cacheDir: str | os.PathLike[str] | None = None,
     caBundle: str | os.PathLike[str] | None = None,
-    year: int = 2023,
+    year: int = DEFAULT_BUILDINGS_YEAR,
     session: HttpSession | None = None,
     fetchers: dict[str, Fetcher] | None = None,
     log: Callable[[str], None] = lambda message: None,
@@ -190,17 +198,15 @@ def preparePack(
             )
         getSource(sourceId)
     pack = Path(packDir)
-    cache = Path(cacheDir) if cacheDir is not None else pack.with_name(pack.name + ".cache")
-    ownSession = session is None
-    http = (
-        session
-        if session is not None
-        else HttpSession(caBundle, minInterval_s=dataGovSg.MIN_INTERVAL_s)
-    )
-    ctx = PrepareContext(bounds, cache, http, year)
+    cache = Path(cacheDir) if cacheDir is not None else defaultCacheDir(pack)
     report = PrepareReport()
     today = datetime.now(UTC).date().isoformat()
-    try:
+    with ExitStack() as stack:
+        if session is None:
+            session = stack.enter_context(
+                HttpSession(caBundle, minInterval_s=dataGovSg.MIN_INTERVAL_s)
+            )
+        ctx = PrepareContext(bounds, cache, session, year)
         for sourceId in wanted:
             _runOne(sourceId, table, ctx, pack, bounds, today, report, log)
         if (
@@ -210,9 +216,6 @@ def preparePack(
         ):
             log("no ground source ingested; falling back to Copernicus GLO-30")
             _runOne("copernicusGlo30", table, ctx, pack, bounds, today, report, log)
-    finally:
-        if ownSession:
-            http.close()
     for role, spec in ROLES.items():
         if spec.required and not _hasRole(pack, role):
             raise RuntimeError(f"pack is missing required role {role!r}; report: {report}")
@@ -229,7 +232,7 @@ def _runOne(
     report: PrepareReport,
     log: Callable[[str], None],
 ) -> None:
-    if sourceId in _SINGAPORE_ONLY and not dataGovSg.intersectsSingapore(bounds):
+    if sourceId in _SINGAPORE_ONLY and not boundsIntersect(bounds, dataGovSg.SINGAPORE_BOUNDS):
         report.skipped[sourceId] = "outside Singapore"
         return
     log(f"{sourceId}: fetching")

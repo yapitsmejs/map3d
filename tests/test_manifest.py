@@ -13,6 +13,7 @@ from map3d.pack.manifest import (
     Manifest,
     PackFile,
     SourceEntry,
+    boundsIntersect,
     validateBounds,
 )
 from map3d.pack.registry import getSource
@@ -119,3 +120,10 @@ def testAttribution_unknownAccessedDate():
     manifest = Manifest.new(BOUNDS)
     manifest.sources["sgHdbBuildings"] = SourceEntry.fromSpec(getSource("sgHdbBuildings"))
     assert "accessed on (unknown date)" in manifest.attributionMarkdown()
+
+
+def testBoundsIntersect_closedBoxes():
+    singapore = (103.55, 1.13, 104.15, 1.48)
+    assert boundsIntersect(BOUNDS, singapore)
+    assert not boundsIntersect((100.0, 5.0, 101.0, 6.0), singapore)
+    assert boundsIntersect((104.15, 1.0, 105.0, 1.13), singapore)  # touching corner

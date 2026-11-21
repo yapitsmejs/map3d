@@ -22,6 +22,7 @@ __all__ = [
     "Manifest",
     "PackFile",
     "SourceEntry",
+    "boundsIntersect",
     "fileSha256",
     "validateBounds",
 ]
@@ -74,6 +75,19 @@ def validateBounds(bounds: Sequence[float], allowDegenerate: bool = False) -> Bo
     if not ok:
         raise ValueError(f"invalid bounds (minLon, minLat, maxLon, maxLat): {tuple(bounds)!r}")
     return (minLon, minLat, maxLon, maxLat)
+
+
+def boundsIntersect(a: Bounds, b: Bounds) -> bool:
+    """Whether two lon/lat boxes overlap (touching edges count).
+
+    Args:
+        a: ``(minLon, minLat, maxLon, maxLat)``.
+        b: Another box.
+
+    Returns:
+        ``True`` if the closed boxes share at least one point.
+    """
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
 
 @dataclass

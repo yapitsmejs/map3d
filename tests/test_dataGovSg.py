@@ -119,11 +119,6 @@ def testAdaptLtaStructures_excludesTunnelsAndUnderpasses(tmp_path: Path):
     assert table.column("structureType").to_pylist() == ["Flyover", "Vehicular Bridge"]
 
 
-def testIntersectsSingapore():
-    assert dgs.intersectsSingapore(BOUNDS)
-    assert not dgs.intersectsSingapore((100.0, 5.0, 101.0, 6.0))
-
-
 def testDownloadDataset_pollsAndCaches(tmp_path: Path):
     calls: list[str] = []
 
